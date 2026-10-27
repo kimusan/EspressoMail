@@ -17,6 +17,7 @@ from espressomail.protocols import (
     parse_rfc5322_bytes,
     validate_sieve_script,
 )
+from espressomail.protocols.imap_client import IMAPClient
 
 
 class TestProtocolsAndCrypto(unittest.TestCase):
@@ -286,6 +287,52 @@ class TestProtocolsAndCrypto(unittest.TestCase):
         sent_msgs = store.list_messages(account_id="*", folder="Sent")
         self.assertEqual(len(sent_msgs), 1)
         store.close()
+
+    def test_imap_fetch_recent_messages_with_before_uid(self) -> None:
+        """Verify fetch_recent_messages issues SEARCH UID 1:{before_uid - 1} when before_uid is given."""
+        searched_criteria: list[str] = []
+
+        raw_rfc822 = (
+            b"From: Older Message <older@example.com>\r\n"
+            b"To: Kim Schulz <kim@schulz.dk>\r\n"
+            b"Subject: Older Email 99\r\n"
+            b"Date: Mon, 12 Jan 2026 10:00:00 +0000\r\n"
+            b"Message-ID: <older-99@example.com>\r\n"
+            b"\r\n"
+            b"Body of older email 99\r\n"
+        )
+
+        class MockIMAP:
+            def select(self, mailbox: str, readonly: bool = True) -> tuple[str, list[bytes]]:
+                return ("OK", [b"10"])
+
+            def uid(self, command: str, *args: str) -> tuple[str, list[object]]:
+                if command == "SEARCH":
+                    criteria = args[-1]
+                    searched_criteria.append(criteria)
+                    # Return UIDs 90 through 99
+                    return ("OK", [b"90 91 92 98 99"])
+                if command == "FETCH":
+                    return (
+                        "OK",
+                        [
+                            (
+                                b"1 (UID 99 FLAGS () BODY[] {" + str(len(raw_rfc822)).encode() + b"}",
+                                raw_rfc822,
+                            ),
+                            b")",
+                        ],
+                    )
+                return ("OK", [])
+
+        client = IMAPClient(self.account)
+        client._conn = MockIMAP()  # type: ignore[assignment]
+
+        # Fetch with before_uid=100
+        msgs = client.fetch_recent_messages(folder="INBOX", limit=2, before_uid=100)
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("UID 1:99", searched_criteria)
+        self.assertEqual(msgs[-1].subject, "Older Email 99")
 
 
 if __name__ == "__main__":

@@ -436,12 +436,36 @@ class IMAPClient:
         return False
 
     def list_remote_folders(self) -> list[Folder]:
-        """Discover all selectable remote IMAP folders on the server."""
+        """Discover all remote IMAP folders on the server."""
         if self._conn is None:
             raise RuntimeError("IMAPClient is not connected")
-        status, data = self._conn.list()
-        if status != "OK" or not data:
-            return []
+
+        data: list[Any] = []
+        try:
+            status, res = self._conn.list()
+            if status == "OK" and res:
+                data.extend(res)
+        except Exception:
+            pass
+
+        # If standard list returned nothing, fallback to explicit directory/pattern queries
+        if not data:
+            for pattern in ('"" "*"', '"" "%"', '"*"', '"%"'):
+                try:
+                    status, res = self._conn.list('""', pattern.strip('"'))
+                    if status == "OK" and res:
+                        data.extend(res)
+                        break
+                except Exception:
+                    continue
+
+        # Also query subscribed folders (lsub) to ensure no user folders are missed
+        try:
+            l_status, l_res = self._conn.lsub()
+            if l_status == "OK" and l_res:
+                data.extend(l_res)
+        except Exception:
+            pass
 
         folders: list[Folder] = []
         seen_names: set[str] = set()
@@ -453,9 +477,7 @@ class IMAPClient:
             flags_raw, delim, raw_name = parsed
             flags_lower = flags_raw.lower()
 
-            # Skip non-selectable hierarchy containers
-            if "\\noselect" in flags_lower or "\\nonexistent" in flags_lower:
-                continue
+            is_noselect = "\\noselect" in flags_lower or "\\nonexistent" in flags_lower
 
             # Normalize INBOX capitalization
             name = "INBOX" if raw_name.upper() == "INBOX" else raw_name
@@ -477,20 +499,31 @@ class IMAPClient:
                     name=name,
                     display_name=display or name,
                     folder_type=ftype,
+                    selectable=not is_noselect,
                 )
             )
         return folders
 
-    def fetch_recent_messages(self, folder: str = "INBOX", limit: int = 50) -> list[EmailMessage]:
-        """Fetch and parse the most recent messages from an IMAP mailbox folder."""
+    def fetch_recent_messages(
+        self,
+        folder: str = "INBOX",
+        limit: int = 50,
+        before_uid: int | None = None,
+    ) -> list[EmailMessage]:
+        """Fetch and parse messages from an IMAP mailbox folder, optionally older than before_uid."""
         if self._conn is None:
             raise RuntimeError("IMAPClient is not connected")
         if not self._select_mailbox(folder, readonly=True):
             return []
 
-        status, search_data = self._conn.uid("SEARCH", "ALL")
+        search_query = (
+            f"UID 1:{before_uid - 1}"
+            if (before_uid is not None and before_uid > 1)
+            else "ALL"
+        )
+        status, search_data = self._conn.uid("SEARCH", search_query)
         if status != "OK" or not search_data:
-            status, search_data = self._conn.uid("SEARCH", None, "ALL")
+            status, search_data = self._conn.uid("SEARCH", None, search_query)
         if status != "OK" or not search_data or not search_data[0]:
             return []
 
@@ -504,7 +537,15 @@ class IMAPClient:
         if not uids:
             return []
 
-        recent_uids = list(reversed(uids[-limit:]))
+        if before_uid is not None:
+            candidate_uids = [u for u in uids if u < before_uid]
+        else:
+            candidate_uids = uids
+
+        if not candidate_uids:
+            return []
+
+        recent_uids = list(reversed(candidate_uids[-limit:]))
         messages: list[EmailMessage] = []
 
         # Fetch in batches of 10 UIDs to minimize round-trip latency while keeping memory bounded
@@ -589,23 +630,28 @@ class IMAPClient:
         store: LocalStore,
         folders: Sequence[str] | None = None,
         limit_per_folder: int = 50,
+        remote_folders: Sequence[Folder] | None = None,
     ) -> int:
         """Discover remote IMAP folders and synchronize recent messages into LocalStore."""
-        remote_folders: list[Folder] = []
-        try:
-            remote_folders = self.list_remote_folders()
-        except Exception:
-            remote_folders = []
+        if remote_folders is None:
+            try:
+                discovered = self.list_remote_folders()
+            except Exception:
+                discovered = []
+        else:
+            discovered = list(remote_folders)
 
-        if remote_folders:
-            store.sync_remote_folders(self.account.id, remote_folders)
+        if discovered:
+            store.sync_remote_folders(self.account.id, discovered)
+            store.refresh_folder_counts()
 
         if folders is not None:
             target_folders = list(folders)
-        elif remote_folders:
-            # Put INBOX first, then top-level folders, then nested archive subfolders
+        elif discovered:
+            # Sync selectable mailboxes with INBOX prioritized
+            selectable_folders = [f for f in discovered if f.selectable]
             inbox_first = sorted(
-                remote_folders,
+                selectable_folders,
                 key=lambda f: (
                     0 if f.name.upper() == "INBOX" else 1,
                     len(f.path_parts),

@@ -29,6 +29,9 @@ from espresso.beans import (
     StatusSection,
     ToastLevel,
     ToastManager,
+    Tree,
+    TreeNode,
+    TreeNodeSelectMsg,
     Viewport,
 )
 from espresso.crema import (
@@ -132,6 +135,16 @@ class SyncCompletedMsg(Msg):
     summary: str
 
 
+@dataclass(frozen=True)
+class MoreMessagesFetchedMsg(Msg):
+    """Emitted when fetching older messages from server completes."""
+
+    account_id: str
+    folder: str
+    fetched_count: int
+    message: str
+
+
 class EspressoMailApp(Model):
     """Root TEA Model orchestrating the 3-pane layout, splash, onboarding, menus, and modals."""
 
@@ -172,6 +185,7 @@ class EspressoMailApp(Model):
             self.theme,
             allow_cancel=False,
             credential_validator=self.credential_validator,
+            store=self.store,
         )
 
         # Active 3-pane state
@@ -180,8 +194,7 @@ class EspressoMailApp(Model):
         self.show_raw_headers = False
         self.status_message = "Ready. Press ? for shortcuts, / to search, c to compose."
 
-        self.folder_rows: list[FolderTreeRow] = []
-        self.folder_cursor = 0
+        self.folder_tree: Tree = Tree(nodes=[])
         self.folder_scroll = 0
         self.expanded_folders: set[str] = self._load_expanded_folders()
         self.active_account_id = "*"
@@ -210,6 +223,51 @@ class EspressoMailApp(Model):
         if not self.show_splash and not self.store.list_accounts():
             self.show_onboarding = True
 
+    @property
+    def folder_rows(self) -> list[FolderTreeRow]:
+        visible = self.folder_tree._flatten_visible()
+        rows: list[FolderTreeRow] = []
+        for node, depth, prefix, parent in visible:
+            r: FolderTreeRow | None = node.value
+            if r is None:
+                continue
+            if r.is_header or r.account_id == "*":
+                row_depth = 0
+            else:
+                row_depth = max(0, depth - 1)
+
+            rows.append(
+                FolderTreeRow(
+                    account_id=r.account_id,
+                    folder_name=r.folder_name,
+                    label=r.label,
+                    icon=r.icon,
+                    unread_count=r.unread_count,
+                    total_count=r.total_count,
+                    is_header=r.is_header,
+                    badge_color=r.badge_color,
+                    depth=row_depth,
+                    has_children=not node.is_leaf,
+                    is_expanded=node.expanded,
+                    is_last_sibling=False,
+                    tree_key=r.tree_key,
+                    selectable_mailbox=r.selectable_mailbox,
+                )
+            )
+        return rows
+
+    @folder_rows.setter
+    def folder_rows(self, value: list[FolderTreeRow]) -> None:
+        pass
+
+    @property
+    def folder_cursor(self) -> int:
+        return self.folder_tree.cursor
+
+    @folder_cursor.setter
+    def folder_cursor(self, val: int) -> None:
+        self.folder_tree.cursor = max(0, val)
+
     def _load_expanded_folders(self) -> set[str]:
         """Load persisted expanded folder tree keys from the SQLite settings table."""
         raw = self.store.get_setting("expanded_folders", "[]")
@@ -223,6 +281,18 @@ class EspressoMailApp(Model):
 
     def _save_expanded_folders(self) -> None:
         """Persist expanded folder tree keys to the SQLite settings table across sessions."""
+        expanded: set[str] = set()
+
+        def _collect(nodes: list[TreeNode]) -> None:
+            for n in nodes:
+                r: FolderTreeRow | None = n.value
+                if n.expanded and r is not None and r.tree_key:
+                    expanded.add(r.tree_key)
+                if n.children:
+                    _collect(n.children)
+
+        _collect(self.folder_tree.nodes)
+        self.expanded_folders = expanded
         try:
             self.store.set_setting(
                 "expanded_folders",
@@ -250,6 +320,7 @@ class EspressoMailApp(Model):
             PaletteItem("expand_list", "View: Widen Message List", "Move splitter right to widen message list", "]", "View"),
             PaletteItem("reset_splitter", "View: Reset Splitter Width", "Reset pane widths to responsive defaults", "", "View"),
             PaletteItem("save_attachments", "Mail: Download Attachments", "Save attachments to downloads directory", "w", "Mail"),
+            PaletteItem("fetch_more", "Mail: Fetch Older Messages", "Download earlier emails from IMAP folder", "M", "Mail"),
             PaletteItem("address_book", "Tools: Local Address Book", "Manage contacts and PGP fingerprints", "B", "Tools"),
             PaletteItem("sieve_filters", "Tools: ManageSieve Filter Rules", "Configure RFC 5228 Sieve scripts", "F", "Tools"),
             PaletteItem("pgp_manager", "Security: GPG/PGP Keyring Manager", "Inspect keys, sign, verify, and decrypt", "G", "Security"),
@@ -288,10 +359,10 @@ class EspressoMailApp(Model):
         self._rebuild_message_rows()
         self._update_reader_viewport(force=True)
 
-    def _build_account_folder_tree_rows(
+    def _build_account_folder_tree_nodes(
         self, account_id: str, folders: list[Folder]
-    ) -> list[FolderTreeRow]:
-        """Build a hierarchical, collapsible folder tree for a single account."""
+    ) -> list[TreeNode]:
+        """Build a hierarchical, collapsible tree of TreeNodes for a single account."""
         roots: dict[str, _FolderTreeNode] = {}
 
         for f in folders:
@@ -347,9 +418,7 @@ class EspressoMailApp(Model):
                 return (1, 0, "inbox")
             return (2, 0, seg.lower())
 
-        out_rows: list[FolderTreeRow] = []
-
-        def _emit(node: _FolderTreeNode, depth: int, is_last: bool) -> None:
+        def _to_tree_node(node: _FolderTreeNode, depth: int) -> TreeNode:
             tree_key = f"{account_id}:{'/'.join(node.path_parts)}"
             has_children = bool(node.children)
             is_expanded = tree_key in self.expanded_folders
@@ -383,52 +452,46 @@ class EspressoMailApp(Model):
                 icon = ("📂" if is_expanded else "📁") if has_children else "📁"
 
             folder_name = node.folder.name if node.folder is not None else "/".join(node.path_parts)
-            selectable_mailbox = node.folder is not None
+            selectable_mailbox = node.folder is not None and node.folder.selectable
 
-            out_rows.append(
-                FolderTreeRow(
-                    account_id=account_id,
-                    folder_name=folder_name,
-                    label=label,
-                    icon=icon,
-                    unread_count=u_cnt,
-                    total_count=t_cnt,
-                    depth=depth,
-                    has_children=has_children,
-                    is_expanded=is_expanded,
-                    is_last_sibling=is_last,
-                    tree_key=tree_key,
-                    selectable_mailbox=selectable_mailbox,
-                )
+            child_nodes: list[TreeNode] = []
+            if has_children:
+                sorted_children = sorted(node.children.values(), key=_child_sort_key)
+                for child in sorted_children:
+                    child_nodes.append(_to_tree_node(child, depth + 1))
+
+            row = FolderTreeRow(
+                account_id=account_id,
+                folder_name=folder_name,
+                label=label,
+                icon=icon,
+                unread_count=u_cnt,
+                total_count=t_cnt,
+                depth=depth,
+                has_children=has_children,
+                is_expanded=is_expanded,
+                is_last_sibling=False,
+                tree_key=tree_key,
+                selectable_mailbox=selectable_mailbox,
             )
 
-            if has_children and is_expanded:
-                sorted_children = sorted(node.children.values(), key=_child_sort_key)
-                for idx, child in enumerate(sorted_children):
-                    _emit(child, depth + 1, idx == len(sorted_children) - 1)
+            return TreeNode(
+                label=label,
+                value=row,
+                children=child_nodes,
+                expanded=is_expanded,
+            )
 
         sorted_roots = sorted(
             roots.values(),
             key=lambda n: (type_order.get(_node_folder_type(n, 0), 7), n.segment.lower()),
         )
-        for idx, root_node in enumerate(sorted_roots):
-            _emit(root_node, 0, idx == len(sorted_roots) - 1)
-
-        return out_rows
+        return [_to_tree_node(r, 0) for r in sorted_roots]
 
     def _rebuild_folder_rows(self) -> None:
-        rows: list[FolderTreeRow] = []
+        top_nodes: list[TreeNode] = []
         unified_counts = self.store.get_unified_counts()
 
-        rows.append(
-            FolderTreeRow(
-                account_id="*",
-                folder_name="",
-                label="UNIFIED MAILBOXES",
-                icon="🌐",
-                is_header=True,
-            )
-        )
         unified_defs = [
             ("INBOX", "Unified Inbox", "📥"),
             ("Starred", "All Starred", "⭐"),
@@ -437,67 +500,103 @@ class EspressoMailApp(Model):
             ("Archive", "All Archive", "📦"),
             ("Trash", "All Trash", "🗑️"),
         ]
+        unified_children: list[TreeNode] = []
         for fname, label, icon in unified_defs:
             u_cnt, t_cnt = unified_counts.get(fname, (0, 0))
-            rows.append(
-                FolderTreeRow(
-                    account_id="*",
-                    folder_name=fname,
+            unified_children.append(
+                TreeNode(
                     label=label,
-                    icon=icon,
-                    unread_count=u_cnt,
-                    total_count=t_cnt,
+                    value=FolderTreeRow(
+                        account_id="*",
+                        folder_name=fname,
+                        label=label,
+                        icon=icon,
+                        unread_count=u_cnt,
+                        total_count=t_cnt,
+                        depth=0,
+                        has_children=False,
+                        is_expanded=False,
+                        selectable_mailbox=True,
+                    ),
+                    children=[],
+                    expanded=False,
                 )
             )
+        top_nodes.append(
+            TreeNode(
+                label="UNIFIED MAILBOXES",
+                value=FolderTreeRow(
+                    account_id="*",
+                    folder_name="",
+                    label="UNIFIED MAILBOXES",
+                    icon="🌐",
+                    is_header=True,
+                ),
+                children=unified_children,
+                expanded=True,
+            )
+        )
 
         accounts = self.store.list_accounts()
         self._accounts_cache = {acc.id: acc for acc in accounts}
         for acc in accounts:
-            rows.append(
-                FolderTreeRow(
-                    account_id=acc.id,
-                    folder_name="",
+            acc_folders = self.store.list_folders(acc.id)
+            acc_tree_children = self._build_account_folder_tree_nodes(acc.id, acc_folders)
+            top_nodes.append(
+                TreeNode(
                     label=acc.name.upper(),
-                    icon="☕",
-                    is_header=True,
-                    badge_color=acc.color_badge,
+                    value=FolderTreeRow(
+                        account_id=acc.id,
+                        folder_name="",
+                        label=acc.name.upper(),
+                        icon="☕",
+                        is_header=True,
+                        badge_color=acc.color_badge,
+                    ),
+                    children=acc_tree_children,
+                    expanded=True,
                 )
             )
-            acc_folders = self.store.list_folders(acc.id)
-            rows.extend(self._build_account_folder_tree_rows(acc.id, acc_folders))
 
         prev_row: FolderTreeRow | None = None
-        if 0 <= self.folder_cursor < len(self.folder_rows):
-            candidate = self.folder_rows[self.folder_cursor]
-            if not candidate.is_header:
-                prev_row = candidate
+        if hasattr(self, "folder_tree"):
+            visible_before = self.folder_tree._flatten_visible()
+            if 0 <= self.folder_tree.cursor < len(visible_before):
+                cand = visible_before[self.folder_tree.cursor][0].value
+                if cand and not cand.is_header:
+                    prev_row = cand
 
-        self.folder_rows = rows
+        self.folder_tree = Tree(nodes=top_nodes)
 
+        visible_after = self.folder_tree._flatten_visible()
         # 1. If cursor was already on a non-header row, keep it on that row (or its collapsed parent)
         if prev_row is not None:
-            for idx, r in enumerate(self.folder_rows):
+            for idx, (node, _, _, _) in enumerate(visible_after):
+                r = node.value
                 if (
-                    not r.is_header
+                    r
+                    and not r.is_header
                     and r.account_id == prev_row.account_id
                     and (
                         (prev_row.tree_key and r.tree_key == prev_row.tree_key)
                         or (not prev_row.tree_key and r.folder_name == prev_row.folder_name)
                     )
                 ):
-                    self.folder_cursor = idx
+                    self.folder_tree.cursor = idx
                     return
 
         # 2. Otherwise align cursor with active_account_id / active_folder
-        for idx, r in enumerate(self.folder_rows):
-            if not r.is_header and r.account_id == self.active_account_id and r.folder_name == self.active_folder:
-                self.folder_cursor = idx
+        for idx, (node, _, _, _) in enumerate(visible_after):
+            r = node.value
+            if r and not r.is_header and r.account_id == self.active_account_id and r.folder_name == self.active_folder:
+                self.folder_tree.cursor = idx
                 return
 
         # 3. Fallback to first selectable mailbox row
-        for idx, r in enumerate(self.folder_rows):
-            if not r.is_header and r.selectable_mailbox:
-                self.folder_cursor = idx
+        for idx, (node, _, _, _) in enumerate(visible_after):
+            r = node.value
+            if r and not r.is_header and r.selectable_mailbox:
+                self.folder_tree.cursor = idx
                 self.active_account_id = r.account_id
                 self.active_folder = r.folder_name
                 break
@@ -659,6 +758,7 @@ class EspressoMailApp(Model):
                         self.theme,
                         allow_cancel=False,
                         credential_validator=self.credential_validator,
+                        store=self.store,
                     )
                     return self, None
                 if any(acc.imap_password for acc in self.store.list_accounts(enabled_only=True)):
@@ -722,6 +822,7 @@ class EspressoMailApp(Model):
                         self.theme,
                         allow_cancel=False,
                         credential_validator=self.credential_validator,
+                        store=self.store,
                     )
                     return self, None
                 if msg.trigger_sync:
@@ -763,6 +864,12 @@ class EspressoMailApp(Model):
         # 7. Background Sync completion
         if isinstance(msg, SyncCompletedMsg):
             self.status_message = msg.summary
+            self.refresh_data()
+            return self, None
+
+        # 7b. More messages fetched
+        if isinstance(msg, MoreMessagesFetchedMsg):
+            self.status_message = msg.message
             self.refresh_data()
             return self, None
 
@@ -820,6 +927,8 @@ class EspressoMailApp(Model):
             return self._execute_action("toggle_star")
         if k == "u":
             return self._execute_action("toggle_read")
+        if k in ("M", "ctrl+m"):
+            return self._execute_action("fetch_more")
         if k == "e":
             if self.focused_pane == "folders":
                 return self._execute_action("account_settings")
@@ -876,6 +985,7 @@ class EspressoMailApp(Model):
 
         # Pane-specific navigation
         if self.focused_pane == "folders":
+            visible = self.folder_tree._flatten_visible()
             if k in ("down", "j"):
                 self._step_folder_cursor(1)
                 return self, None
@@ -883,43 +993,51 @@ class EspressoMailApp(Model):
                 self._step_folder_cursor(-1)
                 return self, None
             if k in ("left", "h"):
-                if 0 <= self.folder_cursor < len(self.folder_rows):
-                    cur_row = self.folder_rows[self.folder_cursor]
-                    if cur_row.has_children and cur_row.is_expanded and cur_row.tree_key:
-                        self.expanded_folders.discard(cur_row.tree_key)
+                if 0 <= self.folder_cursor < len(visible):
+                    node, _, _, parent = visible[self.folder_cursor]
+                    if not node.is_leaf and node.expanded:
+                        node.expanded = False
                         self._save_expanded_folders()
-                        self._rebuild_folder_rows()
-                        self.status_message = f"Collapsed '{cur_row.label}'."
+                        self.status_message = f"Collapsed '{node.value.label}'."
+                    elif parent is not None:
+                        for p_idx, (vis_node, _, _, _) in enumerate(visible):
+                            if vis_node is parent and not vis_node.value.is_header:
+                                self.folder_cursor = p_idx
+                                break
                 return self, None
             if k in ("right", "l"):
-                if 0 <= self.folder_cursor < len(self.folder_rows):
-                    cur_row = self.folder_rows[self.folder_cursor]
-                    if cur_row.has_children and not cur_row.is_expanded and cur_row.tree_key:
-                        self.expanded_folders.add(cur_row.tree_key)
+                if 0 <= self.folder_cursor < len(visible):
+                    node, _, _, _ = visible[self.folder_cursor]
+                    if not node.is_leaf and not node.expanded:
+                        node.expanded = True
                         self._save_expanded_folders()
-                        self._rebuild_folder_rows()
-                        self.status_message = f"Expanded '{cur_row.label}'."
+                        self.status_message = f"Expanded '{node.value.label}'."
                         return self, None
                 self.focused_pane = "messages"
                 return self, None
             if k in (" ", "space"):
-                if 0 <= self.folder_cursor < len(self.folder_rows):
-                    cur_row = self.folder_rows[self.folder_cursor]
-                    if cur_row.has_children and cur_row.tree_key:
-                        self._toggle_folder_expand(cur_row)
+                if 0 <= self.folder_cursor < len(visible):
+                    node, _, _, _ = visible[self.folder_cursor]
+                    if not node.is_leaf:
+                        node.expanded = not node.expanded
+                        self._save_expanded_folders()
+                        action_str = "Expanded" if node.expanded else "Collapsed"
+                        self.status_message = f"{action_str} '{node.value.label}'."
                         return self, None
                 self._activate_selected_folder()
                 return self, None
             if k == "enter":
-                if 0 <= self.folder_cursor < len(self.folder_rows):
-                    cur_row = self.folder_rows[self.folder_cursor]
-                    if cur_row.has_children and not cur_row.selectable_mailbox:
-                        self._toggle_folder_expand(cur_row)
-                        return self, None
-                    if cur_row.has_children and not cur_row.is_expanded and cur_row.tree_key:
-                        self.expanded_folders.add(cur_row.tree_key)
+                if 0 <= self.folder_cursor < len(visible):
+                    node, _, _, _ = visible[self.folder_cursor]
+                    if not node.is_leaf and not node.value.selectable_mailbox:
+                        node.expanded = not node.expanded
                         self._save_expanded_folders()
-                        self._rebuild_folder_rows()
+                        action_str = "Expanded" if node.expanded else "Collapsed"
+                        self.status_message = f"{action_str} '{node.value.label}'."
+                        return self, None
+                    if not node.is_leaf and not node.expanded:
+                        node.expanded = True
+                        self._save_expanded_folders()
                 self._activate_selected_folder()
                 self.focused_pane = "messages"
                 return self, None
@@ -927,8 +1045,11 @@ class EspressoMailApp(Model):
 
         if self.focused_pane == "messages":
             if k in ("down", "j") and self.message_rows:
-                self.message_cursor = min(len(self.message_rows) - 1, self.message_cursor + 1)
-                self._on_message_selection_changed()
+                if self.message_cursor >= len(self.message_rows) - 1:
+                    self.status_message = "Reached end of messages. Press 'M' to fetch older messages from server."
+                else:
+                    self.message_cursor += 1
+                    self._on_message_selection_changed()
             elif k in ("up", "k") and self.message_rows:
                 self.message_cursor = max(0, self.message_cursor - 1)
                 self._on_message_selection_changed()
@@ -959,16 +1080,15 @@ class EspressoMailApp(Model):
     def _toggle_folder_expand(self, row: FolderTreeRow) -> None:
         if not row.tree_key:
             return
-        if row.tree_key in self.expanded_folders:
-            self.expanded_folders.discard(row.tree_key)
-            self._save_expanded_folders()
-            self._rebuild_folder_rows()
-            self.status_message = f"Collapsed '{row.label}'."
-        else:
-            self.expanded_folders.add(row.tree_key)
-            self._save_expanded_folders()
-            self._rebuild_folder_rows()
-            self.status_message = f"Expanded '{row.label}'."
+        visible = self.folder_tree._flatten_visible()
+        for node, _, _, _ in visible:
+            r = node.value
+            if r is not None and r.tree_key and r.tree_key == row.tree_key:
+                node.expanded = not node.expanded
+                self._save_expanded_folders()
+                action_str = "Expanded" if node.expanded else "Collapsed"
+                self.status_message = f"{action_str} '{row.label}'."
+                return
 
     def _handle_mouse(self, msg: MouseMsg) -> tuple[EspressoMailApp, Cmd | None]:
         # Top menu bar row (y == 0)
@@ -1050,7 +1170,7 @@ class EspressoMailApp(Model):
                     self.folder_cursor = clicked_idx
                     clicked_row = self.folder_rows[clicked_idx]
                     if clicked_row.has_children and (
-                        not clicked_row.selectable_mailbox or msg.x <= 6 + clicked_row.depth * 2
+                        not clicked_row.selectable_mailbox or msg.x <= 8 + clicked_row.depth * 4
                     ):
                         self._toggle_folder_expand(clicked_row)
                     else:
@@ -1175,6 +1295,7 @@ class EspressoMailApp(Model):
                 self.theme,
                 allow_cancel=True,
                 credential_validator=self.credential_validator,
+                store=self.store,
             )
             return self, None
 
@@ -1318,6 +1439,10 @@ class EspressoMailApp(Model):
                 store=self.store,
             )
             return self, None
+
+        if action_id == "fetch_more":
+            self.status_message = "Fetching older messages from server..."
+            return self, self._fetch_more_messages_cmd
 
         if action_id == "sync_all":
             self.status_message = "Synchronizing IMAP accounts..."
@@ -1463,6 +1588,62 @@ class EspressoMailApp(Model):
         self.status_message = f"Jumped to '{target.subject[:40]}'"
         return self, None
 
+    def _fetch_more_messages_cmd(self) -> Msg:
+        accounts = self.store.list_accounts(enabled_only=True)
+        if self.active_account_id == "*":
+            target_accounts = [acc for acc in accounts if acc.imap_password]
+            target_folder = "INBOX"
+        else:
+            acc = self.store.get_account(self.active_account_id)
+            target_accounts = [acc] if acc and acc.imap_password else []
+            target_folder = self.active_folder
+
+        if not target_accounts:
+            return MoreMessagesFetchedMsg(
+                account_id=self.active_account_id,
+                folder=self.active_folder,
+                fetched_count=0,
+                message="⚠ Cannot fetch messages: account has no IMAP password configured.",
+            )
+
+        total_fetched = 0
+        errors: list[str] = []
+        for acc in target_accounts:
+            try:
+                min_uid = self.store.get_folder_min_uid(acc.id, target_folder)
+                client = IMAPClient(acc, timeout=20.0)
+                client.connect()
+                try:
+                    fetched = client.fetch_recent_messages(
+                        folder=target_folder,
+                        limit=50,
+                        before_uid=min_uid if min_uid > 0 else None,
+                    )
+                    if fetched:
+                        for m in fetched:
+                            self.store.save_message(m)
+                        self.store.refresh_folder_counts()
+                        total_fetched += len(fetched)
+                finally:
+                    client.disconnect()
+            except Exception as exc:
+                errors.append(f"{acc.email}: {exc}")
+
+        err_suffix = f" (Errors: {'; '.join(errors)})" if errors else ""
+        if total_fetched > 0:
+            return MoreMessagesFetchedMsg(
+                account_id=self.active_account_id,
+                folder=self.active_folder,
+                fetched_count=total_fetched,
+                message=f"✔ Fetched {total_fetched} older message(s) from server.{err_suffix}",
+            )
+        return MoreMessagesFetchedMsg(
+            account_id=self.active_account_id,
+            folder=self.active_folder,
+            fetched_count=0,
+            message=f"No older messages found on server for {target_folder}.{err_suffix}",
+        )
+
     def _sync_accounts_cmd(self) -> Msg:
         accounts = self.store.list_accounts(enabled_only=True)
         total_synced = 0
@@ -1476,7 +1657,11 @@ class EspressoMailApp(Model):
                 client = IMAPClient(acc, timeout=20.0)
                 client.connect()
                 try:
-                    total_synced += client.sync_to_store(self.store)
+                    # Discover and persist remote folders immediately before downloading messages
+                    remote_folders = client.list_remote_folders()
+                    if remote_folders:
+                        self.store.sync_remote_folders(acc.id, remote_folders)
+                    total_synced += client.sync_to_store(self.store, remote_folders=remote_folders)
                 finally:
                     client.disconnect()
                 total_folders += len(self.store.list_folders(acc.id))
@@ -1562,14 +1747,20 @@ class EspressoMailApp(Model):
         inner_h = max(4, height - 2)
         lines: list[str] = []
 
+        visible = self.folder_tree._flatten_visible()
+
         if self.folder_cursor < self.folder_scroll:
             self.folder_scroll = self.folder_cursor
         elif self.folder_cursor >= self.folder_scroll + inner_h:
             self.folder_scroll = self.folder_cursor - inner_h + 1
 
-        visible_folders = self.folder_rows[self.folder_scroll : self.folder_scroll + inner_h]
-        for offset, row in enumerate(visible_folders):
+        visible_folders = visible[self.folder_scroll : self.folder_scroll + inner_h]
+        for offset, (node, depth, prefix, _) in enumerate(visible_folders):
             idx = self.folder_scroll + offset
+            row: FolderTreeRow | None = node.value
+            if row is None:
+                continue
+
             if row.is_header:
                 hdr_color = row.badge_color or self.theme.accent_secondary
                 hdr_txt = truncate_ansi(f" {row.icon} {row.label}", inner_w)
@@ -1583,18 +1774,14 @@ class EspressoMailApp(Model):
             marker = "▸" if is_selected else ("•" if is_active else " ")
             count_badge = f"({row.unread_count})" if row.unread_count > 0 else (f"{row.total_count}" if row.total_count > 0 else "")
 
-            if row.depth == 0:
-                branch = ("▾ " if row.is_expanded else "▸ ") if row.has_children else ""
-                lbl_raw = f" {marker} {branch}{row.icon} {row.label}"
-            else:
-                indent = "  " * row.depth
-                if row.has_children:
-                    connector = "▾ " if row.is_expanded else "▸ "
-                else:
-                    connector = "╰─ " if row.is_last_sibling else "├─ "
-                lbl_raw = f" {marker} {indent}{connector}{row.icon} {row.label}"
+            # Standard box-drawing branch prefix from espresso.beans.tree.Tree
+            branch_prefix = prefix[4:] if depth > 0 else prefix
+            tree_prefix = Style().foreground(self.theme.fg_muted).render(branch_prefix)
+            exp_icon = ("▼ " if node.expanded else "▶ ") if not node.is_leaf else "  "
+            lbl_raw = f" {marker} {tree_prefix}{exp_icon}{row.icon} {row.label}"
+            lbl_display = f" {marker} {branch_prefix}{exp_icon}{row.icon} {row.label}"
 
-            pad = max(1, inner_w - string_width(lbl_raw) - len(count_badge) - 1)
+            pad = max(1, inner_w - string_width(lbl_display) - len(count_badge) - 1)
             line_str = truncate_ansi(f"{lbl_raw}{' ' * pad}{count_badge} ", inner_w)
 
             if is_selected and self.focused_pane == "folders":
@@ -1743,6 +1930,10 @@ class EspressoMailApp(Model):
                 else:
                     lines.append(Style().foreground(self.theme.fg_primary).width(inner_w).render(line1))
                     lines.append(Style().foreground(self.theme.fg_muted).width(inner_w).render(line2))
+
+            if len(lines) < inner_h:
+                fetch_hint = truncate_ansi("  ─── [M] Fetch more from server ───", inner_w)
+                lines.append(Style().foreground(self.theme.fg_muted).render(fetch_hint))
 
         folder_label = "Unified" if self.active_account_id == "*" else self.active_account_id
         folder_path = (

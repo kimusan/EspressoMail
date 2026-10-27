@@ -239,6 +239,7 @@ class Folder:
     total_count: int = 0
     uid_validity: int = 0
     last_uid: int = 0
+    selectable: bool = True
 
     @property
     def path_parts(self) -> tuple[str, ...]:

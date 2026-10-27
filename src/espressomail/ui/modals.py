@@ -935,7 +935,8 @@ class AccountSettingsModal(Model):
         self.store = store
         self.theme = theme
         self.credential_validator: Callable[[AccountConfig], tuple[bool, str]] = (
-            credential_validator or validate_account_credentials
+            credential_validator
+            or (lambda a: validate_account_credentials(a, store=self.store))
         )
         self.accounts: list[AccountConfig] = self.store.list_accounts()
         self.account_idx = 0
@@ -1302,9 +1303,8 @@ class HelpModal(Model):
             h_style.render("Mail Actions"),
             f"  {k_style.render('c')}  Compose new mail      {k_style.render('r / R')}  Reply / Reply All",
             f"  {k_style.render('f')}  Forward message       {k_style.render('s')}      Toggle Star / Flag",
-            f"  {k_style.render('u')}  Toggle Read/Unread    {k_style.render('e')}      Archive message",
-            f"  {k_style.render('d')}  Move to Trash         {k_style.render('X')}      Empty Trash",
-            f"  {k_style.render('w')}  Save attachments      {k_style.render('S')}      Sync IMAP accounts",
+            f"  {k_style.render('w')}  Save attachments      {k_style.render('M')}      Fetch older messages",
+            f"  {k_style.render('S')}  Sync all accounts     {k_style.render('X')}      Empty Trash",
             "",
             h_style.render("Accounts, Search, Security, Filters & Themes"),
             f"  {k_style.render('A')}      Edit Account Settings (Password, IMAP/SMTP hosts, ports, TLS)",

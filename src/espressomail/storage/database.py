@@ -150,6 +150,7 @@ class LocalStore:
                 total_count INTEGER NOT NULL DEFAULT 0,
                 uid_validity INTEGER NOT NULL DEFAULT 0,
                 last_uid INTEGER NOT NULL DEFAULT 0,
+                selectable INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
             );
 
@@ -265,6 +266,11 @@ class LocalStore:
             self._fts_enabled = True
         except sqlite3.OperationalError:
             self._fts_enabled = False
+
+        try:
+            cur.execute("ALTER TABLE folders ADD COLUMN selectable INTEGER NOT NULL DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass
 
         # Purge any legacy unauthenticated demo accounts if present from an earlier session
         cur.execute(
@@ -452,14 +458,15 @@ class LocalStore:
                 )
                 self._conn.execute(
                     """
-                    INSERT INTO folders (id, account_id, name, display_name, folder_type)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO folders (id, account_id, name, display_name, folder_type, selectable)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         name = excluded.name,
                         display_name = excluded.display_name,
-                        folder_type = excluded.folder_type
+                        folder_type = excluded.folder_type,
+                        selectable = excluded.selectable
                     """,
-                    (fid, account_id, f.name, f.display_name, f.folder_type.value),
+                    (fid, account_id, f.name, f.display_name, f.folder_type.value, int(f.selectable)),
                 )
 
             # Remove empty offline-placeholder folders that do not exist on the remote server
@@ -558,6 +565,7 @@ class LocalStore:
                     total_count=int(r["total_count"]),
                     uid_validity=int(r["uid_validity"]),
                     last_uid=int(r["last_uid"]),
+                    selectable=bool(r["selectable"]) if "selectable" in r.keys() else True,
                 )
                 for r in rows
             ]
@@ -676,6 +684,17 @@ class LocalStore:
                     (u, t, f["id"]),
                 )
             self._conn.commit()
+
+    def get_folder_min_uid(self, account_id: str, folder: str) -> int:
+        """Return the minimum IMAP UID stored locally for an account and folder, or 0 if none."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MIN(uid) AS min_u FROM messages WHERE account_id = ? AND folder = ? AND uid > 0 AND is_trashed = 0",
+                (account_id, folder),
+            ).fetchone()
+            if row and row["min_u"] is not None:
+                return int(row["min_u"])
+            return 0
 
     # ------------------------------------------------------------------
     # Messages & Attachments CRUD

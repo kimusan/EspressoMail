@@ -687,6 +687,119 @@ class TestUIAndApp(unittest.TestCase):
         self.assertIn("Mailboxes", view_str)
         self.assertIn("Reading Pane", view_str)
 
+    def test_tree_component_space_toggle_and_fetch_more_pagination(self) -> None:
+        """Verify Espresso Tree component, space bar toggle, box-drawing branch alignment, and M fetch more."""
+        from unittest import mock
+        from espresso.beans.tree import Tree
+        from espressomail.models.entities import EmailMessage, Folder, FolderType
+        from espressomail.protocols.smtp_client import validate_account_credentials
+
+        acc = AccountConfig(
+            id="acc_fetch",
+            name="Pagination Corp",
+            email="paging@corp.org",
+            full_name="Paging User",
+            imap_host="imap.corp.org",
+            imap_password="secret_pass",
+        )
+        self.store.save_account(acc)
+        self.store.sync_remote_folders(
+            acc.id,
+            [
+                Folder(id="f1", account_id=acc.id, name="INBOX", display_name="INBOX", folder_type=FolderType.INBOX),
+                Folder(id="f2", account_id=acc.id, name="Projects", display_name="Projects", folder_type=FolderType.CUSTOM),
+                Folder(id="f3", account_id=acc.id, name="Projects/2026", display_name="2026", folder_type=FolderType.CUSTOM),
+            ],
+        )
+
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        self.assertIsInstance(app.folder_tree, Tree)
+
+        # 1. Projects folder has children and starts collapsed
+        projects_row = next(r for r in app.folder_rows if r.label == "Projects")
+        self.assertTrue(projects_row.has_children)
+        self.assertFalse(projects_row.is_expanded)
+
+        # 2. Pressing Space on Projects toggles expanded to True
+        app.focused_pane = "folders"
+        for idx, r in enumerate(app.folder_rows):
+            if r.label == "Projects":
+                app.folder_cursor = idx
+                break
+        app, _ = app.update(KeyMsg(" "))
+        projects_row_after = next(r for r in app.folder_rows if r.label == "Projects")
+        self.assertTrue(projects_row_after.is_expanded)
+        self.assertIn("2026", [r.label for r in app.folder_rows])
+
+        # 3. Check box-drawing branch formatting in folder pane view
+        pane_str = app._render_folder_pane(width=34, height=20)
+        self.assertIn("├── ", pane_str)
+        self.assertIn("▼ ", pane_str)
+        self.assertIn("Projects", pane_str)
+
+        # 4. Pressing Space on Projects again collapses it
+        app, _ = app.update(KeyMsg(" "))
+        projects_row_collapsed = next(r for r in app.folder_rows if r.label == "Projects")
+        self.assertFalse(projects_row_collapsed.is_expanded)
+        self.assertNotIn("2026", [r.label for r in app.folder_rows])
+
+        # 5. Test 'M' shortcut triggers _fetch_more_messages_cmd
+        app.active_account_id = acc.id
+        app.active_folder = "INBOX"
+        app, cmd = app.update(KeyMsg("M"))
+        self.assertIsNotNone(cmd)
+        self.assertIn("Fetching older messages", app.status_message)
+
+        # Mock IMAP client fetch_recent_messages during command execution
+        with mock.patch("espressomail.ui.app.IMAPClient") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.fetch_recent_messages.return_value = [
+                EmailMessage(
+                    id=f"{acc.id}:INBOX:42",
+                    account_id=acc.id,
+                    folder="INBOX",
+                    subject="Earlier Message 42",
+                    sender_name="Earlier Sender",
+                    sender_email="earlier@corp.org",
+                    body_text="Earlier content",
+                    uid=42,
+                )
+            ]
+            msg = cmd()
+            self.assertEqual(msg.fetched_count, 1)
+            app, _ = app.update(msg)
+            self.assertIn("Fetched 1 older message(s)", app.status_message)
+            self.assertEqual(len(app.message_rows), 1)
+            self.assertEqual(app.message_rows[0].message.subject, "Earlier Message 42")
+
+        # 6. Verify immediate folder discovery on onboarding credential validation
+        new_acc = AccountConfig(
+            id="acc_fresh",
+            name="Fresh Account",
+            email="fresh@corp.org",
+            full_name="Fresh User",
+            imap_host="imap.corp.org",
+            imap_password="pass",
+            smtp_host="smtp.corp.org",
+            smtp_password="pass",
+        )
+        with mock.patch("espressomail.protocols.imap_client.IMAPClient") as mock_imap_cls, \
+             mock.patch("espressomail.protocols.smtp_client.SMTPClient") as mock_smtp_cls:
+            inst = mock_imap_cls.return_value
+            inst.verify_credentials.return_value = (True, "IMAP login verified")
+            inst.list_remote_folders.return_value = [
+                Folder(id="", account_id=new_acc.id, name="INBOX", display_name="INBOX", folder_type=FolderType.INBOX),
+                Folder(id="", account_id=new_acc.id, name="Work/Clients", display_name="Clients", folder_type=FolderType.CUSTOM),
+            ]
+            mock_smtp_cls.return_value.verify_credentials.return_value = (True, "SMTP login verified")
+            ok, note = validate_account_credentials(new_acc, store=self.store)
+            self.assertTrue(ok)
+            # Folders should be immediately persisted in self.store
+            fresh_folders = self.store.list_folders(new_acc.id)
+            fresh_names = [f.name for f in fresh_folders]
+            self.assertIn("INBOX", fresh_names)
+            self.assertIn("Work/Clients", fresh_names)
+
 
 if __name__ == "__main__":
     unittest.main()

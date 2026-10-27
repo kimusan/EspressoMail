@@ -113,11 +113,14 @@ class OnboardingWizard(Model):
         theme: Theme,
         allow_cancel: bool = False,
         credential_validator: Callable[[AccountConfig], tuple[bool, str]] | None = None,
+        store: Any | None = None,
     ) -> None:
         self.theme = theme
         self.allow_cancel = allow_cancel
+        self.store = store
         self.credential_validator: Callable[[AccountConfig], tuple[bool, str]] = (
-            credential_validator or validate_account_credentials
+            credential_validator
+            or (lambda a: validate_account_credentials(a, store=self.store))
         )
         self.step = 1  # 1: Provider Preset, 2: Identity & Credentials, 3: Server Endpoints & Validation
         self.selected_preset: ProviderPreset = PROVIDER_PRESETS[0]

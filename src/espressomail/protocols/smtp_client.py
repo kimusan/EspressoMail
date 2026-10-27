@@ -221,6 +221,7 @@ class SMTPClient:
 def validate_account_credentials(
     account: AccountConfig,
     timeout: float = 8.0,
+    store: Any | None = None,
 ) -> tuple[bool, str]:
     """Verify both IMAP and SMTP server reachability and credentials for an account."""
     from espressomail.protocols.imap_client import IMAPClient
@@ -228,7 +229,8 @@ def validate_account_credentials(
     if not account.imap_password or not account.smtp_password:
         return False, "Account password is required to authenticate with IMAP/SMTP."
 
-    imap_ok, imap_msg = IMAPClient(account, timeout=timeout).verify_credentials()
+    imap_client = IMAPClient(account, timeout=timeout)
+    imap_ok, imap_msg = imap_client.verify_credentials()
     if not imap_ok:
         return False, imap_msg
 
@@ -236,5 +238,22 @@ def validate_account_credentials(
     if not smtp_ok:
         return False, smtp_msg
 
+    # Discover and persist remote folders immediately upon successful credential verification
+    if store is not None:
+        try:
+            if not store.get_account(account.id):
+                store.save_account(account)
+            imap_client.connect()
+            try:
+                folders = imap_client.list_remote_folders()
+                if folders:
+                    store.sync_remote_folders(account.id, folders)
+                    store.refresh_folder_counts()
+            finally:
+                imap_client.disconnect()
+        except Exception:
+            pass
+
     return True, f"Verified IMAP ({account.imap_host}:{account.imap_port}) & SMTP ({account.smtp_host}:{account.smtp_port})"
+
 
