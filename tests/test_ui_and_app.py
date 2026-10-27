@@ -221,6 +221,83 @@ class TestUIAndApp(unittest.TestCase):
             app, _ = app.update(MouseMsg(x=95, y=10, button=MouseButton.LEFT, action=MouseAction.PRESS))
             self.assertEqual(app.focused_pane, "reader")
 
+    def test_hierarchical_folder_tree_and_archived_subfolders(self) -> None:
+        from espressomail.models.entities import Folder, FolderType, classify_folder_type, split_folder_hierarchy
+
+        # 1. Verify hierarchy splitting and classification of nested archive folders
+        parts_top_sent = split_folder_hierarchy("INBOX.Sent", ".")
+        self.assertEqual(parts_top_sent, ["Sent"])
+        self.assertEqual(classify_folder_type(parts_top_sent, "\\Sent"), FolderType.SENT)
+
+        parts_arch_inbox = split_folder_hierarchy("Archives/2025/inbox", "/")
+        self.assertEqual(parts_arch_inbox, ["Archives", "2025", "inbox"])
+        self.assertEqual(classify_folder_type(parts_arch_inbox, ""), FolderType.CUSTOM)
+
+        parts_arch_sent = split_folder_hierarchy("Archives/2025/Sent", "/")
+        self.assertEqual(parts_arch_sent, ["Archives", "2025", "Sent"])
+        # Even if server flags it or it's named Sent, nested depth > 1 must be CUSTOM, not root SENT
+        self.assertEqual(classify_folder_type(parts_arch_sent, "\\Sent"), FolderType.CUSTOM)
+
+        # 2. Verify syncing remote nested folders creates a structured collapsible tree without duplicate root Sent
+        acc = AccountConfig(
+            id="acc_tree",
+            name="Tree Account",
+            email="kim@schulz.dk",
+            full_name="Kim Schulz",
+            imap_host="imap.schulz.dk",
+            smtp_host="smtp.schulz.dk",
+        )
+        self.store.save_account(acc)
+        self.store.sync_remote_folders(
+            acc.id,
+            [
+                Folder(id="f_in", account_id=acc.id, name="INBOX", display_name="Inbox", folder_type=FolderType.INBOX),
+                Folder(id="f_sent", account_id=acc.id, name="Sent", display_name="Sent", folder_type=FolderType.SENT),
+                Folder(id="f_a25_in", account_id=acc.id, name="Archives/2025/inbox", display_name="inbox", folder_type=FolderType.CUSTOM),
+                Folder(id="f_a25_sent", account_id=acc.id, name="Archives/2025/Sent", display_name="Sent", folder_type=FolderType.CUSTOM),
+                Folder(id="f_a24_sent", account_id=acc.id, name="Archives/2024/Sent", display_name="Sent", folder_type=FolderType.CUSTOM),
+            ],
+        )
+
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        acc_rows = [r for r in app.folder_rows if r.account_id == "acc_tree" and not r.is_header]
+
+        # Root folders (depth 0) for acc_tree should only have Inbox, Sent, Drafts, Trash, and Archives
+        depth0_labels = [r.label for r in acc_rows if r.depth == 0]
+        self.assertEqual(depth0_labels.count("Sent"), 1)
+        self.assertIn("Archives", depth0_labels)
+
+        # Archives (depth 0) -> 2025 (depth 1) -> inbox & Sent (depth 2)
+        archives_row = next(r for r in acc_rows if r.depth == 0 and r.label == "Archives")
+        self.assertTrue(archives_row.has_children)
+        self.assertTrue(archives_row.is_expanded)
+
+        depth1_labels = [r.label for r in acc_rows if r.depth == 1]
+        self.assertEqual(depth1_labels, ["2025", "2024"])
+
+        depth2_rows = [r for r in acc_rows if r.depth == 2]
+        self.assertEqual([(r.folder_name, r.label) for r in depth2_rows], [
+            ("Archives/2025/inbox", "inbox"),
+            ("Archives/2025/Sent", "Sent"),
+            ("Archives/2024/Sent", "Sent"),
+        ])
+
+        # 3. Collapse "Archives" via Space key in folders pane and verify children are hidden
+        app.focused_pane = "folders"
+        for idx, r in enumerate(app.folder_rows):
+            if r.account_id == "acc_tree" and r.depth == 0 and r.label == "Archives":
+                app.folder_cursor = idx
+                break
+        app, _ = app.update(KeyMsg(" "))
+        collapsed_acc_rows = [r for r in app.folder_rows if r.account_id == "acc_tree" and not r.is_header]
+        self.assertEqual([r.depth for r in collapsed_acc_rows if r.depth > 0], [])
+
+        # Expand "Archives" again with 'l'
+        app, _ = app.update(KeyMsg("l"))
+        expanded_acc_rows = [r for r in app.folder_rows if r.account_id == "acc_tree" and not r.is_header]
+        self.assertGreater(len([r for r in expanded_acc_rows if r.depth > 0]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+

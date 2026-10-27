@@ -22,6 +22,9 @@ from espressomail.models.entities import (
     FolderType,
     PGPStatus,
     SecurityType,
+    classify_folder_type,
+    decode_imap_utf7,
+    split_folder_hierarchy,
 )
 from espressomail.storage.database import LocalStore
 
@@ -47,36 +50,6 @@ def decode_mime_header(raw_val: str | None) -> str:
         return "".join(decoded).strip()
     except Exception:
         return str(raw_val).strip()
-
-
-def decode_imap_utf7(name: str) -> str:
-    """Decode modified UTF-7 mailbox names (RFC 3501 Section 5.1.3) into Unicode."""
-    if "&" not in name:
-        return name
-    out: list[str] = []
-    i = 0
-    n = len(name)
-    while i < n:
-        if name[i] == "&":
-            end = name.find("-", i + 1)
-            if end == -1:
-                out.append(name[i:])
-                break
-            if end == i + 1:
-                out.append("&")
-            else:
-                b64_part = name[i + 1 : end].replace(",", "/")
-                pad = (4 - len(b64_part) % 4) % 4
-                try:
-                    raw = codecs.decode((b64_part + ("=" * pad)).encode("ascii"), "base64")
-                    out.append(raw.decode("utf-16-be", errors="replace"))
-                except Exception:
-                    out.append(name[i : end + 1])
-            i = end + 1
-        else:
-            out.append(name[i])
-            i += 1
-    return "".join(out)
 
 
 def parse_address_list(headers: Sequence[str]) -> list[str]:
@@ -457,21 +430,13 @@ class IMAPClient:
                 continue
             seen_names.add(name)
 
-            decoded_name = decode_imap_utf7(name)
-            # Strip leading INBOX. or INBOX/ namespace prefix for human-friendly display name
-            if decoded_name.upper().startswith("INBOX.") and len(decoded_name) > 6:
-                display = decoded_name[6:]
-            elif decoded_name.upper().startswith("INBOX/") and len(decoded_name) > 6:
-                display = decoded_name[6:]
-            elif delim and delim in decoded_name:
-                display = decoded_name.split(delim)[-1]
-            else:
-                display = decoded_name
-
-            if name == "INBOX":
+            parts = split_folder_hierarchy(name, delimiter=delim)
+            if len(parts) == 1 and parts[0].upper() == "INBOX":
                 display = "Inbox"
+            else:
+                display = parts[-1] if parts else name
 
-            ftype = self._infer_folder_type(decoded_name, flags_lower)
+            ftype = classify_folder_type(parts, flags_lower)
             folders.append(
                 Folder(
                     id=f"{self.account.id}:{name}",
@@ -482,25 +447,6 @@ class IMAPClient:
                 )
             )
         return folders
-
-    @staticmethod
-    def _infer_folder_type(name: str, flags: str) -> FolderType:
-        n = name.lower()
-        if n == "inbox":
-            return FolderType.INBOX
-        if "\\sent" in flags or "sent" in n:
-            return FolderType.SENT
-        if "\\drafts" in flags or "draft" in n:
-            return FolderType.DRAFTS
-        if "\\trash" in flags or "trash" in n or "deleted" in n or "bin" in n:
-            return FolderType.TRASH
-        if "\\archive" in flags or "archive" in n or "\\all" in flags or "all mail" in n:
-            return FolderType.ARCHIVE
-        if "\\junk" in flags or "spam" in n or "junk" in n:
-            return FolderType.SPAM
-        if "\\flagged" in flags or "star" in n:
-            return FolderType.STARRED
-        return FolderType.CUSTOM
 
     def fetch_recent_messages(self, folder: str = "INBOX", limit: int = 50) -> list[EmailMessage]:
         """Fetch and parse the most recent messages from an IMAP mailbox folder."""
@@ -624,10 +570,14 @@ class IMAPClient:
         if folders is not None:
             target_folders = list(folders)
         elif remote_folders:
-            # Put INBOX first, then sync all discovered selectable folders
+            # Put INBOX first, then top-level folders, then nested archive subfolders
             inbox_first = sorted(
                 remote_folders,
-                key=lambda f: (0 if f.name.upper() == "INBOX" else 1, f.name.lower()),
+                key=lambda f: (
+                    0 if f.name.upper() == "INBOX" else 1,
+                    len(f.path_parts),
+                    f.name.lower(),
+                ),
             )
             target_folders = [f.name for f in inbox_first]
         else:

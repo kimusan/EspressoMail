@@ -21,6 +21,8 @@ from espressomail.models.entities import (
     SecurityType,
     SieveFilterRule,
     SieveScript,
+    classify_folder_type,
+    split_folder_hierarchy,
 )
 
 
@@ -273,7 +275,60 @@ class LocalStore:
                 "DELETE FROM messages_fts WHERE msg_id NOT IN (SELECT id FROM messages)"
             )
 
+        self._normalize_existing_folders()
         self._conn.commit()
+
+    def _normalize_existing_folders(self) -> None:
+        """Ensure nested subfolders (e.g. Archives/2025/Sent) have FolderType.CUSTOM and clean display names."""
+        rows = self._conn.execute("SELECT id, account_id, name, display_name, folder_type FROM folders").fetchall()
+        for r in rows:
+            fname = r["name"]
+            parts = split_folder_hierarchy(fname)
+            if len(parts) > 1:
+                new_type = FolderType.CUSTOM.value
+                new_display = parts[-1]
+            elif fname == "Starred":
+                new_type = FolderType.STARRED.value
+                new_display = "Starred"
+            elif parts and parts[0].upper() == "INBOX":
+                new_type = FolderType.INBOX.value
+                new_display = "Inbox"
+            else:
+                inferred = classify_folder_type(parts)
+                new_type = inferred.value if inferred != FolderType.CUSTOM else r["folder_type"]
+                new_display = parts[-1] if parts else r["display_name"]
+
+            if new_type != r["folder_type"] or new_display != r["display_name"]:
+                self._conn.execute(
+                    "UPDATE folders SET display_name = ?, folder_type = ? WHERE id = ?",
+                    (new_display, new_type, r["id"]),
+                )
+
+        # Deduplicate empty default placeholders when another folder of the same system type exists
+        placeholder_names = {"Sent", "Drafts", "Archive", "Trash"}
+        updated_rows = self._conn.execute(
+            "SELECT id, account_id, name, folder_type FROM folders"
+        ).fetchall()
+        by_acc_type: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        for r in updated_rows:
+            if r["folder_type"] in ("sent", "drafts", "archive", "trash"):
+                by_acc_type.setdefault((r["account_id"], r["folder_type"]), []).append(r)
+
+        for (acc_id, _ftype), group in by_acc_type.items():
+            if len(group) <= 1:
+                continue
+            remaining = len(group)
+            for r in group:
+                if remaining <= 1:
+                    break
+                if r["name"] in placeholder_names:
+                    cnt_row = self._conn.execute(
+                        "SELECT COUNT(*) AS c FROM messages WHERE account_id = ? AND folder = ?",
+                        (acc_id, r["name"]),
+                    ).fetchone()
+                    if int(cnt_row["c"] or 0) == 0:
+                        self._conn.execute("DELETE FROM folders WHERE id = ?", (r["id"],))
+                        remaining -= 1
 
     # ------------------------------------------------------------------
     # Settings
@@ -299,63 +354,70 @@ class LocalStore:
 
     def save_account(self, account: AccountConfig) -> None:
         """Insert or update an email account and ensure default folders exist."""
-        self._conn.execute(
-            """
-            INSERT INTO accounts (
-                id, name, email, full_name,
-                imap_host, imap_port, imap_security, imap_username, imap_password,
-                smtp_host, smtp_port, smtp_security, smtp_username, smtp_password,
-                sieve_host, sieve_port, pgp_key_id, signature, color_badge, enabled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                email = excluded.email,
-                full_name = excluded.full_name,
-                imap_host = excluded.imap_host,
-                imap_port = excluded.imap_port,
-                imap_security = excluded.imap_security,
-                imap_username = excluded.imap_username,
-                imap_password = excluded.imap_password,
-                smtp_host = excluded.smtp_host,
-                smtp_port = excluded.smtp_port,
-                smtp_security = excluded.smtp_security,
-                smtp_username = excluded.smtp_username,
-                smtp_password = excluded.smtp_password,
-                sieve_host = excluded.sieve_host,
-                sieve_port = excluded.sieve_port,
-                pgp_key_id = excluded.pgp_key_id,
-                signature = excluded.signature,
-                color_badge = excluded.color_badge,
-                enabled = excluded.enabled
-            """,
-            (
-                account.id,
-                account.name,
-                account.email,
-                account.full_name,
-                account.imap_host,
-                account.imap_port,
-                account.imap_security.value,
-                account.imap_username,
-                account.imap_password,
-                account.smtp_host,
-                account.smtp_port,
-                account.smtp_security.value,
-                account.smtp_username,
-                account.smtp_password,
-                account.sieve_host,
-                account.sieve_port,
-                account.pgp_key_id,
-                account.signature,
-                account.color_badge,
-                int(account.enabled),
-            ),
-        )
-        self._ensure_default_folders(account.id)
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO accounts (
+                    id, name, email, full_name,
+                    imap_host, imap_port, imap_security, imap_username, imap_password,
+                    smtp_host, smtp_port, smtp_security, smtp_username, smtp_password,
+                    sieve_host, sieve_port, pgp_key_id, signature, color_badge, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    email = excluded.email,
+                    full_name = excluded.full_name,
+                    imap_host = excluded.imap_host,
+                    imap_port = excluded.imap_port,
+                    imap_security = excluded.imap_security,
+                    imap_username = excluded.imap_username,
+                    imap_password = excluded.imap_password,
+                    smtp_host = excluded.smtp_host,
+                    smtp_port = excluded.smtp_port,
+                    smtp_security = excluded.smtp_security,
+                    smtp_username = excluded.smtp_username,
+                    smtp_password = excluded.smtp_password,
+                    sieve_host = excluded.sieve_host,
+                    sieve_port = excluded.sieve_port,
+                    pgp_key_id = excluded.pgp_key_id,
+                    signature = excluded.signature,
+                    color_badge = excluded.color_badge,
+                    enabled = excluded.enabled
+                """,
+                (
+                    account.id,
+                    account.name,
+                    account.email,
+                    account.full_name,
+                    account.imap_host,
+                    account.imap_port,
+                    account.imap_security.value,
+                    account.imap_username,
+                    account.imap_password,
+                    account.smtp_host,
+                    account.smtp_port,
+                    account.smtp_security.value,
+                    account.smtp_username,
+                    account.smtp_password,
+                    account.sieve_host,
+                    account.sieve_port,
+                    account.pgp_key_id,
+                    account.signature,
+                    account.color_badge,
+                    int(account.enabled),
+                ),
+            )
+            self._ensure_default_folders(account.id)
+            self._conn.commit()
 
     def _ensure_default_folders(self, account_id: str) -> None:
-        """Create standard mailbox folders for an account if not already present."""
+        """Create standard mailbox folders for an account if no folder of that type already exists."""
+        existing_types = {
+            r["folder_type"]
+            for r in self._conn.execute(
+                "SELECT folder_type FROM folders WHERE account_id = ?", (account_id,)
+            ).fetchall()
+        }
         defaults = [
             ("INBOX", "Inbox", FolderType.INBOX),
             ("Starred", "Starred", FolderType.STARRED),
@@ -365,6 +427,8 @@ class LocalStore:
             ("Trash", "Trash", FolderType.TRASH),
         ]
         for name, display, ftype in defaults:
+            if ftype.value in existing_types and name not in ("INBOX", "Starred"):
+                continue
             fid = f"{account_id}:{name}"
             self._conn.execute(
                 """
@@ -381,7 +445,11 @@ class LocalStore:
         with self._lock:
             remote_names = {f.name for f in remote_folders}
             for f in remote_folders:
-                fid = f.id or f"{account_id}:{f.name}"
+                fid = f"{account_id}:{f.name}"
+                self._conn.execute(
+                    "DELETE FROM folders WHERE account_id = ? AND name = ? AND id != ?",
+                    (account_id, f.name, fid),
+                )
                 self._conn.execute(
                     """
                     INSERT INTO folders (id, account_id, name, display_name, folder_type)
@@ -409,6 +477,7 @@ class LocalStore:
                 ).fetchone()
                 if int(cnt_row["c"] or 0) == 0:
                     self._conn.execute("DELETE FROM folders WHERE id = ?", (r["id"],))
+            self._normalize_existing_folders()
             self._conn.commit()
             self.refresh_folder_counts()
 

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import codecs
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Sequence
 
 
 class SecurityType(str, Enum):
@@ -40,6 +41,100 @@ class PGPStatus(str, Enum):
     ENCRYPTED = "encrypted"
     DECRYPTED = "decrypted"
     DECRYPTED_VERIFIED = "decrypted_verified"
+
+
+def decode_imap_utf7(name: str) -> str:
+    """Decode modified UTF-7 mailbox names (RFC 3501 Section 5.1.3) into Unicode."""
+    if "&" not in name:
+        return name
+    out: list[str] = []
+    i = 0
+    n = len(name)
+    while i < n:
+        if name[i] == "&":
+            end = name.find("-", i + 1)
+            if end == -1:
+                out.append(name[i:])
+                break
+            if end == i + 1:
+                out.append("&")
+            else:
+                b64_part = name[i + 1 : end].replace(",", "/")
+                pad = (4 - len(b64_part) % 4) % 4
+                try:
+                    raw = codecs.decode((b64_part + ("=" * pad)).encode("ascii"), "base64")
+                    out.append(raw.decode("utf-16-be", errors="replace"))
+                except Exception:
+                    out.append(name[i : end + 1])
+            i = end + 1
+        else:
+            out.append(name[i])
+            i += 1
+    return "".join(out)
+
+
+def split_folder_hierarchy(raw_name: str, delimiter: str = "") -> list[str]:
+    """Split an IMAP mailbox name into decoded hierarchy path segments.
+
+    Strips personal namespace prefixes like 'INBOX.' / 'INBOX/' or '[Gmail]/'
+    when nested segments follow, while preserving subfolder hierarchies
+    such as 'Archives/2025/inbox' or 'INBOX.Archives.2025.Sent'.
+    """
+    decoded = decode_imap_utf7(raw_name.strip())
+    if not decoded:
+        return ["INBOX"]
+
+    delim = delimiter
+    if not delim:
+        if "/" in decoded:
+            delim = "/"
+        elif "." in decoded:
+            delim = "."
+        else:
+            delim = "/"
+
+    parts = [p.strip() for p in decoded.split(delim) if p.strip()]
+    if not parts:
+        return [decoded]
+
+    if len(parts) > 1 and parts[0].upper() in ("INBOX", "[GMAIL]", "[GOOGLE MAIL]"):
+        parts = parts[1:]
+
+    if len(parts) == 1 and parts[0].upper() == "INBOX":
+        return ["INBOX"]
+
+    return parts
+
+
+def classify_folder_type(parts: Sequence[str], flags: str = "") -> FolderType:
+    """Determine the FolderType for a mailbox given its hierarchy path segments and IMAP flags.
+
+    Only top-level folders (len(parts) == 1) can be primary system mailboxes
+    (INBOX, SENT, DRAFTS, TRASH, ARCHIVE, SPAM, STARRED); nested subfolders
+    such as 'Archives/2025/Sent' or 'Archives/2025/inbox' are always FolderType.CUSTOM.
+    """
+    if not parts:
+        return FolderType.CUSTOM
+    if len(parts) > 1:
+        return FolderType.CUSTOM
+
+    leaf = parts[0].lower().strip()
+    flags_l = flags.lower()
+    if leaf == "inbox":
+        return FolderType.INBOX
+    if "\\sent" in flags_l or leaf in ("sent", "sent items", "sent messages", "sent mail"):
+        return FolderType.SENT
+    if "\\drafts" in flags_l or leaf in ("draft", "drafts"):
+        return FolderType.DRAFTS
+    if "\\trash" in flags_l or leaf in ("trash", "deleted", "deleted items", "deleted messages", "bin"):
+        return FolderType.TRASH
+    if "\\archive" in flags_l or "\\all" in flags_l or leaf in ("archive", "archives", "all mail"):
+        return FolderType.ARCHIVE
+    if "\\junk" in flags_l or leaf in ("spam", "junk", "junk e-mail", "junk email", "bulk mail"):
+        return FolderType.SPAM
+    if "\\flagged" in flags_l or leaf in ("starred", "flagged"):
+        return FolderType.STARRED
+    return FolderType.CUSTOM
 
 
 @dataclass
@@ -144,6 +239,11 @@ class Folder:
     total_count: int = 0
     uid_validity: int = 0
     last_uid: int = 0
+
+    @property
+    def path_parts(self) -> tuple[str, ...]:
+        """Return decoded hierarchy path segments for this folder."""
+        return tuple(split_folder_hierarchy(self.name))
 
     @property
     def icon(self) -> str:

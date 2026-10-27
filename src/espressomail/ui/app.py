@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from espresso import (
     Cmd,
@@ -44,11 +45,12 @@ from espressomail.models.entities import (
     AccountConfig,
     EmailMessage,
     EmailThread,
+    Folder,
     FolderType,
     PGPStatus,
+    classify_folder_type,
+    split_folder_hierarchy,
 )
-from typing import Callable
-
 from espressomail.protocols.imap_client import IMAPClient
 from espressomail.protocols.smtp_client import (
     SMTPClient,
@@ -90,6 +92,22 @@ class FolderTreeRow:
     total_count: int = 0
     is_header: bool = False
     badge_color: str = ""
+    depth: int = 0
+    has_children: bool = False
+    is_expanded: bool = True
+    is_last_sibling: bool = False
+    tree_key: str = ""
+    selectable_mailbox: bool = True
+
+
+@dataclass
+class _FolderTreeNode:
+    """Internal hierarchy node used to construct collapsible folder trees per account."""
+
+    segment: str
+    path_parts: tuple[str, ...]
+    folder: Folder | None = None
+    children: dict[str, _FolderTreeNode] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -161,6 +179,7 @@ class EspressoMailApp(Model):
         self.folder_rows: list[FolderTreeRow] = []
         self.folder_cursor = 0
         self.folder_scroll = 0
+        self.collapsed_folders: set[str] = set()
         self.active_account_id = "*"
         self.active_folder = "INBOX"
 
@@ -234,6 +253,134 @@ class EspressoMailApp(Model):
         self._rebuild_message_rows()
         self._update_reader_viewport(force=True)
 
+    def _build_account_folder_tree_rows(
+        self, account_id: str, folders: list[Folder]
+    ) -> list[FolderTreeRow]:
+        """Build a hierarchical, collapsible folder tree for a single account."""
+        roots: dict[str, _FolderTreeNode] = {}
+
+        for f in folders:
+            parts = tuple(split_folder_hierarchy(f.name))
+            if not parts:
+                continue
+            curr_map = roots
+            curr_node: _FolderTreeNode | None = None
+            for idx, seg in enumerate(parts):
+                key = seg.lower()
+                prefix = parts[: idx + 1]
+                if key not in curr_map:
+                    curr_map[key] = _FolderTreeNode(segment=seg, path_parts=prefix)
+                curr_node = curr_map[key]
+                curr_map = curr_node.children
+
+            if curr_node is not None:
+                if curr_node.folder is None or f.total_count > curr_node.folder.total_count:
+                    curr_node.folder = f
+
+        def _subtree_counts(node: _FolderTreeNode) -> tuple[int, int]:
+            u = node.folder.unread_count if node.folder else 0
+            t = node.folder.total_count if node.folder else 0
+            for child in node.children.values():
+                cu, ct = _subtree_counts(child)
+                u += cu
+                t += ct
+            return u, t
+
+        def _node_folder_type(node: _FolderTreeNode, depth: int) -> FolderType:
+            if depth > 0:
+                return FolderType.CUSTOM
+            if node.folder is not None:
+                return node.folder.folder_type
+            return classify_folder_type(node.path_parts)
+
+        type_order = {
+            FolderType.INBOX: 0,
+            FolderType.STARRED: 1,
+            FolderType.SENT: 2,
+            FolderType.DRAFTS: 3,
+            FolderType.ARCHIVE: 4,
+            FolderType.SPAM: 5,
+            FolderType.TRASH: 6,
+            FolderType.CUSTOM: 7,
+        }
+
+        def _child_sort_key(node: _FolderTreeNode) -> tuple[int, int, str]:
+            seg = node.segment.strip()
+            if seg.isdigit():
+                return (0, -int(seg), "")
+            if seg.lower() == "inbox":
+                return (1, 0, "inbox")
+            return (2, 0, seg.lower())
+
+        out_rows: list[FolderTreeRow] = []
+
+        def _emit(node: _FolderTreeNode, depth: int, is_last: bool) -> None:
+            tree_key = f"{account_id}:{'/'.join(node.path_parts)}"
+            has_children = bool(node.children)
+            is_expanded = tree_key not in self.collapsed_folders
+            sub_u, sub_t = _subtree_counts(node)
+
+            if (
+                node.folder is not None
+                and is_expanded
+                and (node.folder.unread_count > 0 or node.folder.total_count > 0 or not has_children)
+            ):
+                u_cnt, t_cnt = node.folder.unread_count, node.folder.total_count
+            else:
+                u_cnt, t_cnt = sub_u, sub_t
+
+            if depth == 0:
+                ftype = _node_folder_type(node, 0)
+                if node.folder is not None:
+                    label = node.folder.display_name
+                    icon = node.folder.icon
+                else:
+                    label = "Inbox" if ftype == FolderType.INBOX else node.segment
+                    icon = Folder(
+                        id="",
+                        account_id=account_id,
+                        name=node.segment,
+                        display_name=label,
+                        folder_type=ftype,
+                    ).icon
+            else:
+                label = node.segment
+                icon = ("📂" if is_expanded else "📁") if has_children else "📁"
+
+            folder_name = node.folder.name if node.folder is not None else "/".join(node.path_parts)
+            selectable_mailbox = node.folder is not None
+
+            out_rows.append(
+                FolderTreeRow(
+                    account_id=account_id,
+                    folder_name=folder_name,
+                    label=label,
+                    icon=icon,
+                    unread_count=u_cnt,
+                    total_count=t_cnt,
+                    depth=depth,
+                    has_children=has_children,
+                    is_expanded=is_expanded,
+                    is_last_sibling=is_last,
+                    tree_key=tree_key,
+                    selectable_mailbox=selectable_mailbox,
+                )
+            )
+
+            if has_children and is_expanded:
+                sorted_children = sorted(node.children.values(), key=_child_sort_key)
+                for idx, child in enumerate(sorted_children):
+                    _emit(child, depth + 1, idx == len(sorted_children) - 1)
+
+        sorted_roots = sorted(
+            roots.values(),
+            key=lambda n: (type_order.get(_node_folder_type(n, 0), 7), n.segment.lower()),
+        )
+        for idx, root_node in enumerate(sorted_roots):
+            _emit(root_node, 0, idx == len(sorted_roots) - 1)
+
+        return out_rows
+
     def _rebuild_folder_rows(self) -> None:
         rows: list[FolderTreeRow] = []
         unified_counts = self.store.get_unified_counts()
@@ -280,31 +427,44 @@ class EspressoMailApp(Model):
                     badge_color=acc.color_badge,
                 )
             )
-            for f in self.store.list_folders(acc.id):
-                rows.append(
-                    FolderTreeRow(
-                        account_id=acc.id,
-                        folder_name=f.name,
-                        label=f.display_name,
-                        icon=f.icon,
-                        unread_count=f.unread_count,
-                        total_count=f.total_count,
-                    )
-                )
+            acc_folders = self.store.list_folders(acc.id)
+            rows.extend(self._build_account_folder_tree_rows(acc.id, acc_folders))
+
+        prev_row: FolderTreeRow | None = None
+        if 0 <= self.folder_cursor < len(self.folder_rows):
+            candidate = self.folder_rows[self.folder_cursor]
+            if not candidate.is_header:
+                prev_row = candidate
 
         self.folder_rows = rows
-        # Ensure folder_cursor points to a selectable non-header row matching active selection
+
+        # 1. If cursor was already on a non-header row, keep it on that row (or its collapsed parent)
+        if prev_row is not None:
+            for idx, r in enumerate(self.folder_rows):
+                if (
+                    not r.is_header
+                    and r.account_id == prev_row.account_id
+                    and (
+                        (prev_row.tree_key and r.tree_key == prev_row.tree_key)
+                        or (not prev_row.tree_key and r.folder_name == prev_row.folder_name)
+                    )
+                ):
+                    self.folder_cursor = idx
+                    return
+
+        # 2. Otherwise align cursor with active_account_id / active_folder
         for idx, r in enumerate(self.folder_rows):
             if not r.is_header and r.account_id == self.active_account_id and r.folder_name == self.active_folder:
                 self.folder_cursor = idx
+                return
+
+        # 3. Fallback to first selectable mailbox row
+        for idx, r in enumerate(self.folder_rows):
+            if not r.is_header and r.selectable_mailbox:
+                self.folder_cursor = idx
+                self.active_account_id = r.account_id
+                self.active_folder = r.folder_name
                 break
-        else:
-            for idx, r in enumerate(self.folder_rows):
-                if not r.is_header:
-                    self.folder_cursor = idx
-                    self.active_account_id = r.account_id
-                    self.active_folder = r.folder_name
-                    break
 
     def _rebuild_message_rows(self) -> None:
         raw_msgs = self.store.list_messages(
@@ -630,19 +790,53 @@ class EspressoMailApp(Model):
             idx = panes.index(self.focused_pane)
             self.focused_pane = panes[max(0, idx - 1)]
             return self, None
-        if k in ("right", "l") and self.focused_pane == "folders":
-            self.focused_pane = "messages"
-            return self, None
 
         # Pane-specific navigation
         if self.focused_pane == "folders":
             if k in ("down", "j"):
                 self._step_folder_cursor(1)
-            elif k in ("up", "k"):
+                return self, None
+            if k in ("up", "k"):
                 self._step_folder_cursor(-1)
-            elif k in ("enter", " ", "space"):
+                return self, None
+            if k in ("left", "h"):
+                if 0 <= self.folder_cursor < len(self.folder_rows):
+                    cur_row = self.folder_rows[self.folder_cursor]
+                    if cur_row.has_children and cur_row.is_expanded and cur_row.tree_key:
+                        self.collapsed_folders.add(cur_row.tree_key)
+                        self._rebuild_folder_rows()
+                        self.status_message = f"Collapsed '{cur_row.label}'."
+                return self, None
+            if k in ("right", "l"):
+                if 0 <= self.folder_cursor < len(self.folder_rows):
+                    cur_row = self.folder_rows[self.folder_cursor]
+                    if cur_row.has_children and not cur_row.is_expanded and cur_row.tree_key:
+                        self.collapsed_folders.discard(cur_row.tree_key)
+                        self._rebuild_folder_rows()
+                        self.status_message = f"Expanded '{cur_row.label}'."
+                        return self, None
+                self.focused_pane = "messages"
+                return self, None
+            if k in (" ", "space"):
+                if 0 <= self.folder_cursor < len(self.folder_rows):
+                    cur_row = self.folder_rows[self.folder_cursor]
+                    if cur_row.has_children and cur_row.tree_key:
+                        self._toggle_folder_expand(cur_row)
+                        return self, None
+                self._activate_selected_folder()
+                return self, None
+            if k == "enter":
+                if 0 <= self.folder_cursor < len(self.folder_rows):
+                    cur_row = self.folder_rows[self.folder_cursor]
+                    if cur_row.has_children and not cur_row.selectable_mailbox:
+                        self._toggle_folder_expand(cur_row)
+                        return self, None
+                    if cur_row.has_children and not cur_row.is_expanded and cur_row.tree_key:
+                        self.collapsed_folders.discard(cur_row.tree_key)
+                        self._rebuild_folder_rows()
                 self._activate_selected_folder()
                 self.focused_pane = "messages"
+                return self, None
             return self, None
 
         if self.focused_pane == "messages":
@@ -675,6 +869,18 @@ class EspressoMailApp(Model):
             return self, cmd
 
         return self, None
+
+    def _toggle_folder_expand(self, row: FolderTreeRow) -> None:
+        if not row.tree_key:
+            return
+        if row.tree_key in self.collapsed_folders:
+            self.collapsed_folders.discard(row.tree_key)
+            self._rebuild_folder_rows()
+            self.status_message = f"Expanded '{row.label}'."
+        else:
+            self.collapsed_folders.add(row.tree_key)
+            self._rebuild_folder_rows()
+            self.status_message = f"Collapsed '{row.label}'."
 
     def _handle_mouse(self, msg: MouseMsg) -> tuple[EspressoMailApp, Cmd | None]:
         # Top menu bar row (y == 0)
@@ -710,7 +916,13 @@ class EspressoMailApp(Model):
                 clicked_idx = self.folder_scroll + body_y
                 if 0 <= clicked_idx < len(self.folder_rows) and not self.folder_rows[clicked_idx].is_header:
                     self.folder_cursor = clicked_idx
-                    self._activate_selected_folder()
+                    clicked_row = self.folder_rows[clicked_idx]
+                    if clicked_row.has_children and (
+                        not clicked_row.selectable_mailbox or msg.x <= 6 + clicked_row.depth * 2
+                    ):
+                        self._toggle_folder_expand(clicked_row)
+                    else:
+                        self._activate_selected_folder()
             elif target_pane == "messages":
                 clicked_idx = self.message_scroll + body_y
                 if 0 <= clicked_idx < len(self.message_rows):
@@ -728,20 +940,31 @@ class EspressoMailApp(Model):
             idx = (idx + direction) % len(self.folder_rows)
             if not self.folder_rows[idx].is_header:
                 self.folder_cursor = idx
-                self._activate_selected_folder()
+                row = self.folder_rows[idx]
+                if row.selectable_mailbox:
+                    self._activate_selected_folder()
+                else:
+                    self.status_message = (
+                        f"Folder group '{row.label}' ({row.total_count} messages — Space/Enter to toggle)"
+                    )
                 break
 
     def _activate_selected_folder(self) -> None:
         if 0 <= self.folder_cursor < len(self.folder_rows):
             row = self.folder_rows[self.folder_cursor]
-            if not row.is_header:
+            if not row.is_header and row.selectable_mailbox:
                 self.active_account_id = row.account_id
                 self.active_folder = row.folder_name
                 self.message_cursor = 0
                 self.message_scroll = 0
                 self._rebuild_message_rows()
                 self._update_reader_viewport(force=True)
-                self.status_message = f"Opened {row.label} ({len(self.message_rows)} items)"
+                path_label = (
+                    row.label
+                    if row.account_id == "*"
+                    else " / ".join(split_folder_hierarchy(row.folder_name))
+                )
+                self.status_message = f"Opened {path_label} ({len(self.message_rows)} items)"
 
     def _on_message_selection_changed(self) -> None:
         m = self.selected_message
@@ -1180,7 +1403,18 @@ class EspressoMailApp(Model):
             )
             marker = "▸" if is_selected else ("•" if is_active else " ")
             count_badge = f"({row.unread_count})" if row.unread_count > 0 else (f"{row.total_count}" if row.total_count > 0 else "")
-            lbl_raw = f" {marker} {row.icon} {row.label}"
+
+            if row.depth == 0:
+                branch = ("▾ " if row.is_expanded else "▸ ") if row.has_children else ""
+                lbl_raw = f" {marker} {branch}{row.icon} {row.label}"
+            else:
+                indent = "  " * row.depth
+                if row.has_children:
+                    connector = "▾ " if row.is_expanded else "▸ "
+                else:
+                    connector = "╰─ " if row.is_last_sibling else "├─ "
+                lbl_raw = f" {marker} {indent}{connector}{row.icon} {row.label}"
+
             pad = max(1, inner_w - string_width(lbl_raw) - len(count_badge) - 1)
             line_str = truncate_ansi(f"{lbl_raw}{' ' * pad}{count_badge} ", inner_w)
 
@@ -1287,7 +1521,12 @@ class EspressoMailApp(Model):
                     lines.append(Style().foreground(self.theme.fg_primary).render(trimmed))
 
         folder_label = "Unified" if self.active_account_id == "*" else self.active_account_id
-        pane_title = f"✉️ {self.active_folder} ({folder_label})"
+        folder_path = (
+            self.active_folder
+            if self.active_account_id == "*"
+            else " / ".join(split_folder_hierarchy(self.active_folder))
+        )
+        pane_title = f"✉️ {folder_path} ({folder_label})"
 
         return self.theme.pane_style(
             focused=(self.focused_pane == "messages"),
