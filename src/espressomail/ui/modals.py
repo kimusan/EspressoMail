@@ -56,6 +56,7 @@ class ModalClosedMsg(Msg):
     """Emitted when a modal dialog is dismissed."""
 
     status_note: str = ""
+    trigger_sync: bool = False
 
 
 @dataclass(frozen=True)
@@ -1105,7 +1106,10 @@ class AccountSettingsModal(Model):
                     return self, None
                 self.store.save_account(updated)
                 self.accounts = self.store.list_accounts()
-                return self, lambda: ModalClosedMsg(f"✔ Updated settings for {updated.email}.")
+                return self, lambda: ModalClosedMsg(
+                    f"✔ Updated settings for {updated.email}. Synchronizing...",
+                    trigger_sync=True,
+                )
 
             if k in ("enter", "ctrl+s"):
                 updated, err = self._build_updated_account()
@@ -1120,7 +1124,10 @@ class AccountSettingsModal(Model):
                     return self, None
                 self.store.save_account(updated)
                 self.accounts = self.store.list_accounts()
-                return self, lambda: ModalClosedMsg(f"✔ Verified and saved settings for {updated.email}.")
+                return self, lambda: ModalClosedMsg(
+                    f"✔ Verified and saved settings for {updated.email}. Synchronizing...",
+                    trigger_sync=True,
+                )
 
             if k in ("tab", "down"):
                 self.focus_idx = (self.focus_idx + 1) % 13

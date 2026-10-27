@@ -160,6 +160,7 @@ class EspressoMailApp(Model):
 
         self.folder_rows: list[FolderTreeRow] = []
         self.folder_cursor = 0
+        self.folder_scroll = 0
         self.active_account_id = "*"
         self.active_folder = "INBOX"
 
@@ -218,6 +219,9 @@ class EspressoMailApp(Model):
     def init(self) -> Cmd | None:
         if self.show_splash:
             return self.splash.init()
+        if any(acc.imap_password for acc in self.store.list_accounts(enabled_only=True)):
+            self.status_message = "Synchronizing IMAP accounts..."
+            return self._sync_accounts_cmd
         return None
 
     # ------------------------------------------------------------------
@@ -430,6 +434,10 @@ class EspressoMailApp(Model):
                         allow_cancel=False,
                         credential_validator=self.credential_validator,
                     )
+                    return self, None
+                if any(acc.imap_password for acc in self.store.list_accounts(enabled_only=True)):
+                    self.status_message = "Synchronizing IMAP accounts..."
+                    return self, self._sync_accounts_cmd
                 return self, None
             self.splash, cmd = self.splash.update(msg)
             return self, cmd
@@ -446,13 +454,17 @@ class EspressoMailApp(Model):
                     self.active_account_id = msg.account.id
                     self.active_folder = "INBOX"
                     self.status_message = (
-                        f"✔ Verified and configured account {msg.account.email}!"
+                        f"✔ Verified and configured account {msg.account.email}! Synchronizing..."
                     )
                     self.refresh_data()
                     return self, self._sync_accounts_cmd
                 self.refresh_data()
                 return self, None
             self.onboarding, cmd = self.onboarding.update(msg)
+            if cmd is not None and callable(cmd):
+                emitted = cmd()
+                if isinstance(emitted, OnboardingCompleteMsg):
+                    return self.update(emitted)
             return self, cmd
 
         # 5. Command Palette (Ctrl+P)
@@ -485,6 +497,9 @@ class EspressoMailApp(Model):
                         allow_cancel=False,
                         credential_validator=self.credential_validator,
                     )
+                    return self, None
+                if msg.trigger_sync:
+                    return self, self._sync_accounts_cmd
                 return self, None
             if isinstance(msg, ComposeSubmittedMsg):
                 return self._handle_compose_submitted(msg)
@@ -691,9 +706,10 @@ class EspressoMailApp(Model):
 
         if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
             self.focused_pane = target_pane
-            if target_pane == "folders" and 0 <= body_y < len(self.folder_rows):
-                if not self.folder_rows[body_y].is_header:
-                    self.folder_cursor = body_y
+            if target_pane == "folders":
+                clicked_idx = self.folder_scroll + body_y
+                if 0 <= clicked_idx < len(self.folder_rows) and not self.folder_rows[clicked_idx].is_header:
+                    self.folder_cursor = clicked_idx
                     self._activate_selected_folder()
             elif target_pane == "messages":
                 clicked_idx = self.message_scroll + body_y
@@ -1048,22 +1064,36 @@ class EspressoMailApp(Model):
     def _sync_accounts_cmd(self) -> Msg:
         accounts = self.store.list_accounts(enabled_only=True)
         total_synced = 0
+        total_folders = 0
         online_accounts = 0
+        errors: list[str] = []
         for acc in accounts:
             if not acc.imap_password:
                 continue
             try:
-                client = IMAPClient(acc, timeout=5.0)
+                client = IMAPClient(acc, timeout=20.0)
                 client.connect()
-                total_synced += client.sync_to_store(self.store)
-                client.disconnect()
+                try:
+                    total_synced += client.sync_to_store(self.store)
+                finally:
+                    client.disconnect()
+                total_folders += len(self.store.list_folders(acc.id))
                 online_accounts += 1
-            except Exception:
-                pass
+            except Exception as exc:
+                errors.append(f"{acc.email}: {exc}")
         if online_accounts > 0:
+            err_suffix = f" (Warnings: {'; '.join(errors)})" if errors else ""
             return SyncCompletedMsg(
                 synced_count=total_synced,
-                summary=f"✔ Synchronized {total_synced} messages across {online_accounts} IMAP account(s).",
+                summary=(
+                    f"✔ Synchronized {total_synced} message(s) across {total_folders} folder(s) "
+                    f"({online_accounts} IMAP account(s)).{err_suffix}"
+                ),
+            )
+        if errors:
+            return SyncCompletedMsg(
+                synced_count=0,
+                summary=f"⚠ IMAP sync failed: {'; '.join(errors)}",
             )
         return SyncCompletedMsg(
             synced_count=0,
@@ -1130,7 +1160,14 @@ class EspressoMailApp(Model):
         inner_h = max(4, height - 2)
         lines: list[str] = []
 
-        for idx, row in enumerate(self.folder_rows[:inner_h]):
+        if self.folder_cursor < self.folder_scroll:
+            self.folder_scroll = self.folder_cursor
+        elif self.folder_cursor >= self.folder_scroll + inner_h:
+            self.folder_scroll = self.folder_cursor - inner_h + 1
+
+        visible_folders = self.folder_rows[self.folder_scroll : self.folder_scroll + inner_h]
+        for offset, row in enumerate(visible_folders):
+            idx = self.folder_scroll + offset
             if row.is_header:
                 hdr_color = row.badge_color or self.theme.accent_secondary
                 hdr_txt = truncate_ansi(f" {row.icon} {row.label}", inner_w)

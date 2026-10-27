@@ -129,11 +129,13 @@ class TestUIAndApp(unittest.TestCase):
         self.assertIsInstance(app.active_modal, AccountSettingsModal)
         self.assertIn("Bad password", modal.error_msg)
 
-        # Update password and IMAP host, then save with Ctrl+S -> validates, persists to store, and closes modal
+        # Update password and IMAP host, then save with Ctrl+S -> validates, persists to store, closes modal, and triggers IMAP sync
         modal.input_password.value = "new-updated-pass!"
         modal.input_imap_host.value = "mail2.schulz.dk"
-        app, _ = app.update(KeyMsg("ctrl+s"))
+        app, sync_cmd = app.update(KeyMsg("ctrl+s"))
         self.assertIsNone(app.active_modal)
+        self.assertEqual(sync_cmd, app._sync_accounts_cmd)
+        self.assertIn("Synchronizing", app.status_message)
 
         updated_acc = self.store.get_account("acc_work")
         assert updated_acc is not None

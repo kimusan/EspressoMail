@@ -193,6 +193,101 @@ class TestProtocolsAndCrypto(unittest.TestCase):
         self.assertEqual(decrypted.status, PGPStatus.DECRYPTED_VERIFIED)
         self.assertEqual(decrypted.payload, "Confidential server credentials")
 
+    def test_imap_list_parsing_and_sync_to_store(self) -> None:
+        from espressomail.models.entities import FolderType
+        from espressomail.protocols.imap_client import (
+            IMAPClient,
+            decode_imap_utf7,
+            parse_imap_list_response,
+        )
+        from espressomail.storage import LocalStore
+
+        # 1. Modified UTF-7 decoding
+        self.assertEqual(decode_imap_utf7("Entw&APw-rfe"), "Entwürfe")
+        self.assertEqual(decode_imap_utf7("Coffee & Tea"), "Coffee & Tea")
+
+        # 2. Various IMAP LIST response formats (NIL delimiter, INBOX. prefix, spaces)
+        self.assertEqual(
+            parse_imap_list_response(b'(\\HasNoChildren) NIL INBOX'),
+            ("\\HasNoChildren", "/", "INBOX"),
+        )
+        self.assertEqual(
+            parse_imap_list_response(b'(\\HasNoChildren \\Sent) "." "INBOX.Sent Items"'),
+            ("\\HasNoChildren \\Sent", ".", "INBOX.Sent Items"),
+        )
+        self.assertEqual(
+            parse_imap_list_response(b'(\\HasNoChildren \\Trash) "/" "[Gmail]/Trash"'),
+            ("\\HasNoChildren \\Trash", "/", "[Gmail]/Trash"),
+        )
+
+        # 3. Full IMAPClient.sync_to_store against a simulated IMAP4 connection
+        mime_msg, _ = build_mime_message(
+            account=self.account,
+            recipients_to=["kim@schulz.dk"],
+            subject="Live Synced Welcome Message",
+            body_text="Synced from IMAP server!",
+        )
+        raw_rfc822 = mime_msg.as_bytes()
+
+        class FakeIMAPConn:
+            def list(self) -> tuple[str, list[bytes]]:
+                return (
+                    "OK",
+                    [
+                        b'(\\HasNoChildren) "." INBOX',
+                        b'(\\HasNoChildren \\Sent) "." "INBOX.Sent"',
+                        b'(\\HasNoChildren) "." "INBOX.Projects"',
+                    ],
+                )
+
+            def select(self, mailbox: str, readonly: bool = True) -> tuple[str, list[bytes]]:
+                return ("OK", [b"1"])
+
+            def uid(self, command: str, *args: str) -> tuple[str, list[object]]:
+                if command == "SEARCH":
+                    return ("OK", [b"101"])
+                if command == "FETCH":
+                    uid_arg = args[0]
+                    if "101" in uid_arg:
+                        return (
+                            "OK",
+                            [
+                                (
+                                    b"1 (UID 101 FLAGS (\\Seen) BODY[] {"
+                                    + str(len(raw_rfc822)).encode()
+                                    + b"}",
+                                    raw_rfc822,
+                                ),
+                                b")",
+                            ],
+                        )
+                return ("OK", [])
+
+        store = LocalStore(":memory:")
+        store.save_account(self.account)
+        client = IMAPClient(self.account)
+        client._conn = FakeIMAPConn()  # type: ignore[assignment]
+
+        synced_cnt = client.sync_to_store(store)
+        self.assertGreaterEqual(synced_cnt, 1)
+
+        folders = store.list_folders(self.account.id)
+        folder_names = [f.name for f in folders]
+        self.assertIn("INBOX", folder_names)
+        self.assertIn("INBOX.Sent", folder_names)
+        self.assertIn("INBOX.Projects", folder_names)
+
+        inbox_msgs = store.list_messages(account_id=self.account.id, folder="INBOX")
+        self.assertEqual(len(inbox_msgs), 1)
+        self.assertEqual(inbox_msgs[0].subject, "Live Synced Welcome Message")
+        self.assertTrue(inbox_msgs[0].is_read)
+
+        # Unified Sent should include messages in INBOX.Sent because its folder_type is SENT
+        sent_msgs = store.list_messages(account_id="*", folder="Sent")
+        self.assertEqual(len(sent_msgs), 1)
+        store.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+
