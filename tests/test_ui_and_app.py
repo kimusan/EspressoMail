@@ -608,7 +608,87 @@ class TestUIAndApp(unittest.TestCase):
         app, _ = app.update(MouseMsg(x=click_x, y=2, button=MouseButton.LEFT, action=MouseAction.PRESS))
         self.assertEqual(app.message_cursor, 0)
 
+    def test_splitter_pull_mouse_and_keyboard_resizing(self) -> None:
+        """Test pulling the splitter between message list and message view via mouse drag and keyboard."""
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.width = 120
+        app.height = 34
+
+        init_folder_w, init_list_w, init_reader_w = app._pane_widths()
+        self.assertEqual(init_folder_w + init_list_w + init_reader_w, 120)
+        self.assertIsNone(app.custom_list_w)
+
+        split_x = init_folder_w + init_list_w
+
+        # 1. Grab splitter with left mouse button
+        app, _ = app.update(
+            MouseMsg(x=split_x, y=10, button=MouseButton.LEFT, action=MouseAction.PRESS)
+        )
+        self.assertTrue(app.splitter_dragging)
+
+        # 2. Pull splitter to the left (x - 6) to widen the reading pane
+        target_drag_x = split_x - 6
+        app, _ = app.update(
+            MouseMsg(x=target_drag_x, y=10, button=MouseButton.LEFT, action=MouseAction.MOTION)
+        )
+        self.assertTrue(app.splitter_dragging)
+        new_folder_w, new_list_w, new_reader_w = app._pane_widths()
+        self.assertEqual(new_list_w, init_list_w - 6)
+        self.assertEqual(new_reader_w, init_reader_w + 6)
+        self.assertEqual(new_folder_w + new_list_w + new_reader_w, 120)
+
+        # 3. Release mouse: splitter drag ends and custom_list_w is persisted
+        app, _ = app.update(
+            MouseMsg(x=target_drag_x, y=10, button=MouseButton.LEFT, action=MouseAction.RELEASE)
+        )
+        self.assertFalse(app.splitter_dragging)
+        self.assertEqual(self.store.get_setting("custom_list_w"), str(new_list_w))
+
+        # 4. Starting a new session restores the custom splitter width
+        app_restored = EspressoMailApp(store=self.store, show_splash=False)
+        app_restored.width = 120
+        self.assertEqual(app_restored.custom_list_w, new_list_w)
+        _, restored_list_w, restored_reader_w = app_restored._pane_widths()
+        self.assertEqual(restored_list_w, new_list_w)
+        self.assertEqual(restored_reader_w, new_reader_w)
+
+        # 5. Keyboard resizing: '[' widens reader, ']' widens list
+        prev_list_w = app_restored._pane_widths()[1]
+        app_restored, _ = app_restored.update(KeyMsg(key="["))
+        self.assertEqual(app_restored._pane_widths()[1], prev_list_w - 3)
+
+        app_restored, _ = app_restored.update(KeyMsg(key="]"))
+        self.assertEqual(app_restored._pane_widths()[1], prev_list_w)
+
+        # 6. Clamping bounds: drag to extreme left and right
+        # Extreme left clamp (min_list_w = 24)
+        app_restored._apply_splitter_move(0)
+        self.assertEqual(app_restored._pane_widths()[1], 24)
+        self.assertEqual(sum(app_restored._pane_widths()), 120)
+
+        # Extreme right clamp (reader must have at least min_reader_w = 26)
+        app_restored._apply_splitter_move(500)
+        _, clamped_max_list, clamped_reader = app_restored._pane_widths()
+        self.assertGreaterEqual(clamped_reader, 26)
+        self.assertEqual(sum(app_restored._pane_widths()), 120)
+
+        # 7. Double-click splitter resets width to default
+        cur_split_x = app_restored._pane_widths()[0] + app_restored._pane_widths()[1]
+        app_restored, _ = app_restored.update(
+            MouseMsg(x=cur_split_x, y=8, button=MouseButton.LEFT, action=MouseAction.DOUBLE_CLICK)
+        )
+        self.assertIsNone(app_restored.custom_list_w)
+        self.assertEqual(self.store.get_setting("custom_list_w"), "")
+        self.assertEqual(app_restored._pane_widths(), (init_folder_w, init_list_w, init_reader_w))
+
+        # Verify UI view renders cleanly with resized pane
+        view_str = app_restored.view()
+        self.assertIn("Mailboxes", view_str)
+        self.assertIn("Reading Pane", view_str)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

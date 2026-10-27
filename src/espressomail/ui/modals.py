@@ -1295,6 +1295,7 @@ class HelpModal(Model):
             f"  {k_style.render('Tab / Shift+Tab')}   Cycle focus across Folders, Message List, and Reading Pane",
             f"  {k_style.render('j / k / ↑ / ↓')}     Navigate folders, threads, or scroll reading pane",
             f"  {k_style.render('Enter / Space')}     Select folder, open message, or expand/collapse thread",
+            f"  {k_style.render('[ / ]')}             Resize splitter (widen reading pane / message list; or drag with mouse)",
             f"  {k_style.render('U')}                 Jump directly to Unified Inbox (all accounts)",
             f"  {k_style.render('F10 / m')}           Open interactive top drop-down Menu Bar",
             "",

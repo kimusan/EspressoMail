@@ -195,6 +195,11 @@ class EspressoMailApp(Model):
         self._last_rendered_msg_key = ""
         self._accounts_cache: dict[str, AccountConfig] = {}
 
+        # Splitter resize state between Message List (Pane 2) and Reading Pane (Pane 3)
+        saved_list_w = self.store.get_setting("custom_list_w", "")
+        self.custom_list_w: int | None = int(saved_list_w) if saved_list_w.isdigit() else None
+        self.splitter_dragging: bool = False
+
         # Active modal overlay
         self.active_modal: Model | None = None
 
@@ -241,6 +246,9 @@ class EspressoMailApp(Model):
             PaletteItem("toggle_threading", "View: Toggle Message Threading", "Group conversations into threads", "t", "View"),
             PaletteItem("cycle_theme", "Theme: Cycle Color Scheme", "Switch terminal color palette", "T", "Theme"),
             PaletteItem("cycle_image_mode", "View: Cycle Image Renderer", "Switch Chafa / Sixel / Kitty / Half-Block", "i", "View"),
+            PaletteItem("expand_reader", "View: Widen Reading Pane", "Move splitter left to widen reading pane", "[", "View"),
+            PaletteItem("expand_list", "View: Widen Message List", "Move splitter right to widen message list", "]", "View"),
+            PaletteItem("reset_splitter", "View: Reset Splitter Width", "Reset pane widths to responsive defaults", "", "View"),
             PaletteItem("save_attachments", "Mail: Download Attachments", "Save attachments to downloads directory", "w", "Mail"),
             PaletteItem("address_book", "Tools: Local Address Book", "Manage contacts and PGP fingerprints", "B", "Tools"),
             PaletteItem("sieve_filters", "Tools: ManageSieve Filter Rules", "Configure RFC 5228 Sieve scripts", "F", "Tools"),
@@ -549,9 +557,32 @@ class EspressoMailApp(Model):
         """Compute responsive widths for (folder_pane, list_pane, reader_pane)."""
         total_w = max(80, self.width)
         folder_w = max(24, min(30, int(total_w * 0.21)))
-        list_w = max(32, min(46, int(total_w * 0.34)))
-        reader_w = max(30, total_w - folder_w - list_w)
+        min_list_w = 24
+        min_reader_w = 26
+        max_list_w = max(min_list_w, total_w - folder_w - min_reader_w)
+        if self.custom_list_w is not None:
+            list_w = max(min_list_w, min(max_list_w, self.custom_list_w))
+        else:
+            default_list_w = max(32, min(46, int(total_w * 0.34)))
+            list_w = max(min_list_w, min(max_list_w, default_list_w))
+        reader_w = max(min_reader_w, total_w - folder_w - list_w)
         return folder_w, list_w, reader_w
+
+    def _apply_splitter_move(self, mouse_x: int) -> None:
+        """Apply dynamic splitter movement to adjust list and reader pane widths."""
+        total_w = max(80, self.width)
+        folder_w = max(24, min(30, int(total_w * 0.21)))
+        min_list_w = 24
+        min_reader_w = 26
+        max_list_w = max(min_list_w, total_w - folder_w - min_reader_w)
+        desired_list_w = mouse_x - folder_w
+        self.custom_list_w = max(min_list_w, min(max_list_w, desired_list_w))
+        self._update_reader_viewport(force=True)
+        _, current_list_w, current_reader_w = self._pane_widths()
+        self.status_message = (
+            f"Resizing pane: list = {current_list_w} cols, reader = {current_reader_w} cols"
+        )
+
 
     def _pane_height(self) -> int:
         # Top menu bar (1 line) + Bottom status bar (1 line)
@@ -823,6 +854,10 @@ class EspressoMailApp(Model):
             return self._execute_action("new_account")
         if k == "S":
             return self._execute_action("sync_all")
+        if k in ("[", "{"):
+            return self._execute_action("expand_reader")
+        if k in ("]", "}"):
+            return self._execute_action("expand_list")
 
         # Pane focus cycling
         panes = ["folders", "messages", "reader"]
@@ -942,7 +977,51 @@ class EspressoMailApp(Model):
             return self, cmd
 
         folder_w, list_w, _ = self._pane_widths()
+        split_x = folder_w + list_w
         body_y = msg.y - 2  # Account for menu bar (1) + top pane border (1)
+
+        # 1. Splitter Drag & Double-Click interactions between message list and reading pane
+        if (
+            msg.action == MouseAction.PRESS
+            and msg.button == MouseButton.LEFT
+            and 1 <= msg.y < self.height - 1
+            and abs(msg.x - split_x) <= 1
+        ):
+            self.splitter_dragging = True
+            self._apply_splitter_move(msg.x)
+            return self, None
+
+        if msg.action == MouseAction.MOTION:
+            if self.splitter_dragging:
+                self._apply_splitter_move(msg.x)
+                return self, None
+            return self, None
+
+        if msg.action == MouseAction.RELEASE:
+            if self.splitter_dragging:
+                self.splitter_dragging = False
+                if self.custom_list_w is not None:
+                    self.store.set_setting("custom_list_w", str(self.custom_list_w))
+                    self.status_message = (
+                        f"Splitter resized: message list width = {self.custom_list_w} cols."
+                    )
+                return self, None
+            return self, None
+
+        if (
+            msg.action == MouseAction.DOUBLE_CLICK
+            and 1 <= msg.y < self.height - 1
+            and abs(msg.x - split_x) <= 1
+        ):
+            self.splitter_dragging = False
+            self.custom_list_w = None
+            self.store.set_setting("custom_list_w", "")
+            self._update_reader_viewport(force=True)
+            self.status_message = "Splitter reset to default responsive width."
+            return self, None
+
+        if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
+            self.splitter_dragging = False
 
         # Determine which pane the mouse is over
         if msg.x < folder_w:
@@ -1135,6 +1214,37 @@ class EspressoMailApp(Model):
             self.status_message = (
                 "Showing raw RFC 5322 headers." if self.show_raw_headers else "Hiding raw RFC 5322 headers."
             )
+            return self, None
+
+        if action_id == "expand_reader":
+            folder_w, list_w, _ = self._pane_widths()
+            min_list_w = 24
+            new_list_w = max(min_list_w, list_w - 3)
+            self.custom_list_w = new_list_w
+            self.store.set_setting("custom_list_w", str(self.custom_list_w))
+            self._update_reader_viewport(force=True)
+            _, _, new_reader_w = self._pane_widths()
+            self.status_message = f"Splitter moved: reading pane expanded to {new_reader_w} cols ([ / ] to adjust)."
+            return self, None
+
+        if action_id == "expand_list":
+            total_w = max(80, self.width)
+            folder_w, list_w, _ = self._pane_widths()
+            min_list_w = 24
+            min_reader_w = 26
+            max_list_w = max(min_list_w, total_w - folder_w - min_reader_w)
+            new_list_w = min(max_list_w, list_w + 3)
+            self.custom_list_w = new_list_w
+            self.store.set_setting("custom_list_w", str(self.custom_list_w))
+            self._update_reader_viewport(force=True)
+            self.status_message = f"Splitter moved: message list expanded to {new_list_w} cols ([ / ] to adjust)."
+            return self, None
+
+        if action_id == "reset_splitter":
+            self.custom_list_w = None
+            self.store.set_setting("custom_list_w", "")
+            self._update_reader_viewport(force=True)
+            self.status_message = "Splitter reset to default responsive width."
             return self, None
 
         if action_id == "compose":

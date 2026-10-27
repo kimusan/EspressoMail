@@ -72,6 +72,9 @@ DEFAULT_MENUS: tuple[MenuCategory, ...] = (
             MenuItem("cycle_theme", "Switch Color Scheme / Theme", "T"),
             MenuItem("cycle_image_mode", "Cycle Image Renderer (Chafa/Sixel)", "i"),
             MenuItem("toggle_headers", "Toggle Raw RFC 5322 Headers", "H"),
+            MenuItem("expand_reader", "Widen Reading Pane", "["),
+            MenuItem("expand_list", "Widen Message List", "]"),
+            MenuItem("reset_splitter", "Reset Splitter Width", ""),
         ),
     ),
     MenuCategory(
