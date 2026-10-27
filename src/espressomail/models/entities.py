@@ -240,6 +240,7 @@ class Folder:
     uid_validity: int = 0
     last_uid: int = 0
     selectable: bool = True
+    subscribed: bool = True
 
     @property
     def path_parts(self) -> tuple[str, ...]:

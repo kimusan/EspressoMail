@@ -49,6 +49,7 @@ from espresso.crema import (
 from espressomail.crypto.pgp import PGPManager
 from espressomail.models.entities import (
     AccountConfig,
+    Contact,
     EmailMessage,
     EmailThread,
     Folder,
@@ -113,6 +114,7 @@ class FolderTreeRow:
     is_last_sibling: bool = False
     tree_key: str = ""
     selectable_mailbox: bool = True
+    subscribed: bool = True
 
 
 @dataclass
@@ -304,6 +306,7 @@ class EspressoMailApp(Model):
                     is_last_sibling=False,
                     tree_key=r.tree_key,
                     selectable_mailbox=r.selectable_mailbox,
+                    subscribed=getattr(r, "subscribed", True),
                 )
             )
         return rows
@@ -549,6 +552,8 @@ class EspressoMailApp(Model):
                 for child in sorted_children:
                     child_nodes.append(_to_tree_node(child, depth + 1))
 
+            subscribed = node.folder.subscribed if node.folder is not None else True
+
             row = FolderTreeRow(
                 account_id=account_id,
                 folder_name=folder_name,
@@ -562,6 +567,7 @@ class EspressoMailApp(Model):
                 is_last_sibling=False,
                 tree_key=tree_key,
                 selectable_mailbox=selectable_mailbox,
+                subscribed=subscribed,
             )
 
             return TreeNode(
@@ -583,6 +589,7 @@ class EspressoMailApp(Model):
 
         unified_defs = [
             ("INBOX", "Unified Inbox", "📥"),
+            ("All Unread", "All Unread", "✉️"),
             ("Starred", "All Starred", "⭐"),
             ("Drafts", "All Drafts", "📝"),
             ("Sent", "All Sent", "📤"),
@@ -1125,7 +1132,11 @@ class EspressoMailApp(Model):
             return self._execute_action("reply_all")
         if k == "f":
             return self._execute_action("forward")
+        if k == "a":
+            return self._execute_action("add_sender_contact")
         if k == "s":
+            if self.focused_pane == "folders":
+                return self._execute_action("toggle_folder_subscription")
             return self._execute_action("toggle_star")
         if k == "u":
             return self._execute_action("toggle_read")
@@ -1445,6 +1456,23 @@ class EspressoMailApp(Model):
                         self.message_cursor = clicked_idx
                         cmd = self._on_message_selection_changed()
                         return self, cmd
+            elif target_pane == "reader":
+                if body_y >= 0:
+                    line_idx = self.reader_viewport.y_offset + body_y
+                    all_lines = self.reader_viewport.lines
+                    if 0 <= line_idx < len(all_lines):
+                        clicked_line = all_lines[line_idx]
+                        osc_match = re.search(r"\x1b\]8;;(https?://[^\x1b]+|mailto:[^\x1b]+)\x1b\\", clicked_line)
+                        raw_match = re.search(r"(https?://[^\s<>\"']+|mailto:[^\s<>\"']+)", clicked_line)
+                        url_to_open = osc_match.group(1) if osc_match else (raw_match.group(1) if raw_match else None)
+                        if url_to_open:
+                            try:
+                                import webbrowser
+                                webbrowser.open(url_to_open)
+                                self.status_message = f"Opening link: {url_to_open}"
+                            except Exception as exc:
+                                self.status_message = f"Failed to open link: {exc}"
+                            return self, None
             return self, None
 
         return self, None
@@ -1469,6 +1497,35 @@ class EspressoMailApp(Model):
                 )
         return None
 
+    def _make_single_folder_sync_cmd(self, acc: AccountConfig, folder_name: str) -> Cmd:
+        def _runner() -> Msg:
+            try:
+                client = IMAPClient(acc, timeout=20.0)
+                client.connect()
+                try:
+                    count = client.sync_single_folder(
+                        self.store,
+                        folder_name=folder_name,
+                        limit=self.fetch_batch_size,
+                    )
+                    return MoreMessagesFetchedMsg(
+                        account_id=acc.id,
+                        folder=folder_name,
+                        fetched_count=count,
+                        message=f"Synced folder {folder_name} ({count} new messages)",
+                    )
+                finally:
+                    client.disconnect()
+            except Exception as exc:
+                return MoreMessagesFetchedMsg(
+                    account_id=acc.id,
+                    folder=folder_name,
+                    fetched_count=0,
+                    message=f"Could not sync {folder_name}: {exc}",
+                )
+
+        return _runner
+
     def _activate_selected_folder(self) -> Cmd | None:
         if 0 <= self.folder_cursor < len(self.folder_rows):
             row = self.folder_rows[self.folder_cursor]
@@ -1485,6 +1542,18 @@ class EspressoMailApp(Model):
                     else " / ".join(split_folder_hierarchy(row.folder_name))
                 )
                 self.status_message = f"Opened {path_label} ({len(self.message_rows)} items)"
+                if row.account_id != "*" and not row.subscribed:
+                    acc = self.store.get_account(row.account_id)
+                    if acc and acc.imap_password:
+                        sync_cmd = self._make_single_folder_sync_cmd(acc, row.folder_name)
+                        if cmd is not None:
+                            def _combined_cmd() -> Msg:
+                                c_res = cmd() if callable(cmd) else None
+                                s_res = sync_cmd() if callable(sync_cmd) else None
+                                return s_res or c_res
+
+                            return _combined_cmd
+                        return sync_cmd
                 return cmd
         return None
 
@@ -1717,6 +1786,41 @@ class EspressoMailApp(Model):
                 new_star = self.store.toggle_star(m.id)
                 self.refresh_data()
                 self.status_message = "★ Starred message." if new_star else "Removed star."
+            return self, None
+
+        if action_id == "add_sender_contact":
+            m = self.selected_message
+            if not m or not m.sender_email:
+                self.status_message = "No message selected or sender has no email."
+                return self, None
+            existing = self.store.get_contact_by_email(m.sender_email)
+            if existing:
+                if m.sender_name and not existing.name:
+                    existing.name = m.sender_name
+                existing.frequency += 1
+                self.store.save_contact(existing)
+                self.status_message = f"Updated contact: {existing.formatted}"
+            else:
+                new_contact = Contact(
+                    id=f"contact:{uuid.uuid4().hex[:10]}",
+                    name=m.sender_name or m.sender_email.split("@")[0],
+                    email=m.sender_email,
+                    frequency=1,
+                )
+                self.store.save_contact(new_contact)
+                self.status_message = f"Added contact: {new_contact.formatted}"
+            return self, None
+
+        if action_id == "toggle_folder_subscription":
+            if 0 <= self.folder_cursor < len(self.folder_rows):
+                row = self.folder_rows[self.folder_cursor]
+                if row.account_id != "*" and not row.is_header:
+                    new_sub = self.store.toggle_folder_subscription(row.account_id, row.folder_name)
+                    self.refresh_data()
+                    state_str = "Subscribed to" if new_sub else "Unsubscribed from"
+                    self.status_message = f"{state_str} '{row.label}'"
+                else:
+                    self.status_message = "Cannot toggle subscription for this item."
             return self, None
 
         if action_id == "toggle_read":
@@ -2019,10 +2123,12 @@ class EspressoMailApp(Model):
                         if remote_folders:
                             self.store.sync_remote_folders(acc.id, remote_folders)
                             discovered_count = len(remote_folders)
-                        cand_folders = (
-                            remote_folders if remote_folders else self.store.list_folders(acc.id)
-                        )
-                        selectable = [f for f in cand_folders if f.selectable]
+                        if remote_folders:
+                            local_map = {f.name: f for f in self.store.list_folders(acc.id)}
+                            cand_folders = [local_map.get(f.name, f) for f in remote_folders]
+                        else:
+                            cand_folders = self.store.list_folders(acc.id)
+                        selectable = [f for f in cand_folders if f.selectable and f.subscribed]
                         sorted_folders = sorted(
                             selectable,
                             key=lambda f: (
@@ -2158,7 +2264,10 @@ class EspressoMailApp(Model):
 
         # 7. Overlay Active Modal Dialog (if active)
         if self.active_modal is not None:
-            modal_str = self.active_modal.view(self.width)  # type: ignore[call-arg]
+            try:
+                modal_str = self.active_modal.view(self.width, self.height)  # type: ignore[call-arg]
+            except TypeError:
+                modal_str = self.active_modal.view(self.width)  # type: ignore[call-arg]
             screen = place_overlay(screen, modal_str, center=True, dim_backdrop=True)
 
         # 8. Overlay Command Palette (if open)
@@ -2245,8 +2354,9 @@ class EspressoMailApp(Model):
             else:
                 folder_icon = row.icon
 
-            lbl_raw = f" {tree_prefix}{folder_icon} {row.label}"
-            lbl_display = f" {branch_prefix}{folder_icon} {row.label}"
+            unsub_badge = " 🔕" if (not getattr(row, "subscribed", True) and row.account_id != "*") else ""
+            lbl_raw = f" {tree_prefix}{folder_icon} {row.label}{unsub_badge}"
+            lbl_display = f" {branch_prefix}{folder_icon} {row.label}{unsub_badge}"
 
             pad = max(1, inner_w - string_width(lbl_display) - len(count_badge) - 1)
             line_str = truncate_ansi(f"{lbl_raw}{' ' * pad}{count_badge} ", inner_w)

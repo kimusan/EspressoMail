@@ -15,9 +15,11 @@ from espressomail.ui import (
     PROVIDER_PRESETS,
     AccountSettingsModal,
     AddressBookModal,
+    ComposeModal,
     DownloadAttachmentsModal,
     EspressoMailApp,
     ImageRenderBackend,
+    MoreMessagesFetchedMsg,
     OnboardingCompleteMsg,
     OnboardingWizard,
     PreferencesModal,
@@ -30,6 +32,7 @@ from espressomail.ui import (
     format_message_for_reading_pane,
     html_to_terminal_text,
 )
+from espressomail.ui.formatter import _apply_inline_formatting
 from tests.test_storage_and_search import populate_test_store
 
 
@@ -1339,6 +1342,167 @@ class TestUIAndApp(unittest.TestCase):
             mock_client.connect.assert_called_once()
             mock_client.sync_script_with_server.assert_called_once_with(self.store)
             mock_client.close.assert_called_once()
+
+    def test_compose_modal_larger_size_and_autocomplete(self) -> None:
+        """Verify larger ComposeModal dimensions and interactive contact autocomplete."""
+        populate_test_store(self.store)
+        contacts = [
+            Contact(id="c1", name="Alice Wonderland", email="alice@example.com", frequency=10),
+            Contact(id="c2", name="Bob Builder", email="bob@builder.com", frequency=5),
+        ]
+        accounts = self.store.list_accounts()
+        theme = ThemeEngine("espresso").current
+        modal = ComposeModal(
+            accounts=accounts,
+            contacts=contacts,
+            theme=theme,
+            to_initial="",
+            subject_initial="",
+        )
+
+        # 1. Expanded viewport dimensions on wide terminal
+        view_str = modal.view(width=120, height=36)
+        self.assertGreaterEqual(modal.editor.width, 100)
+        self.assertGreaterEqual(modal.editor.height, 20)
+
+        # 2. Contact Autocomplete in To: field
+        self.assertEqual(modal.focus_idx, 1)  # Focused on To:
+        modal.input_to.value = "ali"
+        matches = modal._get_autocomplete_matches()
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].email, "alice@example.com")
+
+        # View renders autocomplete suggestions
+        sugg_view = modal.view(width=120, height=36)
+        self.assertIn("Alice Wonderland", sugg_view)
+
+        # Press Tab or Enter to autocomplete
+        modal, _ = modal.update(KeyMsg("tab"))
+        self.assertIn("Alice Wonderland <alice@example.com>, ", modal.input_to.value)
+
+    def test_add_sender_to_contacts_shortcut(self) -> None:
+        """Verify pressing 'a' adds the sender of the selected email to contacts."""
+        populate_test_store(self.store)
+        app = EspressoMailApp(self.store)
+        app.show_splash = False
+        app.show_onboarding = False
+        app.width = 120
+        app.height = 36
+        app.active_account_id = "*"
+        app.active_folder = "INBOX"
+        app._rebuild_message_rows()
+
+        m = app.selected_message
+        self.assertIsNotNone(m)
+        assert m is not None
+
+        # Delete contact if already harvested
+        existing = self.store.get_contact_by_email(m.sender_email)
+        if existing:
+            self.store.delete_contact(existing.id)
+
+        # Press 'a' to add sender
+        app, cmd = app.update(KeyMsg("a"))
+        self.assertIsNone(cmd)
+        self.assertIn("Added contact", app.status_message)
+        added = self.store.get_contact_by_email(m.sender_email)
+        self.assertIsNotNone(added)
+
+        # Press 'a' again to update contact
+        app, _ = app.update(KeyMsg("a"))
+        self.assertIn("Updated contact", app.status_message)
+
+    def test_clickable_links_and_mouse_click(self) -> None:
+        """Verify OSC 8 terminal hyperlinks and mouse click opening in reading pane."""
+        populate_test_store(self.store)
+        theme = ThemeEngine("espresso").current
+        formatted = _apply_inline_formatting(
+            "Visit [Espresso](https://espressomail.org) or https://github.com/kimusan/espressomail for code.",
+            theme,
+        )
+        self.assertIn("\x1b]8;;https://espressomail.org\x1b\\", formatted)
+        self.assertIn("\x1b]8;;https://github.com/kimusan/espressomail\x1b\\", formatted)
+
+        # Test mouse click in reading pane
+        app = EspressoMailApp(self.store)
+        app.show_splash = False
+        app.show_onboarding = False
+        app.width = 120
+        app.height = 36
+        app._update_reader_viewport(force=True)
+
+        folder_w, list_w, _ = app._pane_widths()
+        reader_x = folder_w + list_w + 10
+
+        # Inject line with URL into viewport lines
+        app.reader_viewport.lines = [
+            "Header line",
+            "Check this link: \x1b]8;;https://espressomail.org\x1b\\https://espressomail.org\x1b]8;;\x1b\\",
+        ]
+
+        with mock.patch("webbrowser.open") as mock_open:
+            app, _ = app.update(MouseMsg(x=reader_x, y=3, button=MouseButton.LEFT, action=MouseAction.PRESS))
+            mock_open.assert_called_once_with("https://espressomail.org")
+            self.assertIn("Opening link", app.status_message)
+
+    def test_all_unread_and_folder_subscription_toggle(self) -> None:
+        """Verify 'All Unread' unified folder and folder subscription toggle via 's'."""
+        populate_test_store(self.store)
+        app = EspressoMailApp(self.store)
+        app.show_splash = False
+        app.show_onboarding = False
+        app.width = 120
+        app.height = 36
+        app.refresh_data()
+
+        # 1. Verify "All Unread" in folder rows
+        folder_labels = [r.label for r in app.folder_rows]
+        self.assertIn("All Unread", folder_labels)
+
+        # Select "All Unread"
+        for idx, r in enumerate(app.folder_rows):
+            if r.folder_name == "All Unread":
+                app.folder_cursor = idx
+                app._activate_selected_folder()
+                break
+
+        self.assertEqual(app.active_folder, "All Unread")
+        self.assertGreater(len(app.message_rows), 0)
+        unread_db = self.store.list_messages(account_id="*", folder="All Unread")
+        for m in unread_db:
+            self.assertFalse(m.is_read)
+
+        # 2. Toggle folder subscription using 's' in folders pane
+        app.focused_pane = "folders"
+        # Find a non-header account folder
+        target_idx = -1
+        for idx, r in enumerate(app.folder_rows):
+            if r.account_id != "*" and not r.is_header:
+                target_idx = idx
+                break
+        self.assertGreaterEqual(target_idx, 0)
+        app.folder_cursor = target_idx
+        target_row = app.folder_rows[target_idx]
+        self.assertTrue(target_row.subscribed)
+
+        app, _ = app.update(KeyMsg("s"))
+        self.assertIn("Unsubscribed from", app.status_message)
+
+        # View reflects unsubscribed state with badge
+        pane_str = app._render_folder_pane(30, 20)
+        self.assertIn("🔕", pane_str)
+
+        # On-demand sync when entering unsubscribed folder
+        with mock.patch("espressomail.ui.app.IMAPClient") as mock_imap_cls:
+            mock_client = mock.MagicMock()
+            mock_client.sync_single_folder.return_value = 2
+            mock_imap_cls.return_value = mock_client
+
+            sync_cmd = app._activate_selected_folder()
+            self.assertIsNotNone(sync_cmd)
+            assert sync_cmd is not None
+            res = sync_cmd()
+            self.assertIsInstance(res, MoreMessagesFetchedMsg)
 
 
 if __name__ == "__main__":

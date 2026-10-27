@@ -59,6 +59,8 @@ DEFAULT_MENUS: tuple[MenuCategory, ...] = (
             MenuItem("forward", "Forward Message", "f"),
             MenuItem("toggle_star", "Toggle Star / Flag", "s"),
             MenuItem("toggle_read", "Toggle Read / Unread", "u"),
+            MenuItem("add_sender_contact", "Add Sender to Contacts", "a"),
+            MenuItem("toggle_folder_subscription", "Toggle Folder Subscription", "s"),
             MenuItem("fetch_more", "Fetch Older Messages from Server", "M"),
             MenuItem("archive_msg", "Archive Message", "e"),
             MenuItem("trash_msg", "Move to Trash / Delete", "d"),

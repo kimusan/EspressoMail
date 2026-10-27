@@ -151,6 +151,7 @@ class LocalStore:
                 uid_validity INTEGER NOT NULL DEFAULT 0,
                 last_uid INTEGER NOT NULL DEFAULT 0,
                 selectable INTEGER NOT NULL DEFAULT 1,
+                subscribed INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
             );
 
@@ -269,6 +270,11 @@ class LocalStore:
 
         try:
             cur.execute("ALTER TABLE folders ADD COLUMN selectable INTEGER NOT NULL DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cur.execute("ALTER TABLE folders ADD COLUMN subscribed INTEGER NOT NULL DEFAULT 1")
         except sqlite3.OperationalError:
             pass
 
@@ -458,15 +464,15 @@ class LocalStore:
                 )
                 self._conn.execute(
                     """
-                    INSERT INTO folders (id, account_id, name, display_name, folder_type, selectable)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO folders (id, account_id, name, display_name, folder_type, selectable, subscribed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         name = excluded.name,
                         display_name = excluded.display_name,
                         folder_type = excluded.folder_type,
                         selectable = excluded.selectable
                     """,
-                    (fid, account_id, f.name, f.display_name, f.folder_type.value, int(f.selectable)),
+                    (fid, account_id, f.name, f.display_name, f.folder_type.value, int(f.selectable), int(f.subscribed)),
                 )
 
             # Remove empty offline-placeholder folders that do not exist on the remote server
@@ -566,6 +572,7 @@ class LocalStore:
                     uid_validity=int(r["uid_validity"]),
                     last_uid=int(r["last_uid"]),
                     selectable=bool(r["selectable"]) if "selectable" in r.keys() else True,
+                    subscribed=bool(r["subscribed"]) if "subscribed" in r.keys() else True,
                 )
                 for r in rows
             ]
@@ -588,6 +595,56 @@ class LocalStore:
             )
             return folders
 
+    def get_folder(self, account_id: str, name: str) -> Folder | None:
+        """Retrieve a specific folder for an account."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM folders WHERE account_id = ? AND name = ?",
+                (account_id, name),
+            ).fetchone()
+            if not row:
+                return None
+            return Folder(
+                id=row["id"],
+                account_id=row["account_id"],
+                name=row["name"],
+                display_name=row["display_name"],
+                folder_type=FolderType(row["folder_type"]),
+                unread_count=int(row["unread_count"]),
+                total_count=int(row["total_count"]),
+                uid_validity=int(row["uid_validity"]),
+                last_uid=int(row["last_uid"]),
+                selectable=bool(row["selectable"]) if "selectable" in row.keys() else True,
+                subscribed=bool(row["subscribed"]) if "subscribed" in row.keys() else True,
+            )
+
+    def set_folder_subscribed(self, account_id: str, folder_name: str, subscribed: bool) -> None:
+        """Update the subscribed state of a folder."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE folders SET subscribed = ? WHERE account_id = ? AND name = ?",
+                (int(subscribed), account_id, folder_name),
+            )
+            self._conn.commit()
+
+    def toggle_folder_subscription(self, account_id: str, folder_name: str) -> bool:
+        """Toggle folder subscription state and return the new state."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT subscribed FROM folders WHERE account_id = ? AND name = ?",
+                (account_id, folder_name),
+            ).fetchone()
+            if not row:
+                return True
+            curr = bool(row["subscribed"]) if "subscribed" in row.keys() else True
+            new_val = not curr
+            self._conn.execute(
+                "UPDATE folders SET subscribed = ? WHERE account_id = ? AND name = ?",
+                (int(new_val), account_id, folder_name),
+            )
+            self._conn.commit()
+            return new_val
+
     def get_unified_counts(self) -> dict[str, tuple[int, int]]:
         """Return (unread_count, total_count) for Unified virtual folders across all accounts."""
         with self._lock:
@@ -600,6 +657,13 @@ class LocalStore:
                 "AND is_trashed = 0 AND is_draft = 0"
             ).fetchone()
             result["INBOX"] = (int(row["u"] or 0), int(row["t"] or 0))
+
+            # Unified All Unread
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS u FROM messages WHERE is_read = 0 AND is_trashed = 0 AND is_draft = 0"
+            ).fetchone()
+            u_all = int(row["u"] or 0)
+            result["All Unread"] = (u_all, u_all)
 
             # Unified Starred
             row = self._conn.execute(
@@ -859,7 +923,11 @@ class LocalStore:
                 params.append(account_id)
 
             folder_upper = folder.upper()
-            if folder_upper == "STARRED":
+            if folder_upper in ("UNREAD", "ALL_UNREAD", "ALL UNREAD"):
+                where_clauses.append("is_read = 0")
+                where_clauses.append("is_trashed = 0")
+                where_clauses.append("is_draft = 0")
+            elif folder_upper == "STARRED":
                 where_clauses.append("is_starred = 1")
                 where_clauses.append("is_trashed = 0")
             elif folder_upper == "ALL":
@@ -1171,6 +1239,25 @@ class LocalStore:
             )
             for r in rows
         ]
+
+    def get_contact_by_email(self, email: str) -> Contact | None:
+        """Find a contact by email address."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM contacts WHERE lower(email) = ?", (email.strip().lower(),)
+            ).fetchone()
+            if not row:
+                return None
+            return Contact(
+                id=row["id"],
+                name=row["name"],
+                email=row["email"],
+                organization=row["organization"],
+                notes=row["notes"],
+                pgp_fingerprint=row["pgp_fingerprint"],
+                favorite=bool(row["favorite"]),
+                frequency=int(row["frequency"]),
+            )
 
     def delete_contact(self, contact_id: str) -> None:
         """Delete a contact from the address book."""

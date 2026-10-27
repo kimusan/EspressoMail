@@ -338,8 +338,13 @@ def format_email_body(
     return "\n".join(out_lines)
 
 
+def osc8_link(url: str, text: str) -> str:
+    """Wrap text in an OSC 8 terminal hyperlink sequence."""
+    return f"\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\"
+
+
 def _apply_inline_formatting(line: str, theme: Theme) -> str:
-    """Highlight inline `code`, **bold**, and URLs within a text line."""
+    """Highlight inline `code`, **bold**, and clickable OSC 8 URLs within a text line."""
     # Inline `code`
     line = re.sub(
         r"`([^`]+)`",
@@ -352,12 +357,26 @@ def _apply_inline_formatting(line: str, theme: Theme) -> str:
         lambda m: Style().bold(True).foreground(theme.fg_primary).render(m.group(1)),
         line,
     )
-    # Highlight URLs
-    line = re.sub(
-        r"(https?://\S+)",
-        lambda m: Style().underline(True).foreground(theme.attachment_fg).render(m.group(1)),
-        line,
-    )
+    # Markdown links [text](url) -> clickable OSC 8 hyperlink
+    def _md_link(m: re.Match) -> str:
+        label = m.group(1)
+        url = m.group(2)
+        styled_label = Style().underline(True).foreground(theme.attachment_fg).render(label)
+        return osc8_link(url, styled_label)
+
+    line = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+|mailto:[^\s\)]+)\)", _md_link, line)
+
+    # Bare URLs -> clickable OSC 8 hyperlink
+    def _url_replacer(m: re.Match) -> str:
+        url = m.group(1)
+        trail = ""
+        while url and url[-1] in ".,;:!?)>'\"]":
+            trail = url[-1] + trail
+            url = url[:-1]
+        styled = Style().underline(True).foreground(theme.attachment_fg).render(url)
+        return osc8_link(url, styled) + trail
+
+    line = re.sub(r"(?<!\x1b\]8;;)(https?://[^\s<>\"']+|mailto:[^\s<>\"']+)", _url_replacer, line)
     return line
 
 

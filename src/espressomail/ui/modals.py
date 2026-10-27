@@ -175,6 +175,7 @@ class ComposeModal(Model):
         )
         # Focus indices: 0=From Account, 1=To, 2=Cc, 3=Subject, 4=Body Editor
         self.focus_idx = 4 if (to_initial and subject_initial) else 1
+        self.autocomplete_idx = 0
         self._sync_focus()
 
     @property
@@ -190,6 +191,33 @@ class ComposeModal(Model):
                 inp.focus()
             else:
                 inp.blur()
+
+    def _current_recipient_query(self) -> str:
+        if self.focus_idx == 1:
+            val = self.input_to.value
+        elif self.focus_idx == 2:
+            val = self.input_cc.value
+        else:
+            return ""
+        parts = val.split(",")
+        return parts[-1].strip()
+
+    def _get_autocomplete_matches(self) -> list[Contact]:
+        if self.focus_idx not in (1, 2):
+            return []
+        query = self._current_recipient_query().lower()
+        if not query:
+            return []
+        matches: list[Contact] = []
+        for c in self.contacts:
+            if (
+                query in c.name.lower()
+                or query in c.email.lower()
+                or (c.organization and query in c.organization.lower())
+            ):
+                matches.append(c)
+        matches.sort(key=lambda c: (not c.favorite, -c.frequency, c.name.lower()))
+        return matches[:5]
 
     def init(self) -> Cmd | None:
         return None
@@ -231,6 +259,29 @@ class ComposeModal(Model):
                 return self._emit_submit(is_draft=True)
             if k in ("f5", "ctrl+enter", "ctrl+x"):
                 return self._emit_submit(is_draft=False)
+
+            if self.focus_idx in (1, 2):
+                matches = self._get_autocomplete_matches()
+                if matches:
+                    if k in ("down", "ctrl+n"):
+                        self.autocomplete_idx = (self.autocomplete_idx + 1) % len(matches)
+                        return self, None
+                    if k in ("up", "ctrl+p"):
+                        self.autocomplete_idx = (self.autocomplete_idx - 1) % len(matches)
+                        return self, None
+                    if k in ("tab", "enter"):
+                        selected = matches[self.autocomplete_idx % len(matches)]
+                        target = self.input_to if self.focus_idx == 1 else self.input_cc
+                        parts = [p.strip() for p in target.value.split(",")[:-1] if p.strip()]
+                        parts.append(selected.formatted)
+                        target.value = ", ".join(parts) + ", "
+                        self.autocomplete_idx = 0
+                        return self, None
+
+            if k == "enter" and self.focus_idx in (1, 2, 3):
+                self.focus_idx = (self.focus_idx + 1) % 5
+                self._sync_focus()
+                return self, None
             if k == "tab" and self.focus_idx < 4:
                 self.focus_idx = (self.focus_idx + 1) % 5
                 self._sync_focus()
@@ -283,9 +334,11 @@ class ComposeModal(Model):
             draft_id=self.draft_id,
         )
 
-    def view(self, width: int = 80) -> str:
-        modal_w = min(78, max(56, width - 8))
-        self.editor.width = max(40, modal_w - 6)
+    def view(self, width: int = 80, height: int = 30) -> str:
+        modal_w = min(114, max(72, width - 4))
+        self.editor.width = max(50, modal_w - 6)
+        self.editor.height = max(12, min(28, height - 14))
+        self.file_picker.width = max(50, modal_w - 6)
 
         if self.show_file_picker:
             picker_content = join_vertical(
@@ -334,6 +387,24 @@ class ComposeModal(Model):
             else Style().foreground(self.theme.fg_muted).render("(No attachments — Ctrl+A to attach file)")
         )
 
+        to_view = self.input_to.view()
+        cc_view = self.input_cc.view()
+        matches = self._get_autocomplete_matches()
+        if matches:
+            chips = []
+            for idx, c in enumerate(matches):
+                disp = c.formatted
+                if idx == (self.autocomplete_idx % len(matches)):
+                    chip = Style().bold(True).reverse(True).foreground(self.theme.accent_primary).render(f" {disp} ")
+                else:
+                    chip = Style().foreground(self.theme.fg_secondary).render(f"[{disp}]")
+                chips.append(chip)
+            sugg_str = Style().foreground(self.theme.fg_muted).render("         Suggestions (Tab/Enter): ") + " ".join(chips)
+            if self.focus_idx == 1:
+                to_view = f"{to_view}\n{sugg_str}"
+            elif self.focus_idx == 2:
+                cc_view = f"{cc_view}\n{sugg_str}"
+
         body_border_fg = (
             self.theme.border_focused if self.focus_idx == 4 else self.theme.border_unfocused
         )
@@ -357,8 +428,8 @@ class ComposeModal(Model):
         content = join_vertical(
             Align.LEFT,
             from_row,
-            self.input_to.view(),
-            self.input_cc.view(),
+            to_view,
+            cc_view,
             self.input_subject.view(),
             f"{sign_badge}    {enc_badge}",
             f"Files:   {att_line}",

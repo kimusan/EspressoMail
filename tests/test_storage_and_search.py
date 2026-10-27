@@ -229,6 +229,39 @@ class TestStorageAndSearch(unittest.TestCase):
         self.assertEqual(len(pgp_hits), 1)
         self.assertEqual(pgp_hits[0].message.id, "msg_work_pgp")
 
+    def test_unified_all_unread_and_folder_subscription(self) -> None:
+        """Verify All Unread unified folder queries and folder subscription storage."""
+        counts = self.store.get_unified_counts()
+        self.assertIn("All Unread", counts)
+        unread_cnt, _ = counts["All Unread"]
+        self.assertGreaterEqual(unread_cnt, 1)
+
+        unread_msgs = self.store.list_messages(account_id="*", folder="All Unread")
+        self.assertEqual(len(unread_msgs), unread_cnt)
+        for m in unread_msgs:
+            self.assertFalse(m.is_read)
+            self.assertFalse(m.is_trashed)
+
+        # Folder subscription toggle & persistence
+        folders = self.store.list_folders()
+        self.assertTrue(len(folders) > 0)
+        test_folder = folders[0]
+        self.assertTrue(test_folder.subscribed)
+
+        new_state = self.store.toggle_folder_subscription(test_folder.account_id, test_folder.name)
+        self.assertFalse(new_state)
+        f_updated = self.store.get_folder(test_folder.account_id, test_folder.name)
+        self.assertIsNotNone(f_updated)
+        self.assertFalse(f_updated.subscribed)
+
+        self.store.set_folder_subscribed(test_folder.account_id, test_folder.name, True)
+        self.assertTrue(self.store.get_folder(test_folder.account_id, test_folder.name).subscribed)
+
+        # Contact by email lookup
+        contact = self.store.get_contact_by_email("elena@terminalcraft.io")
+        self.assertIsNotNone(contact)
+        self.assertEqual(contact.name, "Elena Rostova")
+
 
 if __name__ == "__main__":
     unittest.main()
