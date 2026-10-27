@@ -144,6 +144,12 @@ class TestUIAndApp(unittest.TestCase):
         self.assertEqual(updated_acc.imap_host, "mail2.schulz.dk")
 
     def test_image_renderer_backends_and_html_formatter(self) -> None:
+        import base64
+        import io
+        from PIL import Image as PILImage
+        from espressomail.models.entities import Attachment, EmailMessage
+        from espressomail.ui.formatter import format_message_for_reading_pane
+
         populate_test_store(self.store)
         msg = self.store.get_message("msg_thread1_1")
         assert msg is not None
@@ -152,6 +158,8 @@ class TestUIAndApp(unittest.TestCase):
         renderer = TerminalImageRenderer(ImageRenderBackend.HALF_BLOCK)
 
         for mode in (
+            ImageRenderBackend.AUTO,
+            ImageRenderBackend.CHAFA,
             ImageRenderBackend.HALF_BLOCK,
             ImageRenderBackend.BRAILLE,
             ImageRenderBackend.SIXEL,
@@ -161,6 +169,49 @@ class TestUIAndApp(unittest.TestCase):
             renderer.set_backend(mode)
             out = renderer.render_attachment(img_att, theme, max_width=40, max_height=8)
             self.assertTrue(len(out) > 10)
+            if mode != ImageRenderBackend.OFF:
+                # Must contain actual rendered half-block or braille glyphs, never an empty box
+                self.assertTrue("▀" in out or "▄" in out or any(0x2800 <= ord(c) <= 0x28FF for c in out))
+
+        # Test multipart/alternative email where body_text is non-empty AND body_html has data:image + cid: + 1x1 tracker
+        pil_img = PILImage.new("RGBA", (36, 18), (220, 90, 40, 255))
+        buf = io.BytesIO()
+        pil_img.save(buf, format="PNG")
+        b64_png = base64.b64encode(buf.getvalue()).decode("ascii")
+
+        html_email = EmailMessage(
+            id="msg_html_img",
+            account_id="acc_work",
+            subject="Newsletter with Embedded Images",
+            sender_name="Design Team",
+            sender_email="design@schulz.dk",
+            body_text="Plain text fallback without images.",
+            body_html=(
+                '<html><body>'
+                f'<img src="data:image/png;base64,{b64_png}" alt="Hero Banner" />'
+                '<img src="cid:inline-diagram@schulz.dk" alt="Architecture" />'
+                '<img src="https://track.example.com/pixel.gif" width="1" height="1" />'
+                '<p>Hello from HTML</p></body></html>'
+            ),
+            attachments=[
+                Attachment(
+                    id="att_cid_1",
+                    message_id="msg_html_img",
+                    filename="diagram.bin",
+                    content_type="application/octet-stream",
+                    size_bytes=len(buf.getvalue()),
+                    content_id="<inline-diagram@schulz.dk>",
+                    is_inline=True,
+                    data=buf.getvalue(),
+                )
+            ],
+        )
+        renderer.set_backend(ImageRenderBackend.AUTO)
+        pane_out = format_message_for_reading_pane(html_email, theme, width=72, image_renderer=renderer)
+        self.assertIn("Hero_Banner.png", pane_out)
+        self.assertIn("diagram.bin", pane_out)
+        self.assertNotIn("pixel.gif", pane_out)
+        self.assertIn("▀", pane_out)
 
         converted = html_to_terminal_text("<h2>Release Notes</h2><ul><li>Item A</li></ul>")
         self.assertIn("## Release Notes", converted)

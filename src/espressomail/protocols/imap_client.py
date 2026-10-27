@@ -24,6 +24,7 @@ from espressomail.models.entities import (
     SecurityType,
     classify_folder_type,
     decode_imap_utf7,
+    detect_image_mime_type,
     split_folder_hierarchy,
 )
 from espressomail.storage.database import LocalStore
@@ -158,18 +159,26 @@ def parse_rfc5322_bytes(
             if payload_bytes is None:
                 continue
 
+            cid_val = str(part.get("Content-ID", "") or "").strip().strip("<>")
+            sniffed_img_type = detect_image_mime_type(payload_bytes)
+            effective_ctype = sniffed_img_type if (ctype == "application/octet-stream" and sniffed_img_type) else ctype
+
             if disp == "attachment" or filename:
-                fname = filename or f"attachment_{idx + 1}.bin"
+                fname = filename or (
+                    f"image_{idx + 1}.{effective_ctype.split('/')[-1]}"
+                    if effective_ctype.startswith("image/")
+                    else f"attachment_{idx + 1}.bin"
+                )
                 att_id = f"{local_id}:att:{idx}:{fname}"
                 attachments.append(
                     Attachment(
                         id=att_id,
                         message_id=local_id,
                         filename=fname,
-                        content_type=ctype,
+                        content_type=effective_ctype,
                         size_bytes=len(payload_bytes),
-                        content_id=str(part.get("Content-ID", "") or "").strip("<>"),
-                        is_inline=(disp == "inline"),
+                        content_id=cid_val,
+                        is_inline=(disp == "inline" or bool(cid_val)),
                         data=payload_bytes,
                     )
                 )
@@ -191,17 +200,20 @@ def parse_rfc5322_bytes(
                 except LookupError:
                     html_str = payload_bytes.decode("utf-8", errors="replace")
                 body_html_parts.append(html_str)
-            elif ctype.startswith("image/"):
-                fname = filename or f"inline_image_{idx + 1}.{ctype.split('/')[-1]}"
+            elif effective_ctype.startswith("image/") or cid_val:
+                ext = effective_ctype.split("/")[-1] if effective_ctype.startswith("image/") else "bin"
+                fname = filename or (cid_val.split("@")[0] if cid_val else f"inline_image_{idx + 1}.{ext}")
+                if effective_ctype.startswith("image/") and "." not in fname:
+                    fname = f"{fname}.{ext}"
                 att_id = f"{local_id}:att:{idx}:{fname}"
                 attachments.append(
                     Attachment(
                         id=att_id,
                         message_id=local_id,
                         filename=fname,
-                        content_type=ctype,
+                        content_type=effective_ctype,
                         size_bytes=len(payload_bytes),
-                        content_id=str(part.get("Content-ID", "") or "").strip("<>"),
+                        content_id=cid_val,
                         is_inline=True,
                         data=payload_bytes,
                     )
@@ -211,17 +223,38 @@ def parse_rfc5322_bytes(
             payload_bytes = msg.get_payload(decode=True) or b""
         except Exception:
             payload_bytes = b""
-        charset = msg.get_content_charset() or "utf-8"
-        if charset.lower() in ("unknown-8bit", "x-unknown"):
-            charset = "utf-8"
-        try:
-            text = payload_bytes.decode(charset, errors="replace")
-        except LookupError:
-            text = payload_bytes.decode("utf-8", errors="replace")
-        if content_type_root == "text/html":
-            body_html_parts.append(text)
+        sniffed_root_img = detect_image_mime_type(payload_bytes)
+        effective_root_ctype = (
+            sniffed_root_img
+            if (content_type_root == "application/octet-stream" and sniffed_root_img)
+            else content_type_root
+        )
+        if effective_root_ctype.startswith("image/"):
+            ext = effective_root_ctype.split("/")[-1]
+            fname = decode_mime_header(msg.get_filename()) or f"image.{ext}"
+            attachments.append(
+                Attachment(
+                    id=f"{local_id}:att:0:{fname}",
+                    message_id=local_id,
+                    filename=fname,
+                    content_type=effective_root_ctype,
+                    size_bytes=len(payload_bytes),
+                    is_inline=True,
+                    data=payload_bytes,
+                )
+            )
         else:
-            body_text_parts.append(text)
+            charset = msg.get_content_charset() or "utf-8"
+            if charset.lower() in ("unknown-8bit", "x-unknown"):
+                charset = "utf-8"
+            try:
+                text = payload_bytes.decode(charset, errors="replace")
+            except LookupError:
+                text = payload_bytes.decode("utf-8", errors="replace")
+            if content_type_root == "text/html":
+                body_html_parts.append(text)
+            else:
+                body_text_parts.append(text)
 
     body_text = "\n".join(body_text_parts).strip()
     body_html = "\n".join(body_html_parts).strip()

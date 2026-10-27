@@ -262,6 +262,25 @@ class Folder:
         return icons.get(self.folder_type, "📁")
 
 
+def detect_image_mime_type(data: bytes | None) -> str:
+    """Inspect binary magic bytes and return the image MIME type if recognized."""
+    if not data or len(data) < 4:
+        return ""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith(b"BM"):
+        return "image/bmp"
+    if data.startswith((b"P6", b"P3")):
+        return "image/x-portable-pixmap"
+    return ""
+
+
 @dataclass
 class Attachment:
     """Represents a MIME attachment on an incoming or outgoing email."""
@@ -281,9 +300,11 @@ class Attachment:
         """Return True if this attachment is an image."""
         ct = self.content_type.lower()
         ext = self.filename.lower()
-        return ct.startswith("image/") or ext.endswith(
+        if ct.startswith("image/") or ext.endswith(
             (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ppm", ".webp", ".sixel", ".kitty")
-        )
+        ):
+            return True
+        return bool(detect_image_mime_type(self.data))
 
     @property
     def human_size(self) -> str:

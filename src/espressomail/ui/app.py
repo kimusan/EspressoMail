@@ -547,14 +547,16 @@ class EspressoMailApp(Model):
             return
 
         m = row.message
+        prev_msg_id = self._last_rendered_msg_key.split("|", 1)[0] if self._last_rendered_msg_key else ""
         cache_key = (
-            f"{m.id}:{m.is_read}:{m.is_starred}:{m.pgp_status.value}:"
+            f"{m.id}|{m.is_read}:{m.is_starred}:{m.pgp_status.value}:"
             f"{self.theme.id}:{self.image_renderer.backend.value}:"
             f"{self.show_raw_headers}:{reader_w}"
         )
         if not force and cache_key == self._last_rendered_msg_key:
             return
 
+        prev_y = self.reader_viewport.y_offset
         self._last_rendered_msg_key = cache_key
         rendered = format_message_for_reading_pane(
             msg=m,
@@ -565,7 +567,10 @@ class EspressoMailApp(Model):
             show_raw_headers=self.show_raw_headers,
         )
         self.reader_viewport.set_content(rendered)
-        self.reader_viewport.y_offset = 0
+        if prev_msg_id == m.id:
+            self.reader_viewport.y_offset = min(prev_y, self.reader_viewport.max_offset)
+        else:
+            self.reader_viewport.y_offset = 0
 
     # ------------------------------------------------------------------
     # TEA Update Loop

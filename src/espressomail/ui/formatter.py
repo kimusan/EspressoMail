@@ -1,16 +1,14 @@
-"""Formatted email reading pane renderer for HTML, Markdown, quotes, PGP banners, and attachments."""
+"""Formatted email reading pane renderer for HTML, Markdown, quotes, PGP banners, and images."""
 
 from __future__ import annotations
 
+import hashlib
 import html
 import re
 from html.parser import HTMLParser
-from typing import Sequence
 
 from espresso.beans import CodeViewer, THEME_DRACULA, THEME_ESPRESSO
 from espresso.crema import (
-    ROUNDED_BORDER,
-    Align,
     Style,
     string_width,
     truncate_ansi,
@@ -18,21 +16,29 @@ from espresso.crema import (
 )
 
 from espressomail.models.entities import (
+    Attachment,
     EmailMessage,
     EmailThread,
     PGPStatus,
 )
 from espressomail.themes.engine import Theme
-from espressomail.ui.image_renderer import TerminalImageRenderer
+from espressomail.ui.image_renderer import (
+    ImageRenderBackend,
+    TerminalImageRenderer,
+    is_likely_tracking_pixel_url,
+    resolve_html_image_src,
+)
 
 
 class _HTMLToTerminalParser(HTMLParser):
-    """Lightweight HTML-to-terminal text converter preserving structure and links."""
+    """Lightweight HTML-to-terminal text converter preserving structure, links, and <img> tags."""
 
     def __init__(self) -> None:
         super().__init__()
         self.chunks: list[str] = []
         self.links: list[str] = []
+        self.images: list[tuple[str, str]] = []  # (src, alt)
+        self._seen_img_srcs: set[str] = set()
         self._in_script_or_style = False
         self._in_pre = False
         self._list_depth = 0
@@ -41,6 +47,19 @@ class _HTMLToTerminalParser(HTMLParser):
         t = tag.lower()
         if t in ("script", "style", "head"):
             self._in_script_or_style = True
+            return
+        if t == "img":
+            attr_map = {k.lower(): (v or "") for k, v in attrs}
+            src = attr_map.get("src", "").strip()
+            alt = (attr_map.get("alt") or attr_map.get("title") or "").strip()
+            w_attr = attr_map.get("width", "")
+            h_attr = attr_map.get("height", "")
+            if src and not is_likely_tracking_pixel_url(src, w_attr, h_attr):
+                if src not in self._seen_img_srcs and len(self.images) < 8:
+                    self._seen_img_srcs.add(src)
+                    self.images.append((src, alt))
+                    img_idx = len(self.images)
+                    self.chunks.append(f"\n[[IMAGE:{img_idx}]]\n")
             return
         if t in ("br", "hr"):
             self.chunks.append("\n")
@@ -103,8 +122,10 @@ class _HTMLToTerminalParser(HTMLParser):
             collapsed = re.sub(r"[ \t\r\n]+", " ", data)
             self.chunks.append(collapsed)
 
-    def get_text(self) -> str:
+    def get_text(self, include_image_markers: bool = False) -> str:
         raw = html.unescape("".join(self.chunks))
+        if not include_image_markers:
+            raw = re.sub(r"\[\[IMAGE:\d+\]\]", "", raw)
         lines = [line.strip() for line in raw.splitlines()]
         # Collapse 3+ consecutive blank lines
         cleaned: list[str] = []
@@ -131,7 +152,83 @@ def html_to_terminal_text(raw_html: str) -> str:
         return ""
     parser = _HTMLToTerminalParser()
     parser.feed(raw_html)
-    return parser.get_text()
+    return parser.get_text(include_image_markers=False)
+
+
+def extract_html_images(raw_html: str) -> list[tuple[str, str]]:
+    """Extract non-tracking `(src, alt)` image references from an HTML email body."""
+    if not raw_html or not raw_html.strip():
+        return []
+    parser = _HTMLToTerminalParser()
+    try:
+        parser.feed(raw_html)
+    except Exception:
+        pass
+    return parser.images
+
+
+def _collect_message_images(
+    msg: EmailMessage,
+    allow_remote_fetch: bool = True,
+) -> list[Attachment]:
+    """Gather all renderable images from MIME attachments and HTML `<img>` tags (`cid:`, `data:`, `http(s):`)."""
+    collected: list[Attachment] = []
+    seen_hashes: set[str] = set()
+    seen_ids: set[str] = set()
+
+    def _add_att(att: Attachment | None) -> None:
+        if att is None or not att.is_image:
+            return
+        if att.id and att.id in seen_ids:
+            return
+        if att.data:
+            digest = hashlib.sha256(att.data).hexdigest()
+            if digest in seen_hashes:
+                return
+            seen_hashes.add(digest)
+        if att.id:
+            seen_ids.add(att.id)
+        collected.append(att)
+
+    # 1. Resolve HTML <img> tags in reading order first (cid:, data:image/..., https://...)
+    if msg.body_html:
+        html_imgs = extract_html_images(msg.body_html)
+        for idx, (src, alt) in enumerate(html_imgs, start=1):
+            resolved = resolve_html_image_src(
+                src=src,
+                alt=alt,
+                attachments=msg.attachments,
+                message_id=msg.id,
+                idx=idx,
+                allow_remote_fetch=allow_remote_fetch,
+            )
+            _add_att(resolved)
+
+    # 2. Add any remaining MIME image attachments not already referenced via HTML
+    for att in msg.attachments:
+        if att.is_image:
+            _add_att(att)
+
+    # 3. Check plain text body for direct image URLs (e.g. https://example.com/photo.png)
+    if not collected and msg.body_text:
+        url_matches = re.findall(
+            r"(https?://[^\s<>()\"']+\.(?:png|jpe?g|gif|webp|bmp)(?:\?[^\s<>()\"']*)?)",
+            msg.body_text,
+            flags=re.IGNORECASE,
+        )
+        for idx, url in enumerate(url_matches[:4], start=1):
+            if not is_likely_tracking_pixel_url(url):
+                resolved = resolve_html_image_src(
+                    src=url,
+                    alt="",
+                    attachments=msg.attachments,
+                    message_id=msg.id,
+                    idx=idx,
+                    allow_remote_fetch=allow_remote_fetch,
+                )
+                _add_att(resolved)
+
+    return collected
 
 
 def format_email_body(
@@ -265,6 +362,14 @@ def format_message_for_reading_pane(
     inner_w = max(30, width - 4)
     sections: list[str] = []
 
+    # Collect all MIME and inline HTML images (`cid:`, `data:image/...`, `https://...`)
+    all_images = _collect_message_images(
+        msg,
+        allow_remote_fetch=(image_renderer.backend != ImageRenderBackend.OFF),
+    )
+    # Also count HTML <img> tags when backend is OFF so the user still sees that images exist
+    html_img_tags = extract_html_images(msg.body_html) if msg.body_html else []
+
     # 1. Subject & Metadata Header Block
     lbl_style = Style().bold(True).foreground(theme.accent_primary)
     val_style = Style().foreground(theme.fg_primary)
@@ -310,10 +415,17 @@ def format_message_for_reading_pane(
     if msg.pgp_status != PGPStatus.NONE:
         sections.append(_render_pgp_banner(msg, theme, inner_w))
 
-    # 3. Attachments Bar
-    if msg.attachments:
+    # 3. Attachments & Images Bar
+    display_attachments = list(msg.attachments)
+    existing_att_ids = {a.id for a in display_attachments}
+    for img_att in all_images:
+        if img_att.id not in existing_att_ids:
+            display_attachments.append(img_att)
+            existing_att_ids.add(img_att.id)
+
+    if display_attachments or html_img_tags:
         att_chips: list[str] = []
-        for idx, att in enumerate(msg.attachments, start=1):
+        for idx, att in enumerate(display_attachments, start=1):
             icon = "🖼️" if att.is_image else "📎"
             saved_mark = " ✔saved" if att.local_path else ""
             chip = (
@@ -323,8 +435,16 @@ def format_message_for_reading_pane(
                 .render(f"[{idx}] {icon} {att.filename} ({att.human_size}{saved_mark})")
             )
             att_chips.append(chip)
+        if not att_chips and html_img_tags:
+            chip = (
+                Style()
+                .bold(True)
+                .foreground(theme.attachment_fg)
+                .render(f"🖼️ {len(html_img_tags)} embedded HTML image(s)")
+            )
+            att_chips.append(chip)
         att_bar = (
-            f"{lbl_style.render('Files:   ')} "
+            f"{lbl_style.render('Media:   ')} "
             + "  ".join(att_chips)
             + "\n"
             + muted_style.render(
@@ -335,7 +455,33 @@ def format_message_for_reading_pane(
 
     sections.append(Style().foreground(theme.border_unfocused).render("━" * inner_w))
 
-    # 4. Earlier messages in the conversation thread (if part of a multi-message thread)
+    # 4. Inline Terminal Image Previews (shown prominently at top of message content)
+    rendered_image_blocks: list[str] = []
+    if all_images:
+        for img_att in all_images:
+            rendered_box = image_renderer.render_attachment(
+                img_att,
+                theme=theme,
+                max_width=inner_w,
+                max_height=12,
+                skip_tiny_trackers=True,
+            )
+            if rendered_box:
+                rendered_image_blocks.append(rendered_box)
+    elif html_img_tags and image_renderer.backend == ImageRenderBackend.OFF:
+        rendered_image_blocks.append(
+            Style()
+            .foreground(theme.fg_muted)
+            .italic(True)
+            .render(
+                f"  [Image preview disabled ({len(html_img_tags)} HTML image(s)) — press 'i' to enable]"
+            )
+        )
+
+    if rendered_image_blocks:
+        sections.append("\n\n".join(rendered_image_blocks))
+
+    # 5. Earlier messages in the conversation thread (if part of a multi-message thread)
     if thread and thread.message_count > 1:
         earlier = [m for m in thread.messages if m.id != msg.id and m.timestamp <= msg.timestamp]
         for prev in earlier:
@@ -351,27 +497,16 @@ def format_message_for_reading_pane(
                 f"{Style().foreground(theme.border_unfocused).render('│ ')}  {line}"
                 for line in prev_formatted.splitlines()
             )
-            sections.append(f"{prev_hdr}\n{indented}\n{Style().foreground(theme.border_unfocused).render('╰' + '─' * min(40, inner_w - 2))}")
+            sections.append(
+                f"{prev_hdr}\n{indented}\n"
+                f"{Style().foreground(theme.border_unfocused).render('╰' + '─' * min(40, inner_w - 2))}"
+            )
 
-    # 5. Primary Message Body
+    # 6. Primary Message Body
     body_source = msg.body_text.strip()
     if not body_source and msg.body_html:
         body_source = html_to_terminal_text(msg.body_html)
     sections.append(format_email_body(body_source or "(Empty message body)", theme, inner_w))
-
-    # 6. Inline Terminal Image Previews for Image Attachments
-    image_attachments = [a for a in msg.attachments if a.is_image]
-    if image_attachments:
-        sections.append("")
-        for img_att in image_attachments:
-            sections.append(
-                image_renderer.render_attachment(
-                    img_att,
-                    theme=theme,
-                    max_width=inner_w,
-                    max_height=10,
-                )
-            )
 
     return "\n\n".join(sections)
 
@@ -398,7 +533,7 @@ def _render_pgp_banner(msg: EmailMessage, theme: Theme, width: int) -> str:
         badge = f"⚠ PGP SIGNATURE UNVERIFIED — Signer key [{fp_short}] not in trusted ring (Press [v] to verify)"
     else:
         color = theme.pgp_error_fg
-        badge = f"✖ PGP INVALID SIGNATURE — Warning: Message may have been tampered with!"
+        badge = "✖ PGP INVALID SIGNATURE — Warning: Message may have been tampered with!"
 
     return (
         Style()
