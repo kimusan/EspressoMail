@@ -568,6 +568,46 @@ class TestUIAndApp(unittest.TestCase):
         )
         self.assertIn(f"● {acc.name}", reader_out)
 
+    def test_two_line_message_list_rendering_and_mouse_click(self) -> None:
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.active_account_id = "*"
+        app.refresh_data()
+        self.assertTrue(len(app.message_rows) >= 2)
+
+        # 1. Render message list pane with width=60, height=14
+        rendered = app._render_message_list_pane(width=60, height=14)
+        # Verify that subject appears clearly with ample characters on line 2
+        first_msg = app.message_rows[0].message
+        self.assertIn(first_msg.subject[:25], rendered)
+
+        # Verify Line 1 has sender / account tag and Line 2 has subject indented
+        lines = [line for line in rendered.splitlines() if line.strip()]
+        # The pane header is the first line; message rows follow inside
+        inner_content = rendered
+        self.assertIn("[Schulz]", inner_content)
+        self.assertIn("Marcus Vance", inner_content)
+        self.assertIn("Production WireGuard", inner_content)
+
+        # 2. Test mouse click mapping:
+        # Pane 1 (folders) is width ~20. Pane 2 (messages) is at x=25..65.
+        # body_y=0 or 1 corresponds to item 0; body_y=2 or 3 corresponds to item 1
+        folder_w, _, _ = app._pane_widths()
+        click_x = folder_w + 5
+
+        # Click on line 1 of second item (y=2 + 2 = 4, where body_y = 4 - 2 = 2 => item 1)
+        app, _ = app.update(MouseMsg(x=click_x, y=4, button=MouseButton.LEFT, action=MouseAction.PRESS))
+        self.assertEqual(app.focused_pane, "messages")
+        self.assertEqual(app.message_cursor, 1)
+
+        # Click on line 2 of second item (y=5, body_y=3 => item 1)
+        app, _ = app.update(MouseMsg(x=click_x, y=5, button=MouseButton.LEFT, action=MouseAction.PRESS))
+        self.assertEqual(app.message_cursor, 1)
+
+        # Click on line 1 of first item (y=2, body_y=0 => item 0)
+        app, _ = app.update(MouseMsg(x=click_x, y=2, button=MouseButton.LEFT, action=MouseAction.PRESS))
+        self.assertEqual(app.message_cursor, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -977,10 +977,11 @@ class EspressoMailApp(Model):
                     else:
                         self._activate_selected_folder()
             elif target_pane == "messages":
-                clicked_idx = self.message_scroll + body_y
-                if 0 <= clicked_idx < len(self.message_rows):
-                    self.message_cursor = clicked_idx
-                    self._on_message_selection_changed()
+                if body_y >= 0:
+                    clicked_idx = self.message_scroll + (body_y // 2)
+                    if 0 <= clicked_idx < len(self.message_rows):
+                        self.message_cursor = clicked_idx
+                        self._on_message_selection_changed()
             return self, None
 
         return self, None
@@ -1521,13 +1522,14 @@ class EspressoMailApp(Model):
         inner_w = max(18, width - 4)
         inner_h = max(4, height - 2)
 
-        # Keep selected message visible in scroll window
+        # Keep selected message visible in scroll window (2 lines per message)
+        items_per_page = max(1, inner_h // 2)
         if self.message_cursor < self.message_scroll:
             self.message_scroll = self.message_cursor
-        elif self.message_cursor >= self.message_scroll + inner_h:
-            self.message_scroll = self.message_cursor - inner_h + 1
+        elif self.message_cursor >= self.message_scroll + items_per_page:
+            self.message_scroll = self.message_cursor - items_per_page + 1
 
-        visible = self.message_rows[self.message_scroll : self.message_scroll + inner_h]
+        visible = self.message_rows[self.message_scroll : self.message_scroll + items_per_page]
         lines: list[str] = []
 
         if not visible:
@@ -1543,8 +1545,8 @@ class EspressoMailApp(Model):
 
                 unread_ch = "●" if not m.is_read else " "
                 star_ch = "★" if m.is_starred else " "
-                att_ch = "📎" if m.has_attachments else "  "
-                pgp_ch = "🔒" if m.pgp_status != PGPStatus.NONE else "  "
+                att_ch = "📎 " if m.has_attachments else ""
+                pgp_ch = "🔒 " if m.pgp_status != PGPStatus.NONE else ""
 
                 tree_prefix = ""
                 if self.threading_enabled and row.depth > 0:
@@ -1569,13 +1571,25 @@ class EspressoMailApp(Model):
                     acc_prefix = Style().bold(True).foreground(b_color).render(f"[{acc_short}] ")
                     acc_prefix_len = len(f"[{acc_short}] ")
 
-                sender_col = truncate_ansi(f"{tree_prefix}{m.sender_short}", 14)
-                date_col = f"{m.short_date:>6}"
-                subj_avail = max(6, inner_w - 28 - acc_prefix_len)
-                subj_col = truncate_ansi(f"{thread_cnt}{m.subject}", subj_avail)
+                right_meta = f"{thread_cnt}{att_ch}{pgp_ch}{m.short_date}".strip()
+                right_w = string_width(right_meta)
 
-                raw_line = f"{unread_ch}{star_ch} {acc_prefix}{sender_col:<14} {subj_col:<{subj_avail}} {att_ch}{pgp_ch}{date_col}"
-                trimmed = truncate_ansi(raw_line, inner_w)
+                fixed_left_w = 3 + acc_prefix_len + len(tree_prefix)
+                avail_sender = max(6, inner_w - right_w - fixed_left_w - 1)
+                sender_txt = truncate_ansi(m.sender_short, avail_sender)
+                left_line = f"{unread_ch}{star_ch} {acc_prefix}{tree_prefix}{sender_txt}"
+
+                space_count = max(1, inner_w - string_width(left_line) - right_w)
+                line1_raw = f"{left_line}{' ' * space_count}{right_meta}"
+                line1 = truncate_ansi(line1_raw, inner_w)
+
+                # Line 2: Subject indented cleanly with maximum available width
+                tree_indent = " " * min(4, row.depth * 2) if self.threading_enabled else ""
+                subj_indent = f"   {tree_indent}"
+                subj_avail = max(6, inner_w - len(subj_indent))
+                subj_txt = truncate_ansi(m.subject or "(No Subject)", subj_avail)
+                line2_raw = f"{subj_indent}{subj_txt}"
+                line2 = truncate_ansi(line2_raw, inner_w)
 
                 if is_sel and self.focused_pane == "messages":
                     lines.append(
@@ -1584,7 +1598,14 @@ class EspressoMailApp(Model):
                         .foreground(self.theme.bg_primary)
                         .background(self.theme.accent_primary)
                         .width(inner_w)
-                        .render(trimmed)
+                        .render(line1)
+                    )
+                    lines.append(
+                        Style()
+                        .foreground(self.theme.bg_primary)
+                        .background(self.theme.accent_primary)
+                        .width(inner_w)
+                        .render(line2)
                     )
                 elif is_sel:
                     lines.append(
@@ -1593,14 +1614,25 @@ class EspressoMailApp(Model):
                         .foreground(self.theme.accent_secondary)
                         .background(self.theme.bg_highlight)
                         .width(inner_w)
-                        .render(trimmed)
+                        .render(line1)
+                    )
+                    lines.append(
+                        Style()
+                        .foreground(self.theme.fg_primary)
+                        .background(self.theme.bg_highlight)
+                        .width(inner_w)
+                        .render(line2)
                     )
                 elif not m.is_read:
                     lines.append(
-                        Style().bold(True).foreground(self.theme.unread_fg).render(trimmed)
+                        Style().bold(True).foreground(self.theme.unread_fg).width(inner_w).render(line1)
+                    )
+                    lines.append(
+                        Style().bold(True).foreground(self.theme.fg_primary).width(inner_w).render(line2)
                     )
                 else:
-                    lines.append(Style().foreground(self.theme.fg_primary).render(trimmed))
+                    lines.append(Style().foreground(self.theme.fg_primary).width(inner_w).render(line1))
+                    lines.append(Style().foreground(self.theme.fg_muted).width(inner_w).render(line2))
 
         folder_label = "Unified" if self.active_account_id == "*" else self.active_account_id
         folder_path = (
