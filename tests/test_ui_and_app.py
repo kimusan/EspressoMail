@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 import tempfile
 import unittest
+from unittest import mock
 
 from espresso import KeyMsg, MouseAction, MouseButton, MouseMsg, WindowSizeMsg
-from espressomail.models import AccountConfig
+from espressomail.models import AccountConfig, EmailMessage, Folder, FolderType
 from espressomail.storage import LocalStore
 from espressomail.themes import ThemeEngine
 from espressomail.ui import (
@@ -17,6 +19,7 @@ from espressomail.ui import (
     ImageRenderBackend,
     OnboardingWizard,
     PreferencesModal,
+    PreferencesSavedMsg,
     SplashDoneMsg,
     SplashScreen,
     SplashTickMsg,
@@ -799,6 +802,238 @@ class TestUIAndApp(unittest.TestCase):
             fresh_names = [f.name for f in fresh_folders]
             self.assertIn("INBOX", fresh_names)
             self.assertIn("Work/Clients", fresh_names)
+
+    def test_folder_tree_space_optimization_and_account_collapse(self) -> None:
+        """Verify no wasted horizontal space (no selection marker arrow, no expander column),
+        distinct subfolder group icons (🗂️ / 📂), account folding/unfolding and persistence."""
+        acc = AccountConfig(id="acc_main", name="Personal", email="me@example.com", full_name="My Name", imap_host="imap.example.com")
+        self.store.save_account(acc)
+        self.store.sync_remote_folders(
+            acc.id,
+            [
+                Folder(id="f_w", account_id=acc.id, name="Work", display_name="Work", folder_type=FolderType.CUSTOM),
+                Folder(id="f_wc", account_id=acc.id, name="Work/Clients", display_name="Clients", folder_type=FolderType.CUSTOM),
+            ],
+        )
+
+        app = EspressoMailApp(self.store, show_splash=False)
+        app.focused_pane = "folders"
+        folder_view = app._render_folder_pane(30, 20)
+
+        # 1. No marker arrows ('▸' or '•') wasting columns on the left
+        self.assertNotIn("▸", folder_view)
+        self.assertNotIn("•", folder_view)
+        # No expander arrows ("▼ " or "▶ ") on leaf mailbox rows
+        self.assertNotIn("  📥", folder_view)
+
+        # 2. Subfolder group icons: Work has subfolder Work/Clients, so collapsed icon is 🗂️
+        self.assertIn("🗂️ Work", folder_view)
+
+        # Expand Work via Space/right and verify icon becomes 📂
+        visible = app.folder_tree._flatten_visible()
+        work_idx = next(i for i, (node, _, _, _) in enumerate(visible) if node.value and node.value.label == "Work")
+        app.folder_cursor = work_idx
+        app, _ = app.update(KeyMsg(key="right"))
+        expanded_view = app._render_folder_pane(30, 20)
+        self.assertIn("📂 Work", expanded_view)
+        self.assertIn("Clients", expanded_view)
+
+        # 3. Account collapsing: account header displays indicator '▼' when unfolded
+        self.assertIn(f"▼ {acc.name.upper()}", folder_view)
+
+        # Collapse account via Space/Enter or Left on header
+        acc_idx = next(i for i, (node, _, _, _) in enumerate(app.folder_tree._flatten_visible()) if node.value and node.value.is_header and node.value.account_id == acc.id)
+        app.folder_cursor = acc_idx
+        app, _ = app.update(KeyMsg(key="space"))
+
+        collapsed_view = app._render_folder_pane(30, 20)
+        # Account header now displays '▶' when folded
+        self.assertIn(f"▶ {acc.name.upper()}", collapsed_view)
+        # None of the account's folders should be shown in the tree when collapsed!
+        self.assertNotIn("Work", collapsed_view)
+        self.assertNotIn("Clients", collapsed_view)
+
+        # Verify state persistence across app re-instantiation
+        app2 = EspressoMailApp(self.store, show_splash=False)
+        app2_view = app2._render_folder_pane(30, 20)
+        self.assertIn(f"▶ {acc.name.upper()}", app2_view)
+        self.assertNotIn("Work", app2_view)
+
+        # Unfold account again via Enter and verify folders reappear
+        app2.focused_pane = "folders"
+        acc2_idx = next(i for i, (node, _, _, _) in enumerate(app2.folder_tree._flatten_visible()) if node.value and node.value.is_header and node.value.account_id == acc.id)
+        app2.folder_cursor = acc2_idx
+        app2, _ = app2.update(KeyMsg(key="enter"))
+        self.assertIn(f"▼ {acc.name.upper()}", app2._render_folder_pane(30, 20))
+        self.assertIn("Work", app2._render_folder_pane(30, 20))
+
+    def test_left_splitter_resizes_folder_against_reader(self) -> None:
+        """Verify dragging the splitter between folder list and message list resizes folder width
+        against the reading pane, while the message list width remains strictly UNCHANGED."""
+        acc = AccountConfig(id="acc_main", name="Personal", email="me@example.com", full_name="My Name", imap_host="imap.example.com")
+        self.store.save_account(acc)
+
+        app = EspressoMailApp(self.store, show_splash=False)
+        app.width = 120
+        app.height = 30
+        init_f_w, init_l_w, init_r_w = app._pane_widths()
+
+        # 1. Mouse Drag on Splitter 1 (at x = init_f_w)
+        # Press on splitter 1
+        app, _ = app.update(MouseMsg(x=init_f_w, y=5, button=MouseButton.LEFT, action=MouseAction.PRESS))
+        self.assertEqual(app.splitter_dragging, 1)
+
+        # Move mouse right by +6 cols (widen folder pane to init_f_w + 6)
+        target_f_w = init_f_w + 6
+        app, _ = app.update(MouseMsg(x=target_f_w, y=5, button=MouseButton.LEFT, action=MouseAction.MOTION))
+        new_f_w, new_l_w, new_r_w = app._pane_widths()
+        self.assertEqual(new_f_w, target_f_w)
+        # CRITICAL REQUIREMENT: Message list width MUST remain unchanged!
+        self.assertEqual(new_l_w, init_l_w)
+        # Space was taken from reader pane!
+        self.assertEqual(new_r_w, init_r_w - 6)
+        self.assertEqual(sum(app._pane_widths()), 120)
+
+        # Release mouse button
+        app, _ = app.update(MouseMsg(x=target_f_w, y=5, button=MouseButton.LEFT, action=MouseAction.RELEASE))
+        self.assertEqual(app.splitter_dragging, 0)
+        self.assertEqual(self.store.get_setting("custom_folder_w"), str(target_f_w))
+
+        # 2. Persistence across sessions
+        restored = EspressoMailApp(self.store, show_splash=False)
+        restored.width = 120
+        restored.height = 30
+        self.assertEqual(restored._pane_widths()[0], target_f_w)
+        self.assertEqual(restored._pane_widths()[1], init_l_w)
+
+        # 3. Keyboard resizing: '{' narrows folder list, '}' widens folder list
+        cur_f = restored._pane_widths()[0]
+        restored, _ = restored.update(KeyMsg(key="{"))
+        self.assertEqual(restored._pane_widths()[0], cur_f - 2)
+        self.assertEqual(restored._pane_widths()[1], init_l_w)  # list unchanged!
+
+        restored, _ = restored.update(KeyMsg(key="}"))
+        self.assertEqual(restored._pane_widths()[0], cur_f)
+        self.assertEqual(restored._pane_widths()[1], init_l_w)  # list unchanged!
+
+        # 4. Double click on Splitter 1 resets width to default
+        cur_f = restored._pane_widths()[0]
+        restored, _ = restored.update(MouseMsg(x=cur_f, y=5, button=MouseButton.LEFT, action=MouseAction.DOUBLE_CLICK))
+        self.assertIsNone(restored.custom_folder_w)
+        self.assertEqual(self.store.get_setting("custom_folder_w"), "")
+        self.assertEqual(restored._pane_widths(), (init_f_w, init_l_w, init_r_w))
+
+    def test_folder_count_mode_and_fetch_batch_size_preferences(self) -> None:
+        """Verify configurable folder_count_mode ('unread_only' vs 'unread_and_total')
+        and configurable fetch_batch_size (25, 50, 100, 200)."""
+        acc = AccountConfig(id="acc_main", name="Personal", email="me@example.com", full_name="My Name", imap_host="imap.example.com", imap_password="pass")
+        self.store.save_account(acc)
+        self.store.sync_remote_folders(
+            acc.id,
+            [
+                Folder(id="f_test", account_id=acc.id, name="Testing", display_name="Testing", folder_type=FolderType.CUSTOM),
+            ],
+        )
+        for i in range(18):
+            self.store.save_message(
+                EmailMessage(
+                    id=f"msg_test_{i}",
+                    account_id=acc.id,
+                    folder="Testing",
+                    subject=f"Subject {i}",
+                    sender_email="test@example.com",
+                    body_text="Body text",
+                    is_read=True,
+                )
+            )
+
+        app = EspressoMailApp(self.store, show_splash=False)
+
+        # 1. Default mode: 'unread_only' - folder with 0 unread has NO count badge wasting columns
+        app.folder_count_mode = "unread_only"
+        pane_unread_only = app._render_folder_pane(30, 20)
+        plain_unread = re.sub(r"\x1b\[[0-9;]*m", "", pane_unread_only)
+        self.assertNotIn("18", plain_unread)
+
+        # 2. Switch to 'unread_and_total' - total count is now displayed
+        app.folder_count_mode = "unread_and_total"
+        pane_both = app._render_folder_pane(30, 20)
+        plain_both = re.sub(r"\x1b\[[0-9;]*m", "", pane_both)
+        self.assertIn("18", plain_both)
+
+        # 3. PreferencesModal configuration
+        modal = PreferencesModal(
+            store=self.store,
+            current_theme=app.theme,
+            download_dir=app.download_dir,
+        )
+        self.assertEqual(modal.FOLDER_COUNT_MODES[modal.count_mode_idx], "unread_only")
+        # Toggle folder count mode to 'unread_and_total'
+        modal.focus_idx = 7
+        modal, _ = modal.update(KeyMsg(key="right"))
+        self.assertEqual(modal.FOLDER_COUNT_MODES[modal.count_mode_idx], "unread_and_total")
+
+        # Cycle fetch batch size to 100
+        modal.focus_idx = 8
+        modal, _ = modal.update(KeyMsg(key="right"))
+        self.assertEqual(modal.FETCH_BATCH_SIZES[modal.batch_idx], 100)
+
+        # Save preferences
+        modal, cmd = modal.update(KeyMsg(key="ctrl+s"))
+        self.assertIsNotNone(cmd)
+        saved_msg = cmd()
+        self.assertIsInstance(saved_msg, PreferencesSavedMsg)
+        self.assertEqual(saved_msg.folder_count_mode, "unread_and_total")
+        self.assertEqual(saved_msg.fetch_batch_size, 100)
+
+        # Apply to app
+        app, _ = app.update(saved_msg)
+        self.assertEqual(app.folder_count_mode, "unread_and_total")
+        self.assertEqual(app.fetch_batch_size, 100)
+        self.assertEqual(self.store.get_setting("folder_count_mode"), "unread_and_total")
+        self.assertEqual(self.store.get_setting("fetch_batch_size"), "100")
+
+        # 4. Verify fetch_more_messages_cmd uses the configured batch size
+        with mock.patch("espressomail.ui.app.IMAPClient") as mock_imap_cls:
+            inst = mock_imap_cls.return_value
+            inst.fetch_recent_messages.return_value = []
+            app.active_account_id = acc.id
+            app.active_folder = "Testing"
+            cmd = app._fetch_more_messages_cmd
+            cmd()
+            # Assert limit was called with app.fetch_batch_size = 100
+            inst.fetch_recent_messages.assert_called_with(
+                folder="Testing",
+                limit=100,
+                before_uid=None,
+            )
+
+    def test_three_pane_bottom_border_alignment(self) -> None:
+        """Verify the bottom border of the folder list aligns exactly with the message list and reading pane."""
+        acc = AccountConfig(id="acc_main", name="Personal", email="me@example.com", full_name="My Name", imap_host="imap.example.com")
+        self.store.save_account(acc)
+
+        app = EspressoMailApp(self.store, show_splash=False)
+        app.update(WindowSizeMsg(width=100, height=24))
+        f_w, l_w, r_w = app._pane_widths()
+        pane_h = app._pane_height()
+
+        left_pane = app._render_folder_pane(f_w, pane_h)
+        center_pane = app._render_message_list_pane(l_w, pane_h)
+        right_pane = app._render_reading_pane(r_w, pane_h)
+
+        # All 3 panes MUST have the exact same rendered line count equal to pane_h
+        left_lines = left_pane.splitlines()
+        center_lines = center_pane.splitlines()
+        right_lines = right_pane.splitlines()
+
+        self.assertEqual(len(left_lines), pane_h, f"Folder pane line count ({len(left_lines)}) != pane_h ({pane_h})")
+        self.assertEqual(len(center_lines), pane_h, f"Message list pane line count ({len(center_lines)}) != pane_h ({pane_h})")
+        self.assertEqual(len(right_lines), pane_h, f"Reading pane line count ({len(right_lines)}) != pane_h ({pane_h})")
+
+        # Bottom borders align at the exact same row!
+        self.assertEqual(len(left_lines), len(center_lines))
+        self.assertEqual(len(center_lines), len(right_lines))
 
 
 if __name__ == "__main__":

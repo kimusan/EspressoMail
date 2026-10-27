@@ -62,7 +62,7 @@ class Theme:
             .border(border)
             .border_foreground(b_color)
             .width(max(10, width - 2))
-            .height(max(3, height - 2))
+            .height(max(3, height))
         )
         if title:
             title_style = (

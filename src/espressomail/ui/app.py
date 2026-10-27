@@ -208,10 +208,18 @@ class EspressoMailApp(Model):
         self._last_rendered_msg_key = ""
         self._accounts_cache: dict[str, AccountConfig] = {}
 
-        # Splitter resize state between Message List (Pane 2) and Reading Pane (Pane 3)
+        # Splitter resize state
+        saved_folder_w = self.store.get_setting("custom_folder_w", "")
+        self.custom_folder_w: int | None = int(saved_folder_w) if saved_folder_w.isdigit() else None
         saved_list_w = self.store.get_setting("custom_list_w", "")
         self.custom_list_w: int | None = int(saved_list_w) if saved_list_w.isdigit() else None
-        self.splitter_dragging: bool = False
+        self.splitter_dragging: int = 0  # 0=none, 1=folder/list splitter, 2=list/reader splitter
+
+        # Account collapsing and folder display preferences
+        self.collapsed_accounts: set[str] = self._load_collapsed_accounts()
+        self.folder_count_mode: str = self.store.get_setting("folder_count_mode", "unread_only")
+        cur_batch = self.store.get_setting("fetch_batch_size", "50")
+        self.fetch_batch_size: int = int(cur_batch) if cur_batch.isdigit() else 50
 
         # Active modal overlay
         self.active_modal: Model | None = None
@@ -301,6 +309,41 @@ class EspressoMailApp(Model):
         except Exception:
             pass
 
+    def _load_collapsed_accounts(self) -> set[str]:
+        """Load persisted collapsed account IDs from SQLite settings table."""
+        raw = self.store.get_setting("collapsed_accounts", "[]")
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return {str(k) for k in parsed if k}
+        except Exception:
+            pass
+        return set()
+
+    def _save_collapsed_accounts(self) -> None:
+        """Persist collapsed account IDs to the SQLite settings table."""
+        try:
+            self.store.set_setting(
+                "collapsed_accounts",
+                json.dumps(sorted(self.collapsed_accounts)),
+            )
+        except Exception:
+            pass
+
+    def _toggle_account_collapse(self, acc_id: str) -> None:
+        """Toggle collapsed/expanded state of an account header and persist across sessions."""
+        if acc_id in self.collapsed_accounts:
+            self.collapsed_accounts.remove(acc_id)
+            action = "Expanded"
+        else:
+            self.collapsed_accounts.add(acc_id)
+            action = "Collapsed"
+        self._save_collapsed_accounts()
+        self.refresh_data()
+        acc = self._accounts_cache.get(acc_id)
+        name = acc.name if acc else ("Unified Mailboxes" if acc_id == "*" else acc_id)
+        self.status_message = f"{action} account '{name}'."
+
     @property
     def theme(self) -> Theme:
         return self.theme_engine.current
@@ -318,7 +361,9 @@ class EspressoMailApp(Model):
             PaletteItem("cycle_image_mode", "View: Cycle Image Renderer", "Switch Chafa / Sixel / Kitty / Half-Block", "i", "View"),
             PaletteItem("expand_reader", "View: Widen Reading Pane", "Move splitter left to widen reading pane", "[", "View"),
             PaletteItem("expand_list", "View: Widen Message List", "Move splitter right to widen message list", "]", "View"),
-            PaletteItem("reset_splitter", "View: Reset Splitter Width", "Reset pane widths to responsive defaults", "", "View"),
+            PaletteItem("widen_folder_list", "View: Widen Folder List", "Expand folder list width (+2 cols)", "}", "View"),
+            PaletteItem("narrow_folder_list", "View: Narrow Folder List", "Narrow folder list width (-2 cols)", "{", "View"),
+            PaletteItem("reset_splitter", "View: Reset Splitters", "Reset all pane widths to responsive defaults", "", "View"),
             PaletteItem("save_attachments", "Mail: Download Attachments", "Save attachments to downloads directory", "w", "Mail"),
             PaletteItem("fetch_more", "Mail: Fetch Older Messages", "Download earlier emails from IMAP folder", "M", "Mail"),
             PaletteItem("address_book", "Tools: Local Address Book", "Manage contacts and PGP fingerprints", "B", "Tools"),
@@ -522,6 +567,7 @@ class EspressoMailApp(Model):
                     expanded=False,
                 )
             )
+        is_unified_expanded = "*" not in self.collapsed_accounts
         top_nodes.append(
             TreeNode(
                 label="UNIFIED MAILBOXES",
@@ -531,9 +577,12 @@ class EspressoMailApp(Model):
                     label="UNIFIED MAILBOXES",
                     icon="🌐",
                     is_header=True,
+                    has_children=True,
+                    is_expanded=is_unified_expanded,
+                    tree_key="acc:*",
                 ),
                 children=unified_children,
-                expanded=True,
+                expanded=is_unified_expanded,
             )
         )
 
@@ -542,6 +591,7 @@ class EspressoMailApp(Model):
         for acc in accounts:
             acc_folders = self.store.list_folders(acc.id)
             acc_tree_children = self._build_account_folder_tree_nodes(acc.id, acc_folders)
+            is_acc_expanded = acc.id not in self.collapsed_accounts
             top_nodes.append(
                 TreeNode(
                     label=acc.name.upper(),
@@ -552,9 +602,12 @@ class EspressoMailApp(Model):
                         icon="☕",
                         is_header=True,
                         badge_color=acc.color_badge,
+                        has_children=bool(acc_tree_children),
+                        is_expanded=is_acc_expanded,
+                        tree_key=f"acc:{acc.id}",
                     ),
                     children=acc_tree_children,
-                    expanded=True,
+                    expanded=is_acc_expanded,
                 )
             )
 
@@ -563,25 +616,31 @@ class EspressoMailApp(Model):
             visible_before = self.folder_tree._flatten_visible()
             if 0 <= self.folder_tree.cursor < len(visible_before):
                 cand = visible_before[self.folder_tree.cursor][0].value
-                if cand and not cand.is_header:
+                if cand:
                     prev_row = cand
 
         self.folder_tree = Tree(nodes=top_nodes)
 
         visible_after = self.folder_tree._flatten_visible()
-        # 1. If cursor was already on a non-header row, keep it on that row (or its collapsed parent)
+        # 1. If cursor was already on a row (including headers), keep it on that row
         if prev_row is not None:
             for idx, (node, _, _, _) in enumerate(visible_after):
                 r = node.value
                 if (
                     r
-                    and not r.is_header
                     and r.account_id == prev_row.account_id
                     and (
-                        (prev_row.tree_key and r.tree_key == prev_row.tree_key)
+                        (r.is_header and prev_row.is_header)
+                        or (prev_row.tree_key and r.tree_key == prev_row.tree_key)
                         or (not prev_row.tree_key and r.folder_name == prev_row.folder_name)
                     )
                 ):
+                    self.folder_tree.cursor = idx
+                    return
+            # If previous folder became hidden under a collapsed account, land on the account header
+            for idx, (node, _, _, _) in enumerate(visible_after):
+                r = node.value
+                if r and r.is_header and r.account_id == prev_row.account_id:
                     self.folder_tree.cursor = idx
                     return
 
@@ -655,22 +714,41 @@ class EspressoMailApp(Model):
     def _pane_widths(self) -> tuple[int, int, int]:
         """Compute responsive widths for (folder_pane, list_pane, reader_pane)."""
         total_w = max(80, self.width)
-        folder_w = max(24, min(30, int(total_w * 0.21)))
+        min_folder_w = 16
         min_list_w = 24
         min_reader_w = 26
+
+        default_folder_w = max(22, min(30, int(total_w * 0.21)))
+        folder_w = self.custom_folder_w if self.custom_folder_w is not None else default_folder_w
+
+        default_list_w = max(32, min(46, int(total_w * 0.34)))
+        list_w = self.custom_list_w if self.custom_list_w is not None else default_list_w
+
+        folder_w = max(min_folder_w, min(total_w - min_list_w - min_reader_w, folder_w))
         max_list_w = max(min_list_w, total_w - folder_w - min_reader_w)
-        if self.custom_list_w is not None:
-            list_w = max(min_list_w, min(max_list_w, self.custom_list_w))
-        else:
-            default_list_w = max(32, min(46, int(total_w * 0.34)))
-            list_w = max(min_list_w, min(max_list_w, default_list_w))
+        list_w = max(min_list_w, min(max_list_w, list_w))
         reader_w = max(min_reader_w, total_w - folder_w - list_w)
         return folder_w, list_w, reader_w
+
+    def _apply_folder_splitter_move(self, mouse_x: int) -> None:
+        """Apply dynamic splitter movement to adjust folder list width against reader pane (list width unchanged)."""
+        total_w = max(80, self.width)
+        min_folder_w = 16
+        min_reader_w = 26
+        _, current_list_w, _ = self._pane_widths()
+        max_folder_w = max(min_folder_w, total_w - current_list_w - min_reader_w)
+        desired_folder_w = mouse_x
+        self.custom_folder_w = max(min_folder_w, min(max_folder_w, desired_folder_w))
+        self._update_reader_viewport(force=True)
+        current_folder_w, _, current_reader_w = self._pane_widths()
+        self.status_message = (
+            f"Resizing folder pane: folders = {current_folder_w} cols, reader = {current_reader_w} cols (list unchanged = {current_list_w})"
+        )
 
     def _apply_splitter_move(self, mouse_x: int) -> None:
         """Apply dynamic splitter movement to adjust list and reader pane widths."""
         total_w = max(80, self.width)
-        folder_w = max(24, min(30, int(total_w * 0.21)))
+        folder_w, _, _ = self._pane_widths()
         min_list_w = 24
         min_reader_w = 26
         max_list_w = max(min_list_w, total_w - folder_w - min_reader_w)
@@ -809,6 +887,22 @@ class EspressoMailApp(Model):
                 return self._execute_action(msg.item.id)
             return self, cmd
 
+        if isinstance(msg, PreferencesSavedMsg):
+            self.active_modal = None
+            self.download_dir = Path(msg.download_dir).expanduser().resolve()
+            self.theme_engine.set_theme(msg.theme)
+            self.image_renderer.set_backend(ImageRenderBackend(msg.image_backend))
+            self.threading_enabled = msg.threading
+            self.show_raw_headers = msg.show_raw_headers
+            self.folder_count_mode = msg.folder_count_mode
+            self.fetch_batch_size = msg.fetch_batch_size
+            self.refresh_data()
+            self.status_message = (
+                f"✔ Saved preferences: theme={msg.theme}, renderer={msg.image_backend}, "
+                f"batch={msg.fetch_batch_size}, counts={msg.folder_count_mode}"
+            )
+            return self, None
+
         # 6. Active Modal Dialogs
         if self.active_modal is not None:
             if isinstance(msg, ModalClosedMsg):
@@ -841,17 +935,6 @@ class EspressoMailApp(Model):
                     active_account_id=self.active_account_id,
                     to_initial=msg.recipient,
                 )
-                return self, None
-
-            if isinstance(msg, PreferencesSavedMsg):
-                self.active_modal = None
-                self.download_dir = Path(msg.download_dir).expanduser().resolve()
-                self.theme_engine.set_theme(msg.theme)
-                self.image_renderer.set_backend(ImageRenderBackend(msg.image_backend))
-                self.threading_enabled = msg.threading
-                self.show_raw_headers = msg.show_raw_headers
-                self.refresh_data()
-                self.status_message = f"✔ Saved preferences: theme={msg.theme}, renderer={msg.image_backend}, downloads={self.download_dir}"
                 return self, None
 
             self.active_modal, cmd = self.active_modal.update(msg)
@@ -963,9 +1046,17 @@ class EspressoMailApp(Model):
             return self._execute_action("new_account")
         if k == "S":
             return self._execute_action("sync_all")
-        if k in ("[", "{"):
+        if k == "{":
+            return self._execute_action("narrow_folder_list")
+        if k == "}":
+            return self._execute_action("widen_folder_list")
+        if k == "[":
+            if self.focused_pane == "folders":
+                return self._execute_action("narrow_folder_list")
             return self._execute_action("expand_reader")
-        if k in ("]", "}"):
+        if k == "]":
+            if self.focused_pane == "folders":
+                return self._execute_action("widen_folder_list")
             return self._execute_action("expand_list")
 
         # Pane focus cycling
@@ -986,6 +1077,12 @@ class EspressoMailApp(Model):
         # Pane-specific navigation
         if self.focused_pane == "folders":
             visible = self.folder_tree._flatten_visible()
+            if 0 <= self.folder_cursor < len(visible):
+                node, _, _, parent = visible[self.folder_cursor]
+                row: FolderTreeRow | None = node.value
+            else:
+                node, parent, row = None, None, None
+
             if k in ("down", "j"):
                 self._step_folder_cursor(1)
                 return self, None
@@ -993,47 +1090,57 @@ class EspressoMailApp(Model):
                 self._step_folder_cursor(-1)
                 return self, None
             if k in ("left", "h"):
-                if 0 <= self.folder_cursor < len(visible):
-                    node, _, _, parent = visible[self.folder_cursor]
+                if node is not None and row is not None:
+                    if row.is_header:
+                        if node.expanded:
+                            self._toggle_account_collapse(row.account_id)
+                        return self, None
                     if not node.is_leaf and node.expanded:
                         node.expanded = False
                         self._save_expanded_folders()
-                        self.status_message = f"Collapsed '{node.value.label}'."
+                        self.status_message = f"Collapsed '{row.label}'."
                     elif parent is not None:
                         for p_idx, (vis_node, _, _, _) in enumerate(visible):
-                            if vis_node is parent and not vis_node.value.is_header:
+                            if vis_node is parent:
                                 self.folder_cursor = p_idx
                                 break
                 return self, None
             if k in ("right", "l"):
-                if 0 <= self.folder_cursor < len(visible):
-                    node, _, _, _ = visible[self.folder_cursor]
+                if node is not None and row is not None:
+                    if row.is_header:
+                        if not node.expanded:
+                            self._toggle_account_collapse(row.account_id)
+                        return self, None
                     if not node.is_leaf and not node.expanded:
                         node.expanded = True
                         self._save_expanded_folders()
-                        self.status_message = f"Expanded '{node.value.label}'."
+                        self.status_message = f"Expanded '{row.label}'."
                         return self, None
                 self.focused_pane = "messages"
                 return self, None
             if k in (" ", "space"):
-                if 0 <= self.folder_cursor < len(visible):
-                    node, _, _, _ = visible[self.folder_cursor]
+                if node is not None and row is not None:
+                    if row.is_header:
+                        self._toggle_account_collapse(row.account_id)
+                        return self, None
                     if not node.is_leaf:
                         node.expanded = not node.expanded
                         self._save_expanded_folders()
                         action_str = "Expanded" if node.expanded else "Collapsed"
-                        self.status_message = f"{action_str} '{node.value.label}'."
+                        self.status_message = f"{action_str} '{row.label}'."
                         return self, None
                 self._activate_selected_folder()
                 return self, None
             if k == "enter":
-                if 0 <= self.folder_cursor < len(visible):
-                    node, _, _, _ = visible[self.folder_cursor]
-                    if not node.is_leaf and not node.value.selectable_mailbox:
+                if node is not None and row is not None:
+                    if row.is_header:
+                        self._toggle_account_collapse(row.account_id)
+                        return self, None
+                    if not node.is_leaf and not row.selectable_mailbox:
                         node.expanded = not node.expanded
                         self._save_expanded_folders()
                         action_str = "Expanded" if node.expanded else "Collapsed"
-                        self.status_message = f"{action_str} '{node.value.label}'."
+                        self.status_message = f"{action_str} '{row.label}'."
                         return self, None
                     if not node.is_leaf and not node.expanded:
                         node.expanded = True
@@ -1097,29 +1204,45 @@ class EspressoMailApp(Model):
             return self, cmd
 
         folder_w, list_w, _ = self._pane_widths()
-        split_x = folder_w + list_w
+        split_x_1 = folder_w
+        split_x_2 = folder_w + list_w
         body_y = msg.y - 2  # Account for menu bar (1) + top pane border (1)
 
-        # 1. Splitter Drag & Double-Click interactions between message list and reading pane
+        # 1. Splitter Drag & Double-Click interactions
         if (
             msg.action == MouseAction.PRESS
             and msg.button == MouseButton.LEFT
             and 1 <= msg.y < self.height - 1
-            and abs(msg.x - split_x) <= 1
         ):
-            self.splitter_dragging = True
-            self._apply_splitter_move(msg.x)
-            return self, None
+            if abs(msg.x - split_x_1) <= 1:
+                self.splitter_dragging = 1
+                self._apply_folder_splitter_move(msg.x)
+                return self, None
+            if abs(msg.x - split_x_2) <= 1:
+                self.splitter_dragging = 2
+                self._apply_splitter_move(msg.x)
+                return self, None
 
         if msg.action == MouseAction.MOTION:
-            if self.splitter_dragging:
+            if self.splitter_dragging == 1:
+                self._apply_folder_splitter_move(msg.x)
+                return self, None
+            if self.splitter_dragging == 2:
                 self._apply_splitter_move(msg.x)
                 return self, None
             return self, None
 
         if msg.action == MouseAction.RELEASE:
-            if self.splitter_dragging:
-                self.splitter_dragging = False
+            if self.splitter_dragging == 1:
+                self.splitter_dragging = 0
+                if self.custom_folder_w is not None:
+                    self.store.set_setting("custom_folder_w", str(self.custom_folder_w))
+                    self.status_message = (
+                        f"Splitter resized: folder list width = {self.custom_folder_w} cols."
+                    )
+                return self, None
+            if self.splitter_dragging == 2:
+                self.splitter_dragging = 0
                 if self.custom_list_w is not None:
                     self.store.set_setting("custom_list_w", str(self.custom_list_w))
                     self.status_message = (
@@ -1131,17 +1254,24 @@ class EspressoMailApp(Model):
         if (
             msg.action == MouseAction.DOUBLE_CLICK
             and 1 <= msg.y < self.height - 1
-            and abs(msg.x - split_x) <= 1
         ):
-            self.splitter_dragging = False
-            self.custom_list_w = None
-            self.store.set_setting("custom_list_w", "")
-            self._update_reader_viewport(force=True)
-            self.status_message = "Splitter reset to default responsive width."
-            return self, None
+            if abs(msg.x - split_x_1) <= 1:
+                self.splitter_dragging = 0
+                self.custom_folder_w = None
+                self.store.set_setting("custom_folder_w", "")
+                self._update_reader_viewport(force=True)
+                self.status_message = "Folder list splitter reset to default responsive width."
+                return self, None
+            if abs(msg.x - split_x_2) <= 1:
+                self.splitter_dragging = 0
+                self.custom_list_w = None
+                self.store.set_setting("custom_list_w", "")
+                self._update_reader_viewport(force=True)
+                self.status_message = "Message list splitter reset to default responsive width."
+                return self, None
 
         if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
-            self.splitter_dragging = False
+            self.splitter_dragging = 0
 
         # Determine which pane the mouse is over
         if msg.x < folder_w:
@@ -1166,15 +1296,20 @@ class EspressoMailApp(Model):
             self.focused_pane = target_pane
             if target_pane == "folders":
                 clicked_idx = self.folder_scroll + body_y
-                if 0 <= clicked_idx < len(self.folder_rows) and not self.folder_rows[clicked_idx].is_header:
+                visible = self.folder_tree._flatten_visible()
+                if 0 <= clicked_idx < len(visible):
                     self.folder_cursor = clicked_idx
-                    clicked_row = self.folder_rows[clicked_idx]
-                    if clicked_row.has_children and (
-                        not clicked_row.selectable_mailbox or msg.x <= 8 + clicked_row.depth * 4
-                    ):
-                        self._toggle_folder_expand(clicked_row)
-                    else:
-                        self._activate_selected_folder()
+                    node = visible[clicked_idx][0]
+                    clicked_row: FolderTreeRow | None = node.value
+                    if clicked_row is not None:
+                        if clicked_row.is_header:
+                            self._toggle_account_collapse(clicked_row.account_id)
+                        elif not node.is_leaf and (
+                            not clicked_row.selectable_mailbox or msg.x <= 8 + clicked_row.depth * 4
+                        ):
+                            self._toggle_folder_expand(clicked_row)
+                        else:
+                            self._activate_selected_folder()
             elif target_pane == "messages":
                 if body_y >= 0:
                     clicked_idx = self.message_scroll + (body_y // 2)
@@ -1186,21 +1321,22 @@ class EspressoMailApp(Model):
         return self, None
 
     def _step_folder_cursor(self, direction: int) -> None:
-        if not self.folder_rows:
+        visible = self.folder_tree._flatten_visible()
+        if not visible:
             return
-        idx = self.folder_cursor
-        for _ in range(len(self.folder_rows)):
-            idx = (idx + direction) % len(self.folder_rows)
-            if not self.folder_rows[idx].is_header:
-                self.folder_cursor = idx
-                row = self.folder_rows[idx]
-                if row.selectable_mailbox:
-                    self._activate_selected_folder()
-                else:
-                    self.status_message = (
-                        f"Folder group '{row.label}' ({row.total_count} messages — Space/Enter to toggle)"
-                    )
-                break
+        self.folder_cursor = (self.folder_cursor + direction) % len(visible)
+        node = visible[self.folder_cursor][0]
+        row: FolderTreeRow | None = node.value
+        if row:
+            if row.is_header:
+                state_str = "unfolded" if node.expanded else "folded"
+                self.status_message = f"Account '{row.label}' ({state_str} — Space/Enter to toggle)"
+            elif row.selectable_mailbox:
+                self._activate_selected_folder()
+            else:
+                self.status_message = (
+                    f"Folder group '{row.label}' ({row.total_count} messages — Space/Enter to toggle)"
+                )
 
     def _activate_selected_folder(self) -> None:
         if 0 <= self.folder_cursor < len(self.folder_rows):
@@ -1337,6 +1473,28 @@ class EspressoMailApp(Model):
             )
             return self, None
 
+        if action_id == "widen_folder_list":
+            total_w = max(80, self.width)
+            folder_w, list_w, _ = self._pane_widths()
+            min_reader_w = 26
+            max_folder_w = max(16, total_w - list_w - min_reader_w)
+            new_folder_w = min(max_folder_w, folder_w + 2)
+            self.custom_folder_w = new_folder_w
+            self.store.set_setting("custom_folder_w", str(self.custom_folder_w))
+            self._update_reader_viewport(force=True)
+            self.status_message = f"Splitter moved: folder list widened to {new_folder_w} cols (space taken from reader)."
+            return self, None
+
+        if action_id == "narrow_folder_list":
+            folder_w, _, _ = self._pane_widths()
+            min_folder_w = 16
+            new_folder_w = max(min_folder_w, folder_w - 2)
+            self.custom_folder_w = new_folder_w
+            self.store.set_setting("custom_folder_w", str(self.custom_folder_w))
+            self._update_reader_viewport(force=True)
+            self.status_message = f"Splitter moved: folder list narrowed to {new_folder_w} cols (space given to reader)."
+            return self, None
+
         if action_id == "expand_reader":
             folder_w, list_w, _ = self._pane_widths()
             min_list_w = 24
@@ -1352,7 +1510,7 @@ class EspressoMailApp(Model):
             total_w = max(80, self.width)
             folder_w, list_w, _ = self._pane_widths()
             min_list_w = 24
-            min_reader_w = 26
+            min_reader_w = 24
             max_list_w = max(min_list_w, total_w - folder_w - min_reader_w)
             new_list_w = min(max_list_w, list_w + 3)
             self.custom_list_w = new_list_w
@@ -1363,9 +1521,11 @@ class EspressoMailApp(Model):
 
         if action_id == "reset_splitter":
             self.custom_list_w = None
+            self.custom_folder_w = None
             self.store.set_setting("custom_list_w", "")
+            self.store.set_setting("custom_folder_w", "")
             self._update_reader_viewport(force=True)
-            self.status_message = "Splitter reset to default responsive width."
+            self.status_message = "Splitters reset to default responsive widths."
             return self, None
 
         if action_id == "compose":
@@ -1616,7 +1776,7 @@ class EspressoMailApp(Model):
                 try:
                     fetched = client.fetch_recent_messages(
                         folder=target_folder,
-                        limit=50,
+                        limit=self.fetch_batch_size,
                         before_uid=min_uid if min_uid > 0 else None,
                     )
                     if fetched:
@@ -1763,23 +1923,60 @@ class EspressoMailApp(Model):
 
             if row.is_header:
                 hdr_color = row.badge_color or self.theme.accent_secondary
-                hdr_txt = truncate_ansi(f" {row.icon} {row.label}", inner_w)
-                lines.append(Style().bold(True).foreground(hdr_color).render(hdr_txt))
+                is_selected = idx == self.folder_cursor
+                ind = "▼" if node.expanded else "▶"
+                hdr_txt = truncate_ansi(f" {ind} {row.label}", inner_w)
+                if is_selected and self.focused_pane == "folders":
+                    lines.append(
+                        Style()
+                        .bold(True)
+                        .foreground(self.theme.bg_primary)
+                        .background(self.theme.accent_primary)
+                        .width(inner_w)
+                        .render(hdr_txt)
+                    )
+                elif is_selected:
+                    lines.append(
+                        Style()
+                        .bold(True)
+                        .foreground(hdr_color)
+                        .background(self.theme.bg_highlight)
+                        .width(inner_w)
+                        .render(hdr_txt)
+                    )
+                else:
+                    lines.append(Style().bold(True).foreground(hdr_color).render(hdr_txt))
                 continue
 
             is_selected = idx == self.folder_cursor
             is_active = (
                 row.account_id == self.active_account_id and row.folder_name == self.active_folder
             )
-            marker = "▸" if is_selected else ("•" if is_active else " ")
-            count_badge = f"({row.unread_count})" if row.unread_count > 0 else (f"{row.total_count}" if row.total_count > 0 else "")
+
+            if self.folder_count_mode == "unread_only":
+                count_badge = f"({row.unread_count})" if row.unread_count > 0 else ""
+            else:
+                if row.unread_count > 0:
+                    count_badge = (
+                        f"({row.unread_count}) {row.total_count}"
+                        if row.total_count > 0
+                        else f"({row.unread_count})"
+                    )
+                else:
+                    count_badge = f"{row.total_count}" if row.total_count > 0 else ""
 
             # Standard box-drawing branch prefix from espresso.beans.tree.Tree
             branch_prefix = prefix[4:] if depth > 0 else prefix
             tree_prefix = Style().foreground(self.theme.fg_muted).render(branch_prefix)
-            exp_icon = ("▼ " if node.expanded else "▶ ") if not node.is_leaf else "  "
-            lbl_raw = f" {marker} {tree_prefix}{exp_icon}{row.icon} {row.label}"
-            lbl_display = f" {marker} {branch_prefix}{exp_icon}{row.icon} {row.label}"
+
+            # Folders with subfolders use 🗂️ when closed, 📂 when open; leaf folders use their own icon
+            if not node.is_leaf:
+                folder_icon = "📂" if node.expanded else "🗂️"
+            else:
+                folder_icon = row.icon
+
+            lbl_raw = f" {tree_prefix}{folder_icon} {row.label}"
+            lbl_display = f" {branch_prefix}{folder_icon} {row.label}"
 
             pad = max(1, inner_w - string_width(lbl_display) - len(count_badge) - 1)
             line_str = truncate_ansi(f"{lbl_raw}{' ' * pad}{count_badge} ", inner_w)
@@ -1790,6 +1987,15 @@ class EspressoMailApp(Model):
                     .bold(True)
                     .foreground(self.theme.bg_primary)
                     .background(self.theme.accent_primary)
+                    .width(inner_w)
+                    .render(line_str)
+                )
+            elif is_selected:
+                lines.append(
+                    Style()
+                    .bold(True)
+                    .foreground(self.theme.accent_secondary)
+                    .background(self.theme.bg_highlight)
                     .width(inner_w)
                     .render(line_str)
                 )
@@ -1951,6 +2157,11 @@ class EspressoMailApp(Model):
         ).render("\n".join(lines))
 
     def _render_reading_pane(self, width: int, height: int) -> str:
+        inner_h = max(4, height - 2)
+        inner_w = max(18, width - 4)
+        if self.reader_viewport.height != inner_h or self.reader_viewport.width != inner_w:
+            self.reader_viewport.height = inner_h
+            self.reader_viewport.width = inner_w
         m = self.selected_message
         title = "📖 Reading Pane"
         if m:

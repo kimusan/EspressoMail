@@ -103,6 +103,8 @@ class PreferencesSavedMsg(Msg):
     show_raw_headers: bool
     sync_on_startup: bool
     allow_remote_images: bool
+    folder_count_mode: str = "unread_only"
+    fetch_batch_size: int = 50
 
 
 # ---------------------------------------------------------------------------
@@ -1508,6 +1510,8 @@ class PreferencesModal(Model):
         "solarized-dark",
         "solarized-light",
     )
+    FOLDER_COUNT_MODES: tuple[str, ...] = ("unread_only", "unread_and_total")
+    FETCH_BATCH_SIZES: tuple[int, ...] = (25, 50, 100, 200)
 
     def __init__(
         self,
@@ -1520,7 +1524,7 @@ class PreferencesModal(Model):
     ) -> None:
         self.store = store
         self.current_theme = current_theme
-        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=threading, 4=raw_headers, 5=sync_startup, 6=remote_imgs
+        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=threading, 4=raw_headers, 5=sync_startup, 6=remote_imgs, 7=count_mode, 8=batch_size
         self.status_msg = ""
         self.error_msg = ""
 
@@ -1547,6 +1551,23 @@ class PreferencesModal(Model):
         self.sync_on_startup = self.store.get_setting("sync_on_startup", "1") == "1"
         self.allow_remote_images = self.store.get_setting("allow_remote_images", "1") == "1"
 
+        cur_count_mode = self.store.get_setting("folder_count_mode", "unread_only")
+        self.count_mode_idx = (
+            self.FOLDER_COUNT_MODES.index(cur_count_mode)
+            if cur_count_mode in self.FOLDER_COUNT_MODES
+            else 0
+        )
+
+        try:
+            cur_batch = int(self.store.get_setting("fetch_batch_size", "50"))
+        except Exception:
+            cur_batch = 50
+        self.batch_idx = (
+            self.FETCH_BATCH_SIZES.index(cur_batch)
+            if cur_batch in self.FETCH_BATCH_SIZES
+            else 1
+        )
+
         self._sync_focus()
 
     def _sync_focus(self) -> None:
@@ -1568,11 +1589,11 @@ class PreferencesModal(Model):
                 return self._save_preferences()
 
             if k in ("tab", "down"):
-                self.focus_idx = (self.focus_idx + 1) % 7
+                self.focus_idx = (self.focus_idx + 1) % 9
                 self._sync_focus()
                 return self, None
             if k in ("shift+tab", "up"):
-                self.focus_idx = (self.focus_idx - 1) % 7
+                self.focus_idx = (self.focus_idx - 1) % 9
                 self._sync_focus()
                 return self, None
 
@@ -1603,6 +1624,16 @@ class PreferencesModal(Model):
                 self.allow_remote_images = not self.allow_remote_images
                 return self, None
 
+            if self.focus_idx == 7 and k in ("left", "right", "h", "l", " ", "space"):
+                delta = 1 if k in ("right", "l", " ", "space") else -1
+                self.count_mode_idx = (self.count_mode_idx + delta) % len(self.FOLDER_COUNT_MODES)
+                return self, None
+
+            if self.focus_idx == 8 and k in ("left", "right", "h", "l", " ", "space"):
+                delta = 1 if k in ("right", "l", " ", "space") else -1
+                self.batch_idx = (self.batch_idx + delta) % len(self.FETCH_BATCH_SIZES)
+                return self, None
+
         if self.focus_idx == 0:
             self.input_download_dir, cmd = self.input_download_dir.update(msg)
             return self, cmd
@@ -1624,6 +1655,8 @@ class PreferencesModal(Model):
 
         backend_val = self.IMAGE_BACKENDS[self.backend_idx]
         theme_val = self.THEMES[self.theme_idx]
+        count_mode_val = self.FOLDER_COUNT_MODES[self.count_mode_idx]
+        batch_val = self.FETCH_BATCH_SIZES[self.batch_idx]
 
         self.store.set_setting("download_dir", str(p))
         self.store.set_setting("image_backend", backend_val)
@@ -1632,6 +1665,8 @@ class PreferencesModal(Model):
         self.store.set_setting("show_raw_headers", "1" if self.show_raw_headers else "0")
         self.store.set_setting("sync_on_startup", "1" if self.sync_on_startup else "0")
         self.store.set_setting("allow_remote_images", "1" if self.allow_remote_images else "0")
+        self.store.set_setting("folder_count_mode", count_mode_val)
+        self.store.set_setting("fetch_batch_size", str(batch_val))
 
         return self, lambda: PreferencesSavedMsg(
             download_dir=str(p),
@@ -1641,6 +1676,8 @@ class PreferencesModal(Model):
             show_raw_headers=self.show_raw_headers,
             sync_on_startup=self.sync_on_startup,
             allow_remote_images=self.allow_remote_images,
+            folder_count_mode=count_mode_val,
+            fetch_batch_size=batch_val,
         )
 
     def view(self, width: int = 80) -> str:
@@ -1682,6 +1719,16 @@ class PreferencesModal(Model):
         ri_val = "[x] Allowed" if self.allow_remote_images else "[ ] Blocked"
         rows.append(
             f"Remote Image Fetch:   {_opt_style(6, ri_val)}"
+        )
+
+        cur_cm = "Unread Only" if self.FOLDER_COUNT_MODES[self.count_mode_idx] == "unread_only" else "Unread & Total"
+        rows.append(
+            f"Folder Email Counts:  ◀ {_opt_style(7, cur_cm)} ▶"
+        )
+
+        cur_bs = f"{self.FETCH_BATCH_SIZES[self.batch_idx]} emails"
+        rows.append(
+            f"Fetch Batch Size:     ◀ {_opt_style(8, cur_bs)} ▶"
         )
 
         if self.error_msg:
