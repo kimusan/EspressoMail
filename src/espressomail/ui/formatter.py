@@ -173,6 +173,7 @@ def extract_html_images(raw_html: str) -> list[tuple[str, str]]:
 def _collect_message_images(
     msg: EmailMessage,
     allow_remote_fetch: bool = True,
+    allow_blocking_fetch: bool = False,
 ) -> list[Attachment]:
     """Gather all renderable images from MIME attachments and HTML `<img>` tags (`cid:`, `data:`, `http(s):`)."""
     collected: list[Attachment] = []
@@ -204,6 +205,7 @@ def _collect_message_images(
                 message_id=msg.id,
                 idx=idx,
                 allow_remote_fetch=allow_remote_fetch,
+                allow_blocking_fetch=allow_blocking_fetch,
             )
             _add_att(resolved)
 
@@ -228,6 +230,7 @@ def _collect_message_images(
                     message_id=msg.id,
                     idx=idx,
                     allow_remote_fetch=allow_remote_fetch,
+                    allow_blocking_fetch=allow_blocking_fetch,
                 )
                 _add_att(resolved)
 
@@ -366,6 +369,7 @@ def format_message_for_reading_pane(
     thread: EmailThread | None = None,
     show_raw_headers: bool = False,
     account: AccountConfig | None = None,
+    allow_blocking_fetch: bool = False,
 ) -> str:
     """Format a complete EmailMessage (or multi-message thread) for the Reading Pane viewport."""
     inner_w = max(30, width - 4)
@@ -375,6 +379,7 @@ def format_message_for_reading_pane(
     all_images = _collect_message_images(
         msg,
         allow_remote_fetch=(image_renderer.backend != ImageRenderBackend.OFF),
+        allow_blocking_fetch=allow_blocking_fetch,
     )
     # Also count HTML <img> tags when backend is OFF so the user still sees that images exist
     html_img_tags = extract_html_images(msg.body_html) if msg.body_html else []
@@ -476,7 +481,15 @@ def format_message_for_reading_pane(
         marker = f"[[IMAGE:{idx}]]"
         target_att = None
         for img in all_images:
-            if img.id == f"html_img_{msg.id}_{idx}" or (img.filename and alt and alt in img.filename):
+            if (
+                img.id in (
+                    f"{msg.id}:web_img:{idx}",
+                    f"{msg.id}:web_img_pending:{idx}",
+                    f"{msg.id}:data_img:{idx}",
+                    f"html_img_{msg.id}_{idx}",
+                )
+                or (img.filename and alt and alt in img.filename)
+            ):
                 target_att = img
                 break
         if target_att is None and idx - 1 < len(all_images):

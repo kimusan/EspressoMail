@@ -674,3 +674,21 @@ class IMAPClient:
 
         store.refresh_folder_counts()
         return count
+
+    def sync_single_folder(
+        self,
+        store: LocalStore,
+        folder_name: str,
+        limit: int = 50,
+    ) -> int:
+        """Fetch and persist recent messages for a single folder into LocalStore."""
+        count = 0
+        try:
+            fetched = self.fetch_recent_messages(folder=folder_name, limit=limit)
+            for msg in fetched:
+                store.save_message(msg)
+                count += 1
+            store.refresh_folder_counts()
+        except Exception:
+            pass
+        return count

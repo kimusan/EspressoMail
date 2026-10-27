@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from espresso import (
     Msg,
     WindowSizeMsg,
     quit_app,
+    tick,
 )
 from espresso.beans import (
     CommandPalette,
@@ -64,8 +66,13 @@ from espressomail.protocols.smtp_client import (
 from espressomail.protocols.threading import build_threads
 from espressomail.storage.database import LocalStore, default_data_dir
 from espressomail.themes.engine import Theme, ThemeEngine
-from espressomail.ui.formatter import format_message_for_reading_pane
-from espressomail.ui.image_renderer import ImageRenderBackend, TerminalImageRenderer
+from espressomail.ui.formatter import extract_html_images, format_message_for_reading_pane
+from espressomail.ui.image_renderer import (
+    ImageRenderBackend,
+    TerminalImageRenderer,
+    _REMOTE_IMAGE_CACHE,
+    _fetch_remote_image_bytes,
+)
 from espressomail.ui.menus import MenuActionMsg, MenuBar
 from espressomail.ui.modals import (
     AccountSettingsModal,
@@ -136,6 +143,33 @@ class SyncCompletedMsg(Msg):
 
 
 @dataclass(frozen=True)
+class MessageImagesLoadedMsg(Msg):
+    """Emitted when background remote image downloading completes for a message."""
+
+    message_id: str
+    loaded_urls: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SyncProgressMsg(Msg):
+    """Emitted during background IMAP synchronization progress."""
+
+    account_id: str
+    account_name: str
+    action: str  # "discovered_folders", "synced_folder", "sync_done"
+    folder_name: str = ""
+    new_messages: int = 0
+    total_synced: int = 0
+    total_folders: int = 0
+    step_index: int = 0
+    total_steps: int = 0
+    remaining_steps: tuple[tuple[str, str, str], ...] = ()
+    errors: tuple[str, ...] = ()
+    is_done: bool = False
+    summary: str = ""
+
+
+@dataclass(frozen=True)
 class MoreMessagesFetchedMsg(Msg):
     """Emitted when fetching older messages from server completes."""
 
@@ -143,6 +177,11 @@ class MoreMessagesFetchedMsg(Msg):
     folder: str
     fetched_count: int
     message: str
+
+
+@dataclass(frozen=True)
+class AutoSyncTickMsg(Msg):
+    """Periodic auto-sync timer tick."""
 
 
 class EspressoMailApp(Model):
@@ -223,6 +262,10 @@ class EspressoMailApp(Model):
 
         # Active modal overlay
         self.active_modal: Model | None = None
+
+        # Background sync state
+        self.is_syncing: bool = False
+        self.sync_progress_text: str = ""
 
         # Command Palette (Ctrl+P)
         self.command_palette = self._build_command_palette()
@@ -840,7 +883,9 @@ class EspressoMailApp(Model):
                     )
                     return self, None
                 if any(acc.imap_password for acc in self.store.list_accounts(enabled_only=True)):
-                    self.status_message = "Synchronizing IMAP accounts..."
+                    self.is_syncing = True
+                    self.sync_progress_text = "Starting sync..."
+                    self.status_message = "⟳ Synchronizing IMAP accounts in background..."
                     return self, self._sync_accounts_cmd
                 return self, None
             self.splash, cmd = self.splash.update(msg)
@@ -857,8 +902,10 @@ class EspressoMailApp(Model):
                     self.store.save_account(msg.account)
                     self.active_account_id = msg.account.id
                     self.active_folder = "INBOX"
+                    self.is_syncing = True
+                    self.sync_progress_text = "Starting sync..."
                     self.status_message = (
-                        f"✔ Verified and configured account {msg.account.email}! Synchronizing..."
+                        f"✔ Verified and configured account {msg.account.email}! ⟳ Synchronizing in background..."
                     )
                     self.refresh_data()
                     return self, self._sync_accounts_cmd
@@ -920,6 +967,9 @@ class EspressoMailApp(Model):
                     )
                     return self, None
                 if msg.trigger_sync:
+                    self.is_syncing = True
+                    self.sync_progress_text = "Starting sync..."
+                    self.status_message = "⟳ Synchronizing IMAP accounts in background..."
                     return self, self._sync_accounts_cmd
                 return self, None
             if isinstance(msg, ComposeSubmittedMsg):
@@ -944,11 +994,71 @@ class EspressoMailApp(Model):
                     return self.update(emitted)
             return self, None
 
-        # 7. Background Sync completion
+        # Message background remote images loaded
+        if isinstance(msg, MessageImagesLoadedMsg):
+            if (
+                self.selected_message
+                and self.selected_message.id == msg.message_id
+                and msg.loaded_urls
+            ):
+                self._update_reader_viewport(force=True)
+            return self, None
+
+        # 7. Background Sync progress & steps
+        if isinstance(msg, SyncProgressMsg):
+            self.is_syncing = not msg.is_done
+            self.refresh_data()
+            if msg.remaining_steps:
+                next_step = msg.remaining_steps[0]
+                remaining = msg.remaining_steps[1:]
+                self.sync_progress_text = f"Syncing {msg.account_name} / {next_step[2] or 'folders'}"
+                step_idx = msg.step_index + 1
+                self.status_message = (
+                    f"⟳ [{step_idx}/{msg.total_steps}] Syncing {msg.account_name} "
+                    f"({next_step[2] or 'folders'})..."
+                )
+                cmd = self._make_sync_step_cmd(
+                    next_step=next_step,
+                    remaining_steps=remaining,
+                    total_synced=msg.total_synced,
+                    total_folders=msg.total_folders,
+                    errors=msg.errors,
+                    step_index=step_idx,
+                    total_steps=msg.total_steps,
+                )
+                return self, cmd
+            else:
+                self.is_syncing = False
+                self.sync_progress_text = ""
+                err_suffix = f" (Warnings: {'; '.join(msg.errors)})" if msg.errors else ""
+                summary = (
+                    msg.summary
+                    or f"✔ Synchronized {msg.total_synced} message(s) across {msg.total_folders} folder(s).{err_suffix}"
+                )
+                self.status_message = summary
+                return self, tick(180.0, AutoSyncTickMsg())
+
+        # 7b. Background Sync completion
         if isinstance(msg, SyncCompletedMsg):
+            self.is_syncing = False
+            self.sync_progress_text = ""
             self.status_message = msg.summary
             self.refresh_data()
-            return self, None
+            return self, tick(180.0, AutoSyncTickMsg())
+
+        # 7c. Auto-sync periodic tick
+        if isinstance(msg, AutoSyncTickMsg):
+            if (
+                not self.is_syncing
+                and not self.show_splash
+                and not self.show_onboarding
+                and any(acc.imap_password for acc in self.store.list_accounts(enabled_only=True))
+            ):
+                self.is_syncing = True
+                self.sync_progress_text = "Background auto-sync..."
+                self.status_message = "⟳ Background auto-sync started..."
+                return self, self._sync_accounts_cmd
+            return self, tick(180.0, AutoSyncTickMsg())
 
         # 7b. More messages fetched
         if isinstance(msg, MoreMessagesFetchedMsg):
@@ -1084,11 +1194,11 @@ class EspressoMailApp(Model):
                 node, parent, row = None, None, None
 
             if k in ("down", "j"):
-                self._step_folder_cursor(1)
-                return self, None
+                cmd = self._step_folder_cursor(1)
+                return self, cmd
             if k in ("up", "k"):
-                self._step_folder_cursor(-1)
-                return self, None
+                cmd = self._step_folder_cursor(-1)
+                return self, cmd
             if k in ("left", "h"):
                 if node is not None and row is not None:
                     if row.is_header:
@@ -1129,8 +1239,8 @@ class EspressoMailApp(Model):
                         action_str = "Expanded" if node.expanded else "Collapsed"
                         self.status_message = f"{action_str} '{row.label}'."
                         return self, None
-                self._activate_selected_folder()
-                return self, None
+                cmd = self._activate_selected_folder()
+                return self, cmd
             if k == "enter":
                 if node is not None and row is not None:
                     if row.is_header:
@@ -1145,27 +1255,32 @@ class EspressoMailApp(Model):
                     if not node.is_leaf and not node.expanded:
                         node.expanded = True
                         self._save_expanded_folders()
-                self._activate_selected_folder()
+                cmd = self._activate_selected_folder()
                 self.focused_pane = "messages"
-                return self, None
+                return self, cmd
             return self, None
 
         if self.focused_pane == "messages":
             if k in ("down", "j") and self.message_rows:
                 if self.message_cursor >= len(self.message_rows) - 1:
                     self.status_message = "Reached end of messages. Press 'M' to fetch older messages from server."
+                    return self, None
                 else:
                     self.message_cursor += 1
-                    self._on_message_selection_changed()
+                    cmd = self._on_message_selection_changed()
+                    return self, cmd
             elif k in ("up", "k") and self.message_rows:
                 self.message_cursor = max(0, self.message_cursor - 1)
-                self._on_message_selection_changed()
+                cmd = self._on_message_selection_changed()
+                return self, cmd
             elif k in ("home", "g") and self.message_rows:
                 self.message_cursor = 0
-                self._on_message_selection_changed()
+                cmd = self._on_message_selection_changed()
+                return self, cmd
             elif k in ("end", "G") and self.message_rows:
                 self.message_cursor = len(self.message_rows) - 1
-                self._on_message_selection_changed()
+                cmd = self._on_message_selection_changed()
+                return self, cmd
             elif k in ("enter", " ", "space", "l", "right"):
                 m = self.selected_message
                 if m and m.is_draft:
@@ -1174,6 +1289,7 @@ class EspressoMailApp(Model):
                     self.store.mark_read(m.id, True)
                     self.refresh_data()
                 self.focused_pane = "reader"
+                return self, None
             return self, None
 
         if self.focused_pane == "reader":
@@ -1284,10 +1400,12 @@ class EspressoMailApp(Model):
         if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
             delta = -1 if msg.button == MouseButton.WHEEL_UP else 1
             if target_pane == "folders":
-                self._step_folder_cursor(delta)
+                cmd = self._step_folder_cursor(delta)
+                return self, cmd
             elif target_pane == "messages" and self.message_rows:
                 self.message_cursor = max(0, min(len(self.message_rows) - 1, self.message_cursor + delta))
-                self._on_message_selection_changed()
+                cmd = self._on_message_selection_changed()
+                return self, cmd
             else:
                 self.reader_viewport, _ = self.reader_viewport.update(msg)
             return self, None
@@ -1309,21 +1427,23 @@ class EspressoMailApp(Model):
                         ):
                             self._toggle_folder_expand(clicked_row)
                         else:
-                            self._activate_selected_folder()
+                            cmd = self._activate_selected_folder()
+                            return self, cmd
             elif target_pane == "messages":
                 if body_y >= 0:
                     clicked_idx = self.message_scroll + (body_y // 2)
                     if 0 <= clicked_idx < len(self.message_rows):
                         self.message_cursor = clicked_idx
-                        self._on_message_selection_changed()
+                        cmd = self._on_message_selection_changed()
+                        return self, cmd
             return self, None
 
         return self, None
 
-    def _step_folder_cursor(self, direction: int) -> None:
+    def _step_folder_cursor(self, direction: int) -> Cmd | None:
         visible = self.folder_tree._flatten_visible()
         if not visible:
-            return
+            return None
         self.folder_cursor = (self.folder_cursor + direction) % len(visible)
         node = visible[self.folder_cursor][0]
         row: FolderTreeRow | None = node.value
@@ -1331,14 +1451,16 @@ class EspressoMailApp(Model):
             if row.is_header:
                 state_str = "unfolded" if node.expanded else "folded"
                 self.status_message = f"Account '{row.label}' ({state_str} — Space/Enter to toggle)"
+                return None
             elif row.selectable_mailbox:
-                self._activate_selected_folder()
+                return self._activate_selected_folder()
             else:
                 self.status_message = (
                     f"Folder group '{row.label}' ({row.total_count} messages — Space/Enter to toggle)"
                 )
+        return None
 
-    def _activate_selected_folder(self) -> None:
+    def _activate_selected_folder(self) -> Cmd | None:
         if 0 <= self.folder_cursor < len(self.folder_rows):
             row = self.folder_rows[self.folder_cursor]
             if not row.is_header and row.selectable_mailbox:
@@ -1347,21 +1469,57 @@ class EspressoMailApp(Model):
                 self.message_cursor = 0
                 self.message_scroll = 0
                 self._rebuild_message_rows()
-                self._update_reader_viewport(force=True)
+                cmd = self._on_message_selection_changed()
                 path_label = (
                     row.label
                     if row.account_id == "*"
                     else " / ".join(split_folder_hierarchy(row.folder_name))
                 )
                 self.status_message = f"Opened {path_label} ({len(self.message_rows)} items)"
+                return cmd
+        return None
 
-    def _on_message_selection_changed(self) -> None:
+    def _get_pending_image_urls(self, msg: EmailMessage | None) -> list[str]:
+        """Extract remote image URLs from message HTML body that are not yet cached in memory."""
+        if not msg or not msg.body_html or self.image_renderer.backend == ImageRenderBackend.OFF:
+            return []
+        images = extract_html_images(msg.body_html)
+        urls: list[str] = []
+        for src, _ in images:
+            clean = re.sub(r"[\r\n\t]+", "", (src or "").strip())
+            if clean.startswith("//"):
+                clean = "https:" + clean
+            if clean.lower().startswith(("http://", "https://")):
+                if clean not in _REMOTE_IMAGE_CACHE:
+                    urls.append(clean)
+        return urls
+
+    def _load_message_images_cmd(self, message_id: str, urls: list[str]) -> Cmd:
+        """Create a background TEA command to download remote image bytes into _REMOTE_IMAGE_CACHE."""
+        def _worker() -> Msg:
+            loaded: list[str] = []
+            for u in urls:
+                if u not in _REMOTE_IMAGE_CACHE:
+                    data = _fetch_remote_image_bytes(u)
+                    _REMOTE_IMAGE_CACHE[u] = data
+                    if data:
+                        loaded.append(u)
+            return MessageImagesLoadedMsg(message_id=message_id, loaded_urls=tuple(loaded))
+
+        return _worker
+
+    def _on_message_selection_changed(self) -> Cmd | None:
         m = self.selected_message
         if m and not m.is_read:
             self.store.mark_read(m.id, True)
             m.is_read = True
             self._rebuild_folder_rows()
         self._update_reader_viewport(force=True)
+        if m:
+            pending = self._get_pending_image_urls(m)
+            if pending:
+                return self._load_message_images_cmd(m.id, pending)
+        return None
 
     # ------------------------------------------------------------------
     # Application Actions
@@ -1605,7 +1763,12 @@ class EspressoMailApp(Model):
             return self, self._fetch_more_messages_cmd
 
         if action_id == "sync_all":
-            self.status_message = "Synchronizing IMAP accounts..."
+            if self.is_syncing:
+                self.status_message = "⟳ Synchronization already in progress in background."
+                return self, None
+            self.is_syncing = True
+            self.sync_progress_text = "Starting sync..."
+            self.status_message = "⟳ Synchronizing IMAP accounts in background..."
             return self, self._sync_accounts_cmd
 
         return self, None
@@ -1743,10 +1906,10 @@ class EspressoMailApp(Model):
             if row.message.id == target.id:
                 self.message_cursor = idx
                 break
-        self._on_message_selection_changed()
+        cmd = self._on_message_selection_changed()
         self.focused_pane = "reader"
         self.status_message = f"Jumped to '{target.subject[:40]}'"
-        return self, None
+        return self, cmd
 
     def _fetch_more_messages_cmd(self) -> Msg:
         accounts = self.store.list_accounts(enabled_only=True)
@@ -1804,48 +1967,146 @@ class EspressoMailApp(Model):
             message=f"No older messages found on server for {target_folder}.{err_suffix}",
         )
 
-    def _sync_accounts_cmd(self) -> Msg:
-        accounts = self.store.list_accounts(enabled_only=True)
-        total_synced = 0
-        total_folders = 0
-        online_accounts = 0
-        errors: list[str] = []
-        for acc in accounts:
-            if not acc.imap_password:
-                continue
-            try:
-                client = IMAPClient(acc, timeout=20.0)
-                client.connect()
+    def _make_sync_step_cmd(
+        self,
+        next_step: tuple[str, str, str],
+        remaining_steps: tuple[tuple[str, str, str], ...],
+        total_synced: int,
+        total_folders: int,
+        errors: tuple[str, ...],
+        step_index: int,
+        total_steps: int,
+    ) -> Cmd:
+        def _sync_step_runner() -> Msg:
+            acc_id, action, folder_name = next_step
+            acc = self.store.get_account(acc_id)
+            if not acc or not acc.imap_password:
+                return SyncProgressMsg(
+                    account_id=acc_id,
+                    account_name=acc.name if acc else acc_id,
+                    action=action,
+                    folder_name=folder_name,
+                    new_messages=0,
+                    total_synced=total_synced,
+                    total_folders=total_folders,
+                    step_index=step_index,
+                    total_steps=total_steps,
+                    remaining_steps=remaining_steps,
+                    errors=errors,
+                )
+
+            new_errors = list(errors)
+            step_synced = 0
+            discovered_count = 0
+            new_remaining = list(remaining_steps)
+            new_total_steps = total_steps
+
+            if action == "discover":
                 try:
-                    # Discover and persist remote folders immediately before downloading messages
-                    remote_folders = client.list_remote_folders()
-                    if remote_folders:
-                        self.store.sync_remote_folders(acc.id, remote_folders)
-                    total_synced += client.sync_to_store(self.store, remote_folders=remote_folders)
-                finally:
-                    client.disconnect()
-                total_folders += len(self.store.list_folders(acc.id))
-                online_accounts += 1
-            except Exception as exc:
-                errors.append(f"{acc.email}: {exc}")
-        if online_accounts > 0:
-            err_suffix = f" (Warnings: {'; '.join(errors)})" if errors else ""
-            return SyncCompletedMsg(
-                synced_count=total_synced,
-                summary=(
-                    f"✔ Synchronized {total_synced} message(s) across {total_folders} folder(s) "
-                    f"({online_accounts} IMAP account(s)).{err_suffix}"
-                ),
+                    client = IMAPClient(acc, timeout=20.0)
+                    client.connect()
+                    try:
+                        remote_folders = client.list_remote_folders()
+                        if remote_folders:
+                            self.store.sync_remote_folders(acc.id, remote_folders)
+                            discovered_count = len(remote_folders)
+                        cand_folders = (
+                            remote_folders if remote_folders else self.store.list_folders(acc.id)
+                        )
+                        selectable = [f for f in cand_folders if f.selectable]
+                        sorted_folders = sorted(
+                            selectable,
+                            key=lambda f: (
+                                0 if f.name.upper() == "INBOX" else 1,
+                                len(f.path_parts),
+                                f.name.lower(),
+                            ),
+                        )
+                        folder_steps = [(acc.id, "sync_folder", f.name) for f in sorted_folders]
+                        new_remaining = folder_steps + new_remaining
+                        new_total_steps = total_steps + len(folder_steps)
+                    finally:
+                        client.disconnect()
+                except Exception as exc:
+                    new_errors.append(f"{acc.email}: {exc}")
+
+                return SyncProgressMsg(
+                    account_id=acc.id,
+                    account_name=acc.name,
+                    action="discovered_folders",
+                    folder_name="",
+                    new_messages=0,
+                    total_synced=total_synced,
+                    total_folders=total_folders + discovered_count,
+                    step_index=step_index,
+                    total_steps=new_total_steps,
+                    remaining_steps=tuple(new_remaining),
+                    errors=tuple(new_errors),
+                )
+
+            elif action == "sync_folder":
+                try:
+                    client = IMAPClient(acc, timeout=20.0)
+                    client.connect()
+                    try:
+                        step_synced = client.sync_single_folder(
+                            self.store,
+                            folder_name=folder_name,
+                            limit=self.fetch_batch_size,
+                        )
+                    finally:
+                        client.disconnect()
+                except Exception as exc:
+                    new_errors.append(f"{acc.email} [{folder_name}]: {exc}")
+
+                return SyncProgressMsg(
+                    account_id=acc.id,
+                    account_name=acc.name,
+                    action="synced_folder",
+                    folder_name=folder_name,
+                    new_messages=step_synced,
+                    total_synced=total_synced + step_synced,
+                    total_folders=total_folders,
+                    step_index=step_index,
+                    total_steps=total_steps,
+                    remaining_steps=tuple(new_remaining),
+                    errors=tuple(new_errors),
+                )
+
+            return SyncProgressMsg(
+                account_id=acc.id,
+                account_name=acc.name,
+                action="done",
+                remaining_steps=(),
+                total_synced=total_synced,
+                total_folders=total_folders,
+                errors=tuple(new_errors),
+                is_done=True,
             )
-        if errors:
+
+        return _sync_step_runner
+
+    def _sync_accounts_cmd(self) -> Msg:
+        accounts = [acc for acc in self.store.list_accounts(enabled_only=True) if acc.imap_password]
+        if not accounts:
             return SyncCompletedMsg(
                 synced_count=0,
-                summary=f"⚠ IMAP sync failed: {'; '.join(errors)}",
+                summary=f"✔ Local SQLite store up to date ({len(self.store.list_accounts())} accounts cached for offline access).",
             )
-        return SyncCompletedMsg(
-            synced_count=0,
-            summary=f"✔ Local SQLite store up to date ({len(accounts)} accounts cached for offline access).",
+
+        steps = tuple((acc.id, "discover", "") for acc in accounts)
+        first_step = steps[0]
+        remaining = steps[1:]
+        step_cmd = self._make_sync_step_cmd(
+            next_step=first_step,
+            remaining_steps=remaining,
+            total_synced=0,
+            total_folders=0,
+            errors=(),
+            step_index=1,
+            total_steps=len(steps),
         )
+        return step_cmd()
 
     # ------------------------------------------------------------------
     # Pure View Rendering
@@ -2177,22 +2438,36 @@ class EspressoMailApp(Model):
 
     def _render_status_bar(self) -> str:
         pane_badge = self.focused_pane.upper()
-        bar = StatusBar(
-            left=[
+        left_sections = [
+            StatusSection(
+                f" {pane_badge} ",
+                style=Style()
+                .bold(True)
+                .foreground(self.theme.bg_primary)
+                .background(self.theme.accent_primary),
+                priority=3,
+            ),
+        ]
+        if self.is_syncing:
+            left_sections.append(
                 StatusSection(
-                    f" {pane_badge} ",
+                    " ⟳ SYNCING ",
                     style=Style()
                     .bold(True)
                     .foreground(self.theme.bg_primary)
-                    .background(self.theme.accent_primary),
-                    priority=3,
-                ),
-                StatusSection(
-                    f" {self.status_message} ",
-                    style=Style().foreground(self.theme.fg_primary),
-                    priority=2,
-                ),
-            ],
+                    .background(self.theme.accent_secondary),
+                    priority=4,
+                )
+            )
+        left_sections.append(
+            StatusSection(
+                f" {self.status_message} ",
+                style=Style().foreground(self.theme.fg_primary),
+                priority=2,
+            )
+        )
+        bar = StatusBar(
+            left=left_sections,
             center=[
                 StatusSection(
                     "[c]Compose [/]Search [r]Reply [t]Threads [T]Theme [i]Img [?]Help",

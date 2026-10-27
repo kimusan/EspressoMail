@@ -29,6 +29,15 @@ from espressomail.themes.engine import Theme
 # In-memory cache of fetched remote HTTP(S) image payloads (url -> bytes | None)
 _REMOTE_IMAGE_CACHE: dict[str, bytes | None] = {}
 
+# In-memory cache of rasterized ANSI image boxes (cache_key -> str)
+_RENDERED_BOX_CACHE: dict[tuple[str, int, int, int, str, str], str] = {}
+
+
+def clear_image_caches() -> None:
+    """Clear in-memory image download cache and rasterized ANSI box cache."""
+    _REMOTE_IMAGE_CACHE.clear()
+    _RENDERED_BOX_CACHE.clear()
+
 
 def _import_pil_image():
     """Import PIL.Image, falling back to system dist-packages if running in an isolated venv."""
@@ -106,6 +115,7 @@ def resolve_html_image_src(
     message_id: str = "",
     idx: int = 1,
     allow_remote_fetch: bool = True,
+    allow_blocking_fetch: bool = False,
 ) -> Attachment | None:
     """Resolve an HTML `<img src="...">` attribute (`cid:`, `data:`, or `http(s)://`) to an Attachment."""
     raw_src = re.sub(r"[\r\n\t]+", "", (src or "").strip())
@@ -170,28 +180,53 @@ def resolve_html_image_src(
         raw_bytes: bytes | None = None
         if raw_src in _REMOTE_IMAGE_CACHE:
             raw_bytes = _REMOTE_IMAGE_CACHE[raw_src]
-        elif allow_remote_fetch:
+            if not raw_bytes:
+                return None
+            sniffed_mime = detect_image_mime_type(raw_bytes) or "image/png"
+            if "." not in fname:
+                fname = f"{fname}.{sniffed_mime.split('/')[-1]}"
+            return Attachment(
+                id=f"{message_id}:web_img:{idx}",
+                message_id=message_id,
+                filename=fname,
+                content_type=sniffed_mime,
+                size_bytes=len(raw_bytes),
+                is_inline=True,
+                data=raw_bytes,
+            )
+
+        if allow_remote_fetch and allow_blocking_fetch:
             raw_bytes = _fetch_remote_image_bytes(raw_src)
             _REMOTE_IMAGE_CACHE[raw_src] = raw_bytes
+            if not raw_bytes:
+                return None
+            sniffed_mime = detect_image_mime_type(raw_bytes) or "image/png"
+            if "." not in fname:
+                fname = f"{fname}.{sniffed_mime.split('/')[-1]}"
+            return Attachment(
+                id=f"{message_id}:web_img:{idx}",
+                message_id=message_id,
+                filename=fname,
+                content_type=sniffed_mime,
+                size_bytes=len(raw_bytes),
+                is_inline=True,
+                data=raw_bytes,
+            )
 
-        if not raw_bytes:
-            return None
+        # Return a non-blocking pending placeholder Attachment (loads asynchronously via TEA Cmd)
+        if allow_remote_fetch:
+            return Attachment(
+                id=f"{message_id}:web_img_pending:{idx}",
+                message_id=message_id,
+                filename=fname,
+                content_type="image/pending",
+                size_bytes=0,
+                is_inline=True,
+                data=None,
+                content_id=raw_src,
+            )
 
-        sniffed_mime = detect_image_mime_type(raw_bytes) or "image/png"
-        if "." not in fname:
-            fname = f"{fname}.{sniffed_mime.split('/')[-1]}"
-
-        return Attachment(
-            id=f"{message_id}:web_img:{idx}",
-            message_id=message_id,
-            filename=fname,
-            content_type=sniffed_mime,
-            size_bytes=len(raw_bytes),
-            is_inline=True,
-            data=raw_bytes,
-        )
-
-    return None
+        return None
 
 
 def _fetch_remote_image_bytes(url: str, timeout: float = 2.5, max_bytes: int = 4 * 1024 * 1024) -> bytes | None:
@@ -281,12 +316,43 @@ class TerminalImageRenderer:
                 )
             )
 
+        if attachment.content_type == "image/pending" or (attachment.data is None and not attachment.local_path):
+            title = f" 🖼️ {attachment.filename} "
+            return (
+                Style()
+                .border(ROUNDED_BORDER)
+                .border_foreground(theme.border_unfocused)
+                .border_title(
+                    Style().foreground(theme.fg_muted).render(title),
+                    align=Align.LEFT,
+                )
+                .padding(0, 1)
+                .render(
+                    Style()
+                    .italic(True)
+                    .foreground(theme.fg_muted)
+                    .render("  ⏳ Loading remote image in background...")
+                )
+            )
+
         data = attachment.data
         if data is None and attachment.local_path and Path(attachment.local_path).exists():
             try:
                 data = Path(attachment.local_path).read_bytes()
             except Exception:
                 data = None
+
+        cache_id = attachment.id or (hashlib.sha256(data).hexdigest() if data else "")
+        cache_key = (
+            cache_id,
+            len(data) if data else 0,
+            max_width,
+            max_height,
+            self.backend.value,
+            theme.id,
+        )
+        if cache_id and cache_key in _RENDERED_BOX_CACHE:
+            return _RENDERED_BOX_CACHE[cache_key]
 
         matrix, orig_dims = self._decode_to_rgb_matrix(data or b"", attachment.filename)
         if skip_tiny_trackers and orig_dims is not None:
@@ -345,7 +411,7 @@ class TerminalImageRenderer:
 
         dim_str = f" {orig_dims[0]}×{orig_dims[1]}px," if orig_dims else ""
         title = f" 🖼️ {attachment.filename} ({dim_str.strip()} {attachment.human_size}) [{used_engine}] "
-        return (
+        res_box = (
             Style()
             .border(ROUNDED_BORDER)
             .border_foreground(theme.attachment_fg)
@@ -356,6 +422,9 @@ class TerminalImageRenderer:
             .padding(0, 1)
             .render(rendered_art)
         )
+        if cache_id:
+            _RENDERED_BOX_CACHE[cache_key] = res_box
+        return res_box
 
     def _run_chafa(self, data: bytes, filename: str, width: int, height: int) -> str:
         """Invoke the `chafa` CLI tool to rasterize an image to ANSI symbols."""

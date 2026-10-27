@@ -1035,6 +1035,176 @@ class TestUIAndApp(unittest.TestCase):
         self.assertEqual(len(left_lines), len(center_lines))
         self.assertEqual(len(center_lines), len(right_lines))
 
+    def test_async_remote_image_loading_and_non_blocking_scrolling(self) -> None:
+        """Verify remote image loading does not block UI, renders placeholder, and loads asynchronously via TEA Cmd."""
+        from espressomail.ui import clear_image_caches, MessageImagesLoadedMsg
+
+        clear_image_caches()
+        acc = AccountConfig(id="acc_img", name="ImageTest", email="img@example.com", full_name="Img Tester", imap_host="imap.example.com")
+        self.store.save_account(acc)
+
+        # Message with a remote HTML image
+        img_msg = EmailMessage(
+            id="acc_img:INBOX:101",
+            account_id="acc_img",
+            folder="INBOX",
+            subject="Email with remote image",
+            sender_name="Sender",
+            sender_email="sender@example.com",
+            body_text="Here is a remote graphic.",
+            body_html='<p>Look at this image: <img src="https://example.com/photo.png" alt="RemoteDiagram" width="200" height="100"></p>',
+        )
+        self.store.save_message(img_msg)
+
+        # Message with plain text (no remote images)
+        text_msg = EmailMessage(
+            id="acc_img:INBOX:102",
+            account_id="acc_img",
+            folder="INBOX",
+            subject="Plain text email",
+            sender_name="Sender 2",
+            sender_email="sender2@example.com",
+            body_text="Plain message.",
+        )
+        self.store.save_message(text_msg)
+
+        app = EspressoMailApp(self.store, show_splash=False)
+        app.update(WindowSizeMsg(width=110, height=30))
+        app.active_account_id = "acc_img"
+        app.active_folder = "INBOX"
+        app.refresh_data()
+
+        # Step cursor to the message with the remote image (index 0)
+        app.message_cursor = 0  # img_msg (101)
+        cmd = app._on_message_selection_changed()
+
+        # Reading pane must immediately have rendered the non-blocking pending placeholder
+        rendered_initial = "\n".join(app.reader_viewport.lines)
+        self.assertIn("Loading remote image in background", rendered_initial)
+        self.assertIn("photo.png", rendered_initial)
+
+        # A TEA background command is returned to download the remote image
+        self.assertIsNotNone(cmd)
+        self.assertTrue(callable(cmd))
+
+        # Test scrolling down and up before network completes is 100% responsive and non-blocking
+        app, cmd_down = app.update(KeyMsg("j"))
+        self.assertEqual(app.selected_message.id, text_msg.id)
+        self.assertNotIn("Loading remote image in background", "\n".join(app.reader_viewport.lines))
+
+        app, cmd_up = app.update(KeyMsg("k"))
+        self.assertEqual(app.selected_message.id, img_msg.id)
+        self.assertIn("Loading remote image in background", "\n".join(app.reader_viewport.lines))
+
+        # Now simulate background execution of the image download TEA command
+        ppm_10x10 = b"P6\n10 10\n255\n" + (b"\xff\x00\x00" * 100)
+        with mock.patch("espressomail.ui.app._fetch_remote_image_bytes", return_value=ppm_10x10):
+            loaded_msg = cmd()
+
+        self.assertIsInstance(loaded_msg, MessageImagesLoadedMsg)
+        self.assertEqual(loaded_msg.message_id, img_msg.id)
+        self.assertIn("https://example.com/photo.png", loaded_msg.loaded_urls)
+
+        # Dispatch the loaded message back to TEA update loop
+        app, post_cmd = app.update(loaded_msg)
+        self.assertIsNone(post_cmd)
+
+        # Reading pane now renders the actual image graphic and no longer shows the loading placeholder
+        rendered_loaded = "\n".join(app.reader_viewport.lines)
+        self.assertNotIn("Loading remote image in background", rendered_loaded)
+        self.assertIn("photo.png", rendered_loaded)
+
+    def test_non_blocking_tea_background_sync(self) -> None:
+        """Verify step-by-step TEA email sync, status bar SYNCING badge, and auto-sync tick."""
+        from espressomail.ui import AutoSyncTickMsg, SyncProgressMsg
+
+        acc = AccountConfig(
+            id="acc_sync_test",
+            name="Work Mail",
+            email="work@example.com",
+            full_name="Work User",
+            imap_host="imap.work.com",
+            imap_password="secret_password",
+        )
+        self.store.save_account(acc)
+
+        app = EspressoMailApp(self.store, show_splash=False)
+        app.update(WindowSizeMsg(width=110, height=30))
+
+        # Initial state: not syncing
+        self.assertFalse(app.is_syncing)
+        self.assertNotIn("SYNCING", app._render_status_bar())
+
+        # User presses 'S' (sync_all action)
+        app, sync_cmd = app.update(KeyMsg("S"))
+        self.assertTrue(app.is_syncing)
+        self.assertIn("SYNCING", app._render_status_bar())
+        self.assertIn("Synchronizing", app.status_message)
+        self.assertEqual(sync_cmd, app._sync_accounts_cmd)
+
+        # Duplicate sync request while syncing is prevented
+        app, dup_cmd = app.update(KeyMsg("S"))
+        self.assertIsNone(dup_cmd)
+        self.assertIn("already in progress", app.status_message)
+
+        # Mock IMAP client responses for step-by-step discovery & folder sync
+        discovered_remote = [
+            Folder(id="acc_sync_test:INBOX", account_id=acc.id, name="INBOX", display_name="INBOX", selectable=True),
+            Folder(id="acc_sync_test:Archive", account_id=acc.id, name="Archive", display_name="Archive", selectable=True),
+        ]
+
+        with mock.patch("espressomail.ui.app.IMAPClient") as mock_client_cls:
+            mock_inst = mock.MagicMock()
+            mock_client_cls.return_value = mock_inst
+            mock_inst.list_remote_folders.return_value = discovered_remote
+            mock_inst.sync_single_folder.return_value = 3
+
+            # Step 1: Initial command runs discover on background thread
+            step1_msg = sync_cmd()
+            self.assertIsInstance(step1_msg, SyncProgressMsg)
+            self.assertEqual(step1_msg.action, "discovered_folders")
+            self.assertEqual(len(step1_msg.remaining_steps), 2)  # INBOX and Archive
+
+            # Dispatch Step 1 to update loop: newly discovered folders immediately appear in UI!
+            app, step2_cmd = app.update(step1_msg)
+            self.assertTrue(app.is_syncing)
+            self.assertIsNotNone(step2_cmd)
+            # Store now has the discovered folders
+            folder_names = [f.name for f in self.store.list_folders(acc.id)]
+            self.assertIn("INBOX", folder_names)
+            self.assertIn("Archive", folder_names)
+            self.assertIn("Syncing", app.status_message)
+
+            # Step 2: Sync INBOX
+            step2_msg = step2_cmd()
+            self.assertIsInstance(step2_msg, SyncProgressMsg)
+            self.assertEqual(step2_msg.action, "synced_folder")
+            self.assertEqual(step2_msg.folder_name, "INBOX")
+
+            app, step3_cmd = app.update(step2_msg)
+            self.assertTrue(app.is_syncing)
+            self.assertIsNotNone(step3_cmd)
+
+            # Step 3: Sync Archive
+            step3_msg = step3_cmd()
+            self.assertIsInstance(step3_msg, SyncProgressMsg)
+            self.assertEqual(step3_msg.action, "synced_folder")
+            self.assertEqual(step3_msg.folder_name, "Archive")
+
+            # Final step completed
+            app, final_cmd = app.update(step3_msg)
+            self.assertFalse(app.is_syncing)
+            self.assertNotIn("SYNCING", app._render_status_bar())
+            self.assertIn("Synchronized 6 message(s)", app.status_message)
+            self.assertIsNotNone(final_cmd)  # tick for auto-sync
+
+        # Periodic auto-sync tick
+        with mock.patch.object(app, "_sync_accounts_cmd", return_value=SyncProgressMsg(account_id="", account_name="", action="done")):
+            app, auto_cmd = app.update(AutoSyncTickMsg())
+            self.assertTrue(app.is_syncing)
+            self.assertEqual(auto_cmd, app._sync_accounts_cmd)
+            self.assertIn("auto-sync", app.status_message)
+
 
 if __name__ == "__main__":
     unittest.main()
