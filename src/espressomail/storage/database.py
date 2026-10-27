@@ -34,8 +34,15 @@ def default_data_dir() -> Path:
             path = Path(xdg_data).expanduser().resolve() / "espressomail"
         else:
             path = Path.home() / ".local" / "share" / "espressomail"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    except OSError:
+        import tempfile
+
+        fallback = Path(tempfile.gettempdir()) / "espressomail"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 
 
 def create_sample_ppm_image(width: int = 32, height: int = 20) -> bytes:
