@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
-from espresso import Cmd, KeyMsg, Model, Msg
+from espresso import Cmd, KeyMsg, Model, MouseAction, MouseButton, MouseMsg, Msg
 from espresso.beans import (
     EchoMode,
     FilePicker,
@@ -37,6 +37,7 @@ from espressomail.models.entities import (
     SieveFilterRule,
 )
 from espressomail.protocols.sieve import (
+    ManageSieveClient,
     apply_sieve_rules_locally,
     compile_sieve_script,
     validate_sieve_script,
@@ -484,22 +485,39 @@ class SearchModal(Model):
 
 
 class AddressBookModal(Model):
-    """Local address book manager for viewing, adding, deleting, and emailing contacts."""
+    """Local address book manager with vertical viewport scrolling, mouse navigation, and contact management."""
 
     def __init__(self, store: LocalStore, theme: Theme) -> None:
         self.store = store
         self.theme = theme
         self.contacts: list[Contact] = self.store.list_contacts()
         self.cursor = 0
+        self.scroll = 0
+        self.page_size = 10
         self.adding_mode = False
         self.input_name = TextInput(placeholder="Ada Lovelace", prompt="Name:  ")
         self.input_email = TextInput(placeholder="ada@analytical.org", prompt="Email: ")
         self.input_org = TextInput(placeholder="Organization", prompt="Org:   ")
         self.add_focus = 0
+        self._adjust_scroll()
+
+    def _adjust_scroll(self) -> None:
+        if not self.contacts:
+            self.cursor = 0
+            self.scroll = 0
+            return
+        self.cursor = max(0, min(self.cursor, len(self.contacts) - 1))
+        if self.cursor < self.scroll:
+            self.scroll = self.cursor
+        elif self.cursor >= self.scroll + self.page_size:
+            self.scroll = self.cursor - self.page_size + 1
+        max_scroll = max(0, len(self.contacts) - self.page_size)
+        self.scroll = max(0, min(self.scroll, max_scroll))
 
     def _refresh(self) -> None:
         self.contacts = self.store.list_contacts()
         self.cursor = min(self.cursor, max(0, len(self.contacts) - 1))
+        self._adjust_scroll()
 
     def init(self) -> Cmd | None:
         return None
@@ -541,9 +559,27 @@ class AddressBookModal(Model):
                 return self, lambda: ModalClosedMsg()
             if k in ("down", "j") and self.contacts:
                 self.cursor = (self.cursor + 1) % len(self.contacts)
+                self._adjust_scroll()
                 return self, None
             if k in ("up", "k") and self.contacts:
                 self.cursor = (self.cursor - 1) % len(self.contacts)
+                self._adjust_scroll()
+                return self, None
+            if k in ("page_down", "pgdown") and self.contacts:
+                self.cursor = min(len(self.contacts) - 1, self.cursor + self.page_size)
+                self._adjust_scroll()
+                return self, None
+            if k in ("page_up", "pgup") and self.contacts:
+                self.cursor = max(0, self.cursor - self.page_size)
+                self._adjust_scroll()
+                return self, None
+            if k == "home" and self.contacts:
+                self.cursor = 0
+                self._adjust_scroll()
+                return self, None
+            if k == "end" and self.contacts:
+                self.cursor = max(0, len(self.contacts) - 1)
+                self._adjust_scroll()
                 return self, None
             if k == "a":
                 self.adding_mode = True
@@ -564,9 +600,20 @@ class AddressBookModal(Model):
                 target = self.contacts[self.cursor]
                 return self, lambda: ComposeToContactMsg(target.formatted)
 
+        if isinstance(msg, MouseMsg) and self.contacts:
+            if msg.button == MouseButton.WHEEL_UP:
+                self.cursor = max(0, self.cursor - 1)
+                self._adjust_scroll()
+                return self, None
+            if msg.button == MouseButton.WHEEL_DOWN:
+                self.cursor = min(len(self.contacts) - 1, self.cursor + 1)
+                self._adjust_scroll()
+                return self, None
+
         return self, None
 
     def view(self, width: int = 80) -> str:
+        self._adjust_scroll()
         modal_w = min(78, max(54, width - 8))
         inner_w = modal_w - 6
 
@@ -584,12 +631,14 @@ class AddressBookModal(Model):
             return self.theme.modal_style(modal_w, "📇 Local Address Book").render(form_view)
 
         rows: list[str] = []
-        for idx, c in enumerate(self.contacts[:12]):
+        visible = self.contacts[self.scroll : self.scroll + self.page_size]
+        for rel_idx, c in enumerate(visible):
+            abs_idx = self.scroll + rel_idx
             fav = "★ " if c.favorite else "  "
             pgp_badge = "🔑PGP" if c.pgp_fingerprint else "     "
             line = f" {fav}{c.name[:20]:<20} │ {c.email[:26]:<26} │ {c.organization[:14]:<14} {pgp_badge}"
             truncated = truncate_ansi(line, inner_w)
-            if idx == self.cursor:
+            if abs_idx == self.cursor:
                 rows.append(
                     Style()
                     .bold(True)
@@ -604,13 +653,24 @@ class AddressBookModal(Model):
         if not rows:
             rows.append(Style().italic(True).foreground(self.theme.fg_muted).render("  Address book is empty."))
 
-        footer = (
-            Style()
-            .foreground(self.theme.fg_muted)
-            .render("[Enter/c] Compose to Contact   [a] Add Contact   [d] Delete   [Esc] Close")
+        scroll_indicator = ""
+        if len(self.contacts) > self.page_size:
+            scroll_indicator = (
+                f"Showing {self.scroll + 1}–{min(len(self.contacts), self.scroll + self.page_size)} of {len(self.contacts)} contacts"
+            )
+
+        footer_text = (
+            "[↑/↓/PgUp/PgDn] Scroll   [Enter/c] Compose   [a] Add   [d] Delete   [Esc] Close"
         )
-        content = join_vertical(Align.LEFT, "\n".join(rows), "", footer)
-        return self.theme.modal_style(modal_w, "📇 Local Address Book").render(content)
+        footer_elements = [
+            Style().foreground(self.theme.fg_muted).render(footer_text)
+        ]
+        if scroll_indicator:
+            footer_elements.insert(0, Style().foreground(self.theme.accent_secondary).render(scroll_indicator))
+
+        title = f"📇 Local Address Book ({len(self.contacts)} contacts)" if self.contacts else "📇 Local Address Book"
+        content = join_vertical(Align.LEFT, "\n".join(rows), "", *footer_elements)
+        return self.theme.modal_style(modal_w, title).render(content)
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +687,8 @@ class SieveModal(Model):
         self.active_account_id = active_account_id if active_account_id != "*" else "acc_work"
         self.rules: list[SieveFilterRule] = self.store.list_sieve_rules()
         self.cursor = 0
+        self.scroll = 0
+        self.page_size = 6
         self.adding_rule = False
         self.status_banner = "RFC 5228 Sieve Script valid and ready."
         self.input_name = TextInput(placeholder="Filter Name", prompt="Rule Name:   ")
@@ -634,10 +696,25 @@ class SieveModal(Model):
         self.input_pattern = TextInput(placeholder="Match substring", prompt="Pattern:     ")
         self.input_folder = TextInput(placeholder="Archive / Trash / INBOX", prompt="Target Folder:")
         self.add_focus = 0
+        self._adjust_scroll()
+
+    def _adjust_scroll(self) -> None:
+        if not self.rules:
+            self.cursor = 0
+            self.scroll = 0
+            return
+        self.cursor = max(0, min(self.cursor, len(self.rules) - 1))
+        if self.cursor < self.scroll:
+            self.scroll = self.cursor
+        elif self.cursor >= self.scroll + self.page_size:
+            self.scroll = self.cursor - self.page_size + 1
+        max_scroll = max(0, len(self.rules) - self.page_size)
+        self.scroll = max(0, min(self.scroll, max_scroll))
 
     def _refresh(self) -> None:
         self.rules = self.store.list_sieve_rules()
         self.cursor = min(self.cursor, max(0, len(self.rules) - 1))
+        self._adjust_scroll()
 
     def init(self) -> Cmd | None:
         return None
@@ -685,9 +762,27 @@ class SieveModal(Model):
                 return self, lambda: ModalClosedMsg(self.status_banner)
             if k in ("down", "j") and self.rules:
                 self.cursor = (self.cursor + 1) % len(self.rules)
+                self._adjust_scroll()
                 return self, None
             if k in ("up", "k") and self.rules:
                 self.cursor = (self.cursor - 1) % len(self.rules)
+                self._adjust_scroll()
+                return self, None
+            if k in ("page_down", "pgdown") and self.rules:
+                self.cursor = min(len(self.rules) - 1, self.cursor + self.page_size)
+                self._adjust_scroll()
+                return self, None
+            if k in ("page_up", "pgup") and self.rules:
+                self.cursor = max(0, self.cursor - self.page_size)
+                self._adjust_scroll()
+                return self, None
+            if k == "home" and self.rules:
+                self.cursor = 0
+                self._adjust_scroll()
+                return self, None
+            if k == "end" and self.rules:
+                self.cursor = max(0, len(self.rules) - 1)
+                self._adjust_scroll()
                 return self, None
             if k in (" ", "space") and self.rules:
                 r = self.rules[self.cursor]
@@ -722,6 +817,23 @@ class SieveModal(Model):
                     else f"✖ Validation error: {'; '.join(errs)}"
                 )
                 return self, None
+            if k == "u":
+                accounts = self.store.list_accounts()
+                target_acc = next((a for a in accounts if a.id == self.active_account_id), None)
+                if not target_acc and accounts:
+                    target_acc = accounts[0]
+                if target_acc and target_acc.sieve_host:
+                    try:
+                        client = ManageSieveClient(target_acc)
+                        client.connect()
+                        ok, msg_text = client.sync_script_with_server(self.store)
+                        client.close()
+                        self.status_banner = msg_text
+                    except Exception as ex:
+                        self.status_banner = f"ManageSieve sync failed: {ex}"
+                else:
+                    self.status_banner = "No ManageSieve host configured for this account."
+                return self, None
             if k == "r":
                 # Run active Sieve rules against local INBOX messages
                 inbox_msgs = self.store.list_messages("*", "INBOX")
@@ -735,9 +847,20 @@ class SieveModal(Model):
                 self.status_banner = f"Executed Sieve rules across Inbox: {len(matched)} message(s) processed."
                 return self, None
 
+        if isinstance(msg, MouseMsg) and self.rules:
+            if msg.button == MouseButton.WHEEL_UP:
+                self.cursor = max(0, self.cursor - 1)
+                self._adjust_scroll()
+                return self, None
+            if msg.button == MouseButton.WHEEL_DOWN:
+                self.cursor = min(len(self.rules) - 1, self.cursor + 1)
+                self._adjust_scroll()
+                return self, None
+
         return self, None
 
     def view(self, width: int = 80) -> str:
+        self._adjust_scroll()
         modal_w = min(82, max(58, width - 6))
         inner_w = modal_w - 6
 
@@ -756,11 +879,13 @@ class SieveModal(Model):
             return self.theme.modal_style(modal_w, "⚙️ ManageSieve & Filter Rules").render(form_view)
 
         rule_rows: list[str] = []
-        for idx, r in enumerate(self.rules[:7]):
+        visible_rules = self.rules[self.scroll : self.scroll + self.page_size]
+        for rel_idx, r in enumerate(visible_rules):
+            abs_idx = self.scroll + rel_idx
             chk = "[x]" if r.enabled else "[ ]"
             desc = f"{chk} {r.name:<24} │ if {r.field} {r.comparator} \"{r.pattern}\" → {r.action} \"{r.action_arg}\""
             truncated = truncate_ansi(desc, inner_w)
-            if idx == self.cursor:
+            if abs_idx == self.cursor:
                 rule_rows.append(
                     Style()
                     .bold(True)
@@ -771,6 +896,9 @@ class SieveModal(Model):
                 )
             else:
                 rule_rows.append(Style().foreground(self.theme.fg_primary).render(truncated))
+
+        if not rule_rows:
+            rule_rows.append(Style().italic(True).foreground(self.theme.fg_muted).render("  No Sieve filter rules configured."))
 
         compiled_preview = "\n".join(compile_sieve_script(self.rules).splitlines()[:10])
         preview_box = (
@@ -787,7 +915,7 @@ class SieveModal(Model):
         footer = (
             Style()
             .foreground(self.theme.fg_muted)
-            .render("[Space] Toggle   [a] Add Rule   [d] Delete   [v] Validate   [r] Run Filters Now   [Esc] Close")
+            .render("[Space] Toggle   [a] Add Rule   [d] Delete   [v] Validate   [u] Sync Server   [r] Run Filters   [Esc] Close")
         )
 
         content = join_vertical(
@@ -1068,7 +1196,7 @@ class AccountSettingsModal(Model):
             smtp_security=self.smtp_security,
             smtp_username=username,
             smtp_password=password,
-            sieve_host=imap_host,
+            sieve_host=acc.sieve_host or imap_host,
             sieve_port=acc.sieve_port,
             pgp_key_id=acc.pgp_key_id,
             signature=self.input_signature.value,

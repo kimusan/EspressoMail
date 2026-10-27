@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 import re
 import socket
 import ssl
-from typing import Sequence
+from typing import Any, Sequence
 
-from espressomail.models.entities import AccountConfig, EmailMessage, SieveFilterRule
+from espressomail.models.entities import AccountConfig, EmailMessage, SieveFilterRule, SieveScript
 
 
 def compile_sieve_script(rules: Sequence[SieveFilterRule]) -> str:
@@ -227,6 +228,49 @@ class ManageSieveClient:
 
         return greeting
 
+    def list_scripts(self) -> list[tuple[str, bool]]:
+        """Query server for list of scripts via LISTSCRIPTS command.
+
+        Returns a list of (script_name, is_active) tuples.
+        """
+        if self._sock is None:
+            raise RuntimeError("ManageSieveClient is not connected")
+        self._send_line("LISTSCRIPTS")
+        resp = self._read_response()
+        if not resp or not resp[-1].upper().startswith("OK"):
+            raise RuntimeError(f"ManageSieve LISTSCRIPTS failed: {resp}")
+
+        results: list[tuple[str, bool]] = []
+        for line in resp[:-1]:
+            line = line.strip()
+            if not line:
+                continue
+            m = re.match(r'^"([^"]+)"(?:\s+(ACTIVE))?', line, re.IGNORECASE)
+            if m:
+                s_name = m.group(1)
+                is_active = bool(m.group(2))
+                results.append((s_name, is_active))
+            else:
+                parts = line.split()
+                s_name = parts[0].strip('"')
+                is_active = len(parts) > 1 and parts[1].upper() == "ACTIVE"
+                results.append((s_name, is_active))
+        return results
+
+    def get_script(self, name: str) -> str:
+        """Fetch the content of a remote Sieve script via GETSCRIPT command."""
+        if self._sock is None:
+            raise RuntimeError("ManageSieveClient is not connected")
+        self._send_line(f'GETSCRIPT "{name}"')
+        resp = self._read_response()
+        if not resp or not resp[-1].upper().startswith("OK"):
+            raise RuntimeError(f"ManageSieve GETSCRIPT failed: {resp}")
+
+        content_lines = resp[:-1]
+        if content_lines and content_lines[0].startswith("{") and content_lines[0].endswith("}"):
+            content_lines = content_lines[1:]
+        return "\n".join(content_lines)
+
     def put_script(self, name: str, content: str, activate: bool = True) -> bool:
         """Upload a Sieve script via PUTSCRIPT and optionally activate via SETSCRIPT."""
         if self._sock is None:
@@ -241,6 +285,88 @@ class ManageSieveClient:
             act_resp = self._read_response()
             ok = bool(act_resp and act_resp[-1].upper().startswith("OK"))
         return ok
+
+    def sync_script_with_server(
+        self,
+        store: Any,
+        script_name: str = "espressomail.sieve",
+    ) -> tuple[bool, str]:
+        """Fetch active remote Sieve script into LocalStore and upload/update local rules to server."""
+        try:
+            if self._sock is None:
+                self.connect()
+
+            remote_scripts = self.list_scripts()
+            active_name = ""
+            for s_name, is_active in remote_scripts:
+                if is_active:
+                    active_name = s_name
+                    break
+            if not active_name and remote_scripts:
+                active_name = remote_scripts[0][0]
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # 1. If remote script exists, download and persist in store
+            if active_name:
+                try:
+                    fetched_script = self.get_script(active_name)
+                    store.save_sieve_script(
+                        SieveScript(
+                            id=f"sieve:{self.account.id}:{active_name}",
+                            account_id=self.account.id,
+                            name=active_name,
+                            content=fetched_script,
+                            active=True,
+                            updated_at=now_iso,
+                        )
+                    )
+                except Exception:
+                    pass
+
+            # 2. Check local rules to upload/update to server
+            local_rules = store.list_sieve_rules(self.account.id)
+            if not local_rules:
+                local_rules = store.list_sieve_rules("*")
+
+            if local_rules:
+                target_name = active_name or script_name
+                compiled = compile_sieve_script(local_rules)
+                ok = self.put_script(target_name, compiled, activate=True)
+                if ok:
+                    store.save_sieve_script(
+                        SieveScript(
+                            id=f"sieve:{self.account.id}:{target_name}",
+                            account_id=self.account.id,
+                            name=target_name,
+                            content=compiled,
+                            active=True,
+                            updated_at=now_iso,
+                        )
+                    )
+                    return True, f"Fetched remote script and updated '{target_name}' on Sieve server."
+                return False, f"Failed to upload compiled Sieve script to '{target_name}'."
+            elif not remote_scripts:
+                # No remote scripts and no local rules: upload an initial default script
+                default_content = compile_sieve_script([])
+                ok = self.put_script(script_name, default_content, activate=True)
+                if ok:
+                    store.save_sieve_script(
+                        SieveScript(
+                            id=f"sieve:{self.account.id}:{script_name}",
+                            account_id=self.account.id,
+                            name=script_name,
+                            content=default_content,
+                            active=True,
+                            updated_at=now_iso,
+                        )
+                    )
+                    return True, f"Initialized default Sieve script '{script_name}' on server."
+                return False, f"Failed to initialize Sieve script '{script_name}' on server."
+            else:
+                return True, f"Fetched active Sieve script '{active_name}' from server."
+        except Exception as e:
+            return False, f"ManageSieve sync error: {e}"
 
     def close(self) -> None:
         """Send LOGOUT and close ManageSieve socket."""

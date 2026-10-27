@@ -11,6 +11,7 @@ from espresso.beans import EchoMode, SelectPrompt, SelectSubmitMsg, TextInput
 from espresso.crema import DOUBLE_BORDER, Align, Style, join_vertical, place
 
 from espressomail.models.entities import AccountConfig, SecurityType
+from espressomail.protocols.sieve import ManageSieveClient
 from espressomail.protocols.smtp_client import validate_account_credentials
 from espressomail.themes.engine import Theme
 
@@ -157,8 +158,10 @@ class OnboardingWizard(Model):
         self.input_smtp_host = TextInput(placeholder="smtp.example.com", prompt="SMTP Host:     ")
         self.input_smtp_port = TextInput(placeholder="587", prompt="SMTP Port:     ")
         self.smtp_security: SecurityType = SecurityType.STARTTLS
+        self.input_sieve_host = TextInput(placeholder="sieve.example.com", prompt="Sieve Host:    ")
+        self.input_sieve_port = TextInput(placeholder="4190", prompt="Sieve Port:    ")
         # Focus indices on Step 3:
-        # 0=IMAP Host, 1=IMAP Port, 2=IMAP Security, 3=SMTP Host, 4=SMTP Port, 5=SMTP Security
+        # 0=IMAP Host, 1=IMAP Port, 2=IMAP Security, 3=SMTP Host, 4=SMTP Port, 5=SMTP Security, 6=Sieve Host, 7=Sieve Port
         self.step3_focus = 0
 
         self._sync_focus()
@@ -182,6 +185,8 @@ class OnboardingWizard(Model):
             1: self.input_imap_port,
             3: self.input_smtp_host,
             4: self.input_smtp_port,
+            6: self.input_sieve_host,
+            7: self.input_sieve_port,
         }
         for idx, f in s3_input_map.items():
             if self.step == 3 and idx == self.step3_focus:
@@ -256,11 +261,11 @@ class OnboardingWizard(Model):
                     self.generate_pgp = not self.generate_pgp
                     return self, None
                 if k in ("tab", "down"):
-                    self.step3_focus = (self.step3_focus + 1) % 6
+                    self.step3_focus = (self.step3_focus + 1) % 8
                     self._sync_focus()
                     return self, None
                 if k in ("shift+tab", "up"):
-                    self.step3_focus = (self.step3_focus - 1) % 6
+                    self.step3_focus = (self.step3_focus - 1) % 8
                     self._sync_focus()
                     return self, None
                 if self.step3_focus in (2, 5) and k in ("left", "right", "h", "l", " ", "space"):
@@ -288,6 +293,8 @@ class OnboardingWizard(Model):
                 1: self.input_imap_port,
                 3: self.input_smtp_host,
                 4: self.input_smtp_port,
+                6: self.input_sieve_host,
+                7: self.input_sieve_port,
             }
             if self.step3_focus in s3_input_map:
                 target = s3_input_map[self.step3_focus]
@@ -305,6 +312,8 @@ class OnboardingWizard(Model):
         self.input_smtp_host.value = preset.smtp_host
         self.input_smtp_port.value = str(preset.smtp_port)
         self.smtp_security = preset.smtp_security
+        self.input_sieve_host.value = preset.imap_host
+        self.input_sieve_port.value = str(preset.sieve_port)
         if not preset.is_custom and not self.input_account_name.value:
             self.input_account_name.value = preset.label.split("(")[0].strip()[:20]
         self.step = 2
@@ -336,6 +345,10 @@ class OnboardingWizard(Model):
             self.input_imap_host.value = f"imap.{domain}"
         if not self.input_smtp_host.value.strip():
             self.input_smtp_host.value = f"smtp.{domain}"
+        if not self.input_sieve_host.value.strip():
+            self.input_sieve_host.value = f"sieve.{domain}"
+        if not self.input_sieve_port.value.strip():
+            self.input_sieve_port.value = "4190"
 
         self.step = 3
         self.step3_focus = 0
@@ -357,6 +370,16 @@ class OnboardingWizard(Model):
                 raise ValueError
         except ValueError:
             self.error_msg = "IMAP and SMTP ports must be valid port numbers (1–65535)."
+            return self, None
+
+        sieve_host = self.input_sieve_host.value.strip()
+        sieve_port_str = self.input_sieve_port.value.strip() or "4190"
+        try:
+            sieve_port = int(sieve_port_str)
+            if not (1 <= sieve_port <= 65535):
+                raise ValueError
+        except ValueError:
+            self.error_msg = "Sieve port must be a valid port number (1–65535)."
             return self, None
 
         email_addr = self.input_email.value.strip()
@@ -381,8 +404,8 @@ class OnboardingWizard(Model):
             smtp_security=self.smtp_security,
             smtp_username=username,
             smtp_password=password,
-            sieve_host=imap_host,
-            sieve_port=self.selected_preset.sieve_port,
+            sieve_host=sieve_host,
+            sieve_port=sieve_port,
         )
 
         # Validate IMAP and SMTP credentials before completing onboarding
@@ -392,12 +415,23 @@ class OnboardingWizard(Model):
             self.status_msg = ""
             return self, None
 
+        sieve_note = ""
+        if acc.sieve_host and self.store is not None:
+            try:
+                client = ManageSieveClient(acc, timeout=3.0)
+                client.connect()
+                s_ok, s_msg = client.sync_script_with_server(self.store)
+                client.close()
+                sieve_note = f" Sieve: {s_msg}"
+            except Exception as e:
+                sieve_note = f" (Sieve notice: {e})"
+
         self.error_msg = ""
-        self.status_msg = summary
+        self.status_msg = f"{summary}{sieve_note}"
         return self, lambda: OnboardingCompleteMsg(
             account=acc,
             generate_pgp=self.generate_pgp,
-            validation_summary=summary,
+            validation_summary=self.status_msg,
         )
 
     def view(self, width: int = 100, height: int = 30) -> str:
@@ -486,6 +520,8 @@ class OnboardingWizard(Model):
                 self.input_smtp_host.view(),
                 self.input_smtp_port.view(),
                 smtp_sec_row,
+                self.input_sieve_host.view(),
+                self.input_sieve_port.view(),
                 "",
                 Style()
                 .foreground(self.theme.pgp_verified_fg if self.generate_pgp else self.theme.fg_muted)

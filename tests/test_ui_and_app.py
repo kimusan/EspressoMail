@@ -8,18 +8,21 @@ import unittest
 from unittest import mock
 
 from espresso import KeyMsg, MouseAction, MouseButton, MouseMsg, WindowSizeMsg
-from espressomail.models import AccountConfig, EmailMessage, Folder, FolderType
+from espressomail.models import AccountConfig, Contact, EmailMessage, Folder, FolderType
 from espressomail.storage import LocalStore
 from espressomail.themes import ThemeEngine
 from espressomail.ui import (
     PROVIDER_PRESETS,
     AccountSettingsModal,
+    AddressBookModal,
     DownloadAttachmentsModal,
     EspressoMailApp,
     ImageRenderBackend,
+    OnboardingCompleteMsg,
     OnboardingWizard,
     PreferencesModal,
     PreferencesSavedMsg,
+    SieveModal,
     SplashDoneMsg,
     SplashScreen,
     SplashTickMsg,
@@ -1204,6 +1207,138 @@ class TestUIAndApp(unittest.TestCase):
             self.assertTrue(app.is_syncing)
             self.assertEqual(auto_cmd, app._sync_accounts_cmd)
             self.assertIn("auto-sync", app.status_message)
+
+    def test_address_book_modal_scrolling_and_mouse(self) -> None:
+        """Verify AddressBookModal vertical scrolling, page_up/down, home/end, mouse wheel, and indicators."""
+        # 1. Populate 25 contacts
+        for i in range(25):
+            self.store.save_contact(
+                Contact(
+                    id=f"contact_{i:02d}",
+                    name=f"Contact Person {i:02d}",
+                    email=f"person{i:02d}@example.com",
+                    organization=f"Org {i % 5}",
+                    favorite=(i % 3 == 0),
+                    frequency=i,
+                )
+            )
+
+        theme = ThemeEngine("espresso").current
+        modal = AddressBookModal(store=self.store, theme=theme)
+        self.assertEqual(len(modal.contacts), 25)
+        self.assertEqual(modal.cursor, 0)
+        self.assertEqual(modal.scroll, 0)
+
+        # Initial view shows contacts 0..9 and indicator (1–10 of 25)
+        out = modal.view(width=80)
+        first_contact = modal.contacts[0].name
+        last_page1_contact = modal.contacts[9].name
+        last_contact = modal.contacts[24].name
+        self.assertIn(first_contact, out)
+        self.assertIn(last_page1_contact, out)
+        self.assertNotIn(last_contact, out)
+        self.assertIn("Showing 1–10 of 25 contacts", out)
+
+        # 2. Navigate down beyond first page
+        for _ in range(12):
+            modal, _ = modal.update(KeyMsg("down"))
+        self.assertEqual(modal.cursor, 12)
+        # Scroll should have adjusted to keep cursor in viewport (page_size = 10)
+        self.assertEqual(modal.scroll, 3)
+        out = modal.view(width=80)
+        self.assertIn(modal.contacts[12].name, out)
+        self.assertNotIn(modal.contacts[0].name, out)
+        self.assertIn("Showing 4–13 of 25 contacts", out)
+
+        # 3. Test page_down and page_up
+        modal, _ = modal.update(KeyMsg("page_down"))
+        self.assertEqual(modal.cursor, 22)
+        self.assertEqual(modal.scroll, 13)
+        modal, _ = modal.update(KeyMsg("page_up"))
+        self.assertEqual(modal.cursor, 12)
+        self.assertEqual(modal.scroll, 12)
+
+        # 4. Test end and home
+        modal, _ = modal.update(KeyMsg("end"))
+        self.assertEqual(modal.cursor, 24)
+        self.assertEqual(modal.scroll, 15)  # 25 - 10
+        out_end = modal.view(width=80)
+        self.assertIn(modal.contacts[24].name, out_end)
+        self.assertIn("Showing 16–25 of 25 contacts", out_end)
+
+        modal, _ = modal.update(KeyMsg("home"))
+        self.assertEqual(modal.cursor, 0)
+        self.assertEqual(modal.scroll, 0)
+
+        # 5. Test Mouse Wheel scrolling
+        modal, _ = modal.update(MouseMsg(x=10, y=10, action=MouseAction.PRESS, button=MouseButton.WHEEL_DOWN))
+        self.assertEqual(modal.cursor, 1)
+        modal, _ = modal.update(MouseMsg(x=10, y=10, action=MouseAction.PRESS, button=MouseButton.WHEEL_DOWN))
+        self.assertEqual(modal.cursor, 2)
+        modal, _ = modal.update(MouseMsg(x=10, y=10, action=MouseAction.PRESS, button=MouseButton.WHEEL_UP))
+        self.assertEqual(modal.cursor, 1)
+
+    def test_onboarding_sieve_server_configuration_and_sync(self) -> None:
+        """Verify Sieve server host/port configuration in onboarding wizard and script sync."""
+        theme = ThemeEngine("espresso").current
+        validator = mock.MagicMock(return_value=(True, "IMAP/SMTP credentials valid."))
+        wizard = OnboardingWizard(
+            theme=theme,
+            allow_cancel=True,
+            credential_validator=validator,
+            store=self.store,
+        )
+
+        # Step 1: Select Fastmail preset (index 1)
+        wizard, _ = wizard.update(KeyMsg("down"))
+        wizard, _ = wizard.update(KeyMsg("enter"))
+        self.assertEqual(wizard.step, 2)
+        self.assertEqual(wizard.input_sieve_port.value, "4190")
+
+        # Step 2: Fill identity & credentials
+        wizard.input_account_name.value = "Work Fastmail"
+        wizard.input_full_name.value = "Kim Schulz"
+        wizard.input_email.value = "kim@fastmail.com"
+        wizard.input_password.value = "secret123"
+        wizard, _ = wizard._advance_to_step3()
+        self.assertEqual(wizard.step, 3)
+
+        # Step 3: Verify all 8 focus slots exist and Sieve Host/Port are editable
+        # 0=IMAP Host, 1=IMAP Port, 2=IMAP Security, 3=SMTP Host, 4=SMTP Port, 5=SMTP Security, 6=Sieve Host, 7=Sieve Port
+        for _ in range(6):
+            wizard, _ = wizard.update(KeyMsg("tab"))
+        self.assertEqual(wizard.step3_focus, 6)
+
+        # Change Sieve host and port
+        wizard.input_sieve_host.value = "custom.sieve.host.com"
+        wizard, _ = wizard.update(KeyMsg("tab"))
+        self.assertEqual(wizard.step3_focus, 7)
+        wizard.input_sieve_port.value = "4199"
+
+        # Verify card view renders Sieve Host and Sieve Port (stripping ANSI escape codes)
+        view_text = wizard.view(width=85, height=35)
+        clean_view = re.sub(r"\x1b\[[0-9;]*m", "", view_text)
+        self.assertIn("custom.sieve.host.com", clean_view)
+        self.assertIn("4199", clean_view)
+
+        # Finalize account with mocked ManageSieveClient
+        with mock.patch("espressomail.ui.onboarding.ManageSieveClient") as mock_sieve_cls:
+            mock_client = mock.MagicMock()
+            mock_client.sync_script_with_server.return_value = (True, "Fetched active Sieve script.")
+            mock_sieve_cls.return_value = mock_client
+
+            wizard, cmd = wizard._finalize_account()
+            self.assertIsNotNone(cmd)
+            assert cmd is not None
+            res = cmd()
+            self.assertIsInstance(res, OnboardingCompleteMsg)
+            assert res.account is not None
+            self.assertEqual(res.account.sieve_host, "custom.sieve.host.com")
+            self.assertEqual(res.account.sieve_port, 4199)
+            self.assertIn("Fetched active Sieve script", res.validation_summary)
+            mock_client.connect.assert_called_once()
+            mock_client.sync_script_with_server.assert_called_once_with(self.store)
+            mock_client.close.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -58,6 +58,7 @@ from espressomail.models.entities import (
     split_folder_hierarchy,
 )
 from espressomail.protocols.imap_client import IMAPClient
+from espressomail.protocols.sieve import ManageSieveClient
 from espressomail.protocols.smtp_client import (
     SMTPClient,
     build_mime_message,
@@ -902,6 +903,14 @@ class EspressoMailApp(Model):
                     self.store.save_account(msg.account)
                     self.active_account_id = msg.account.id
                     self.active_folder = "INBOX"
+                    if msg.account.sieve_host:
+                        try:
+                            sieve_client = ManageSieveClient(msg.account, timeout=3.0)
+                            sieve_client.connect()
+                            sieve_client.sync_script_with_server(self.store)
+                            sieve_client.close()
+                        except Exception:
+                            pass
                     self.is_syncing = True
                     self.sync_progress_text = "Starting sync..."
                     self.status_message = (

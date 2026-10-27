@@ -18,6 +18,8 @@ from espressomail.protocols import (
     validate_sieve_script,
 )
 from espressomail.protocols.imap_client import IMAPClient
+from espressomail.protocols.sieve import ManageSieveClient
+from espressomail.storage import LocalStore
 
 
 class TestProtocolsAndCrypto(unittest.TestCase):
@@ -333,6 +335,96 @@ class TestProtocolsAndCrypto(unittest.TestCase):
         self.assertEqual(len(msgs), 1)
         self.assertIn("UID 1:99", searched_criteria)
         self.assertEqual(msgs[-1].subject, "Older Email 99")
+
+    def test_manage_sieve_client_protocol_and_sync(self) -> None:
+        """Verify ManageSieve client list_scripts, get_script, put_script, and LocalStore sync."""
+        commands_sent: list[bytes] = []
+        canned_responses: list[bytes] = [
+            b'"default" ACTIVE\r\n"archive_rules"\r\nOK "LISTSCRIPTS done"\r\n',
+            b"{45}\r\nrequire [\"fileinto\"];\r\nfileinto \"Trash\";\r\nOK\r\n",
+            b"OK \"PUTSCRIPT done\"\r\n",
+            b"OK \"SETSCRIPT done\"\r\n",
+        ]
+
+        class MockSocket:
+            def sendall(self, data: bytes) -> None:
+                commands_sent.append(data)
+
+            def recv(self, bufsize: int = 4096) -> bytes:
+                if canned_responses:
+                    return canned_responses.pop(0)
+                return b""
+
+            def close(self) -> None:
+                pass
+
+        account = AccountConfig(
+            id="acc_sieve",
+            name="Sieve Account",
+            email="user@example.com",
+            full_name="User Sieve",
+            sieve_host="sieve.example.com",
+            sieve_port=4190,
+            imap_host="imap.example.com",
+            smtp_host="smtp.example.com",
+        )
+        client = ManageSieveClient(account)
+        mock_sock = MockSocket()
+        client._sock = mock_sock  # type: ignore[assignment]
+
+        # 1. Test list_scripts
+        scripts = client.list_scripts()
+        self.assertEqual(len(scripts), 2)
+        self.assertEqual(scripts[0], ("default", True))
+        self.assertEqual(scripts[1], ("archive_rules", False))
+        self.assertIn(b"LISTSCRIPTS\r\n", commands_sent)
+
+        # 2. Test get_script
+        content = client.get_script("default")
+        self.assertIn('require ["fileinto"];', content)
+        self.assertIn('fileinto "Trash";', content)
+
+        # 3. Test sync_script_with_server: fetches remote active script into LocalStore
+        store = LocalStore(":memory:")
+        try:
+            # Re-arm socket responses for a full sync run:
+            # 1: list_scripts -> "default" active
+            # 2: get_script("default")
+            # 3: put_script (when local rules exist)
+            # 4: setscript
+            canned_responses.clear()
+            canned_responses.extend([
+                b'"default" ACTIVE\r\nOK "LISTSCRIPTS"\r\n',
+                b"{45}\r\nrequire [\"fileinto\"];\r\nfileinto \"Trash\";\r\nOK\r\n",
+                b"OK \"PUTSCRIPT done\"\r\n",
+                b"OK \"SETSCRIPT done\"\r\n",
+            ])
+
+            # Save account to satisfy foreign key constraint
+            store.save_account(account)
+
+            # Add a local rule so put_script will also be exercised during sync
+            local_rule = SieveFilterRule(
+                id="rule_local_1",
+                account_id=account.id,
+                name="Move Notifications",
+                field="Subject",
+                comparator="contains",
+                pattern="Alert",
+                action="fileinto",
+                action_arg="Alerts",
+            )
+            store.save_sieve_rule(local_rule)
+
+            ok, msg = client.sync_script_with_server(store)
+            self.assertTrue(ok)
+            self.assertIn("updated 'default'", msg)
+
+            # Verify saved scripts in store
+            saved_scripts = store.list_sieve_scripts(account.id)
+            self.assertTrue(any(s.name == "default" for s in saved_scripts))
+        finally:
+            store.close()
 
 
 if __name__ == "__main__":
