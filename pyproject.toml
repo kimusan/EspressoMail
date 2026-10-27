@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "espressomail"
+dynamic = ["version"]
+description = "A modern, multi-account terminal email client built on the Espresso TUI framework (The Elm Architecture)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Kim Schulz", email = "kim@schulz.dk" },
+]
+keywords = [
+    "email",
+    "imap",
+    "smtp",
+    "sieve",
+    "pgp",
+    "gpg",
+    "tui",
+    "terminal",
+    "espresso",
+    "elm-architecture",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Operating System :: Unix",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Email",
+    "Topic :: Communications :: Email :: Mail-User Agents",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Terminals",
+    "Typing :: Typed",
+]
+dependencies = [
+    "espressoTUI>=1.2.0",
+]
+
+[project.optional-dependencies]
+images = [
+    "Pillow>=10.0.0",
+]
+dev = [
+    "pytest>=7.0",
+    "mypy>=1.0",
+]
+
+[project.scripts]
+espressomail = "espressomail.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kimusan/EspressoMail"
+Repository = "https://github.com/kimusan/EspressoMail.git"
+Issues = "https://github.com/kimusan/EspressoMail/issues"
+Documentation = "https://github.com/kimusan/EspressoMail/tree/main/docs"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "espressomail.__version__" }
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["src"]
