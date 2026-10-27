@@ -6,10 +6,11 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from espresso import Cmd, KeyMsg, Model, Msg
 from espresso.beans import (
+    EchoMode,
     FilePicker,
     FileSelectMsg,
     TextArea,
@@ -31,6 +32,7 @@ from espressomail.models.entities import (
     Contact,
     EmailMessage,
     PGPStatus,
+    SecurityType,
     SieveFilterRule,
 )
 from espressomail.protocols.sieve import (
@@ -38,6 +40,7 @@ from espressomail.protocols.sieve import (
     compile_sieve_script,
     validate_sieve_script,
 )
+from espressomail.protocols.smtp_client import validate_account_credentials
 from espressomail.search.fuzzy import FuzzySearchEngine, SearchResult
 from espressomail.storage.database import LocalStore
 from espressomail.themes.engine import Theme
@@ -894,7 +897,345 @@ class PGPModal(Model):
 
 
 # ---------------------------------------------------------------------------
-# 6. Keyboard & Mouse Shortcuts Help Modal
+# 6. Account Settings Modal (Edit Existing Accounts)
+# ---------------------------------------------------------------------------
+
+_MODAL_SECURITY_CYCLE: tuple[SecurityType, ...] = (
+    SecurityType.SSL_TLS,
+    SecurityType.STARTTLS,
+    SecurityType.NONE,
+)
+
+
+class AccountSettingsModal(Model):
+    """Modal for editing existing account settings (password, servers, ports, TLS, username) or deleting an account."""
+
+    def __init__(
+        self,
+        store: LocalStore,
+        theme: Theme,
+        active_account_id: str = "",
+        credential_validator: Callable[[AccountConfig], tuple[bool, str]] | None = None,
+    ) -> None:
+        self.store = store
+        self.theme = theme
+        self.credential_validator: Callable[[AccountConfig], tuple[bool, str]] = (
+            credential_validator or validate_account_credentials
+        )
+        self.accounts: list[AccountConfig] = self.store.list_accounts()
+        self.account_idx = 0
+        for idx, acc in enumerate(self.accounts):
+            if acc.id == active_account_id:
+                self.account_idx = idx
+                break
+
+        self.show_password = False
+        self.error_msg = ""
+        self.status_msg = ""
+
+        # Form inputs
+        self.input_account_name = TextInput(placeholder="Work / Personal", prompt="Account Name:  ")
+        self.input_full_name = TextInput(placeholder="Jane Doe", prompt="Full Name:     ")
+        self.input_email = TextInput(placeholder="jane@example.com", prompt="Email Address: ")
+        self.input_username = TextInput(placeholder="Login username", prompt="Login User:    ")
+        self.input_password = TextInput(
+            placeholder="IMAP / SMTP Password",
+            prompt="Password:      ",
+            echo_mode=EchoMode.PASSWORD,
+        )
+        self.input_imap_host = TextInput(placeholder="imap.example.com", prompt="IMAP Host:     ")
+        self.input_imap_port = TextInput(placeholder="993", prompt="IMAP Port:     ")
+        self.imap_security: SecurityType = SecurityType.SSL_TLS
+        self.input_smtp_host = TextInput(placeholder="smtp.example.com", prompt="SMTP Host:     ")
+        self.input_smtp_port = TextInput(placeholder="587", prompt="SMTP Port:     ")
+        self.smtp_security: SecurityType = SecurityType.STARTTLS
+        self.input_signature = TextInput(placeholder="Optional email signature", prompt="Signature:     ")
+
+        # Focus indices:
+        # 0: Account selector
+        # 1: Account Name, 2: Full Name, 3: Email, 4: Username, 5: Password
+        # 6: IMAP Host, 7: IMAP Port, 8: IMAP Security
+        # 9: SMTP Host, 10: SMTP Port, 11: SMTP Security
+        # 12: Signature
+        self.focus_idx = 5 if self.accounts else 0  # Default focus on Password field for quick password updates
+        self._load_selected_account()
+        self._sync_focus()
+
+    @property
+    def current_account(self) -> AccountConfig | None:
+        if not self.accounts:
+            return None
+        return self.accounts[self.account_idx % len(self.accounts)]
+
+    def _load_selected_account(self) -> None:
+        acc = self.current_account
+        if acc is None:
+            return
+        self.input_account_name.value = acc.name
+        self.input_full_name.value = acc.full_name
+        self.input_email.value = acc.email
+        self.input_username.value = acc.imap_username or acc.email
+        self.input_password.value = acc.imap_password
+        self.input_imap_host.value = acc.imap_host
+        self.input_imap_port.value = str(acc.imap_port)
+        self.imap_security = acc.imap_security
+        self.input_smtp_host.value = acc.smtp_host
+        self.input_smtp_port.value = str(acc.smtp_port)
+        self.smtp_security = acc.smtp_security
+        self.input_signature.value = acc.signature
+
+    def _sync_focus(self) -> None:
+        input_map = {
+            1: self.input_account_name,
+            2: self.input_full_name,
+            3: self.input_email,
+            4: self.input_username,
+            5: self.input_password,
+            6: self.input_imap_host,
+            7: self.input_imap_port,
+            9: self.input_smtp_host,
+            10: self.input_smtp_port,
+            12: self.input_signature,
+        }
+        for idx, inp in input_map.items():
+            if idx == self.focus_idx:
+                inp.focus()
+            else:
+                inp.blur()
+
+    def init(self) -> Cmd | None:
+        return None
+
+    def _build_updated_account(self) -> tuple[AccountConfig | None, str]:
+        acc = self.current_account
+        if acc is None:
+            return None, "No account selected."
+        email_val = self.input_email.value.strip()
+        if not email_val or "@" not in email_val:
+            return None, "Email address must contain '@'."
+        imap_host = self.input_imap_host.value.strip()
+        smtp_host = self.input_smtp_host.value.strip()
+        if not imap_host or not smtp_host:
+            return None, "Both IMAP Host and SMTP Host are required."
+        try:
+            imap_port = int(self.input_imap_port.value.strip() or "993")
+            smtp_port = int(self.input_smtp_port.value.strip() or "587")
+            if not (1 <= imap_port <= 65535 and 1 <= smtp_port <= 65535):
+                raise ValueError
+        except ValueError:
+            return None, "IMAP and SMTP ports must be valid port numbers (1–65535)."
+
+        username = self.input_username.value.strip() or email_val
+        password = self.input_password.value
+        if not password:
+            return None, "Password cannot be empty."
+
+        updated = AccountConfig(
+            id=acc.id,
+            name=self.input_account_name.value.strip() or email_val,
+            email=email_val,
+            full_name=self.input_full_name.value.strip() or email_val,
+            imap_host=imap_host,
+            imap_port=imap_port,
+            imap_security=self.imap_security,
+            imap_username=username,
+            imap_password=password,
+            smtp_host=smtp_host,
+            smtp_port=smtp_port,
+            smtp_security=self.smtp_security,
+            smtp_username=username,
+            smtp_password=password,
+            sieve_host=imap_host,
+            sieve_port=acc.sieve_port,
+            pgp_key_id=acc.pgp_key_id,
+            signature=self.input_signature.value,
+            color_badge=acc.color_badge,
+            enabled=acc.enabled,
+        )
+        return updated, ""
+
+    def update(self, msg: Msg) -> tuple[AccountSettingsModal, Cmd | None]:
+        if isinstance(msg, KeyMsg):
+            k = str(msg.key)
+            if k == "esc":
+                return self, lambda: ModalClosedMsg(self.status_msg or "Closed account settings.")
+            if not self.accounts:
+                return self, lambda: ModalClosedMsg("No accounts configured.")
+
+            if k == "ctrl+r":
+                self.show_password = not self.show_password
+                self.input_password.echo_mode = (
+                    EchoMode.NORMAL if self.show_password else EchoMode.PASSWORD
+                )
+                return self, None
+
+            if k == "ctrl+d":
+                acc = self.current_account
+                if acc is not None:
+                    self.store.delete_account(acc.id)
+                    self.accounts = self.store.list_accounts()
+                    if not self.accounts:
+                        return self, lambda: ModalClosedMsg(f"Deleted account {acc.email}.")
+                    self.account_idx = self.account_idx % len(self.accounts)
+                    self._load_selected_account()
+                    self.status_msg = f"Deleted account {acc.email}."
+                    self.error_msg = ""
+                return self, None
+
+            if k == "ctrl+t":
+                updated, err = self._build_updated_account()
+                if updated is None:
+                    self.error_msg = err
+                    self.status_msg = ""
+                    return self, None
+                ok, summary = self.credential_validator(updated)
+                if ok:
+                    self.status_msg = summary
+                    self.error_msg = ""
+                else:
+                    self.error_msg = summary
+                    self.status_msg = ""
+                return self, None
+
+            if k == "ctrl+f":
+                updated, err = self._build_updated_account()
+                if updated is None:
+                    self.error_msg = err
+                    self.status_msg = ""
+                    return self, None
+                self.store.save_account(updated)
+                self.accounts = self.store.list_accounts()
+                return self, lambda: ModalClosedMsg(f"✔ Updated settings for {updated.email}.")
+
+            if k in ("enter", "ctrl+s"):
+                updated, err = self._build_updated_account()
+                if updated is None:
+                    self.error_msg = err
+                    self.status_msg = ""
+                    return self, None
+                ok, summary = self.credential_validator(updated)
+                if not ok:
+                    self.error_msg = f"{summary} (Press Ctrl+F to save without live server check)"
+                    self.status_msg = ""
+                    return self, None
+                self.store.save_account(updated)
+                self.accounts = self.store.list_accounts()
+                return self, lambda: ModalClosedMsg(f"✔ Verified and saved settings for {updated.email}.")
+
+            if k in ("tab", "down"):
+                self.focus_idx = (self.focus_idx + 1) % 13
+                self._sync_focus()
+                return self, None
+            if k in ("shift+tab", "up"):
+                self.focus_idx = (self.focus_idx - 1) % 13
+                self._sync_focus()
+                return self, None
+
+            if self.focus_idx == 0 and k in ("left", "right", "h", "l", " ", "space"):
+                delta = 1 if k in ("right", "l", " ", "space") else -1
+                self.account_idx = (self.account_idx + delta) % len(self.accounts)
+                self._load_selected_account()
+                self.error_msg = ""
+                self.status_msg = ""
+                return self, None
+
+            if self.focus_idx in (8, 11) and k in ("left", "right", "h", "l", " ", "space"):
+                delta = 1 if k in ("right", "l", " ", "space") else -1
+                if self.focus_idx == 8:
+                    cur = _MODAL_SECURITY_CYCLE.index(self.imap_security)
+                    self.imap_security = _MODAL_SECURITY_CYCLE[(cur + delta) % len(_MODAL_SECURITY_CYCLE)]
+                else:
+                    cur = _MODAL_SECURITY_CYCLE.index(self.smtp_security)
+                    self.smtp_security = _MODAL_SECURITY_CYCLE[(cur + delta) % len(_MODAL_SECURITY_CYCLE)]
+                return self, None
+
+        input_map = {
+            1: self.input_account_name,
+            2: self.input_full_name,
+            3: self.input_email,
+            4: self.input_username,
+            5: self.input_password,
+            6: self.input_imap_host,
+            7: self.input_imap_port,
+            9: self.input_smtp_host,
+            10: self.input_smtp_port,
+            12: self.input_signature,
+        }
+        if self.focus_idx in input_map:
+            target = input_map[self.focus_idx]
+            _, cmd = target.update(msg)
+            return self, cmd
+
+        return self, None
+
+    def view(self, width: int = 80) -> str:
+        modal_w = min(84, max(58, width - 6))
+        acc = self.current_account
+        if acc is None:
+            return self.theme.modal_style(modal_w, "⚙️ Account Settings").render(
+                "No accounts configured. Press Esc to close or O to add an account."
+            )
+
+        sel_style = (
+            Style().bold(True).foreground(self.theme.accent_primary)
+            if self.focus_idx == 0
+            else Style().bold(True).foreground(self.theme.accent_secondary)
+        )
+        acc_selector = (
+            f"Account ({self.account_idx + 1}/{len(self.accounts)}): "
+            f"◀ {sel_style.render(f'{acc.name} <{acc.email}>')} ▶"
+        )
+
+        imap_sec_style = (
+            Style().bold(True).foreground(self.theme.accent_primary)
+            if self.focus_idx == 8
+            else Style().foreground(self.theme.fg_primary)
+        )
+        smtp_sec_style = (
+            Style().bold(True).foreground(self.theme.accent_primary)
+            if self.focus_idx == 11
+            else Style().foreground(self.theme.fg_primary)
+        )
+        pwd_mode = "Plaintext (Ctrl+R to mask)" if self.show_password else "Masked (Ctrl+R to reveal)"
+
+        rows = [
+            acc_selector,
+            "",
+            self.input_account_name.view(),
+            self.input_full_name.view(),
+            self.input_email.view(),
+            self.input_username.view(),
+            f"{self.input_password.view()}   {Style().foreground(self.theme.fg_muted).render(f'[{pwd_mode}]')}",
+            self.input_imap_host.view(),
+            self.input_imap_port.view(),
+            f"IMAP Security: ◀ {imap_sec_style.render(self.imap_security.value.upper())} ▶",
+            self.input_smtp_host.view(),
+            self.input_smtp_port.view(),
+            f"SMTP Security: ◀ {smtp_sec_style.render(self.smtp_security.value.upper())} ▶",
+            self.input_signature.view(),
+        ]
+
+        if self.error_msg:
+            rows.append(Style().bold(True).foreground(self.theme.pgp_error_fg).render(f"⚠ {self.error_msg}"))
+        if self.status_msg:
+            rows.append(Style().bold(True).foreground(self.theme.pgp_verified_fg).render(f"✔ {self.status_msg}"))
+
+        rows.append("")
+        rows.append(
+            Style()
+            .foreground(self.theme.fg_muted)
+            .render(
+                "[Enter/Ctrl+S] Validate & Save  [Ctrl+T] Test Auth  [Ctrl+F] Save Offline  [Ctrl+D] Delete  [Esc] Close"
+            )
+        )
+
+        return self.theme.modal_style(modal_w, "⚙️ Account Settings & Credentials").render(
+            join_vertical(Align.LEFT, *rows)
+        )
+
+
+# ---------------------------------------------------------------------------
+# 7. Keyboard & Mouse Shortcuts Help Modal
 # ---------------------------------------------------------------------------
 
 
@@ -934,15 +1275,18 @@ class HelpModal(Model):
             f"  {k_style.render('d')}  Move to Trash         {k_style.render('X')}      Empty Trash",
             f"  {k_style.render('w')}  Save attachments      {k_style.render('S')}      Sync IMAP accounts",
             "",
-            h_style.render("Search, Security, Filters & Themes"),
+            h_style.render("Accounts, Search, Security, Filters & Themes"),
+            f"  {k_style.render('A')}      Edit Account Settings (Password, IMAP/SMTP hosts, ports, TLS)",
+            f"  {k_style.render('O')}      Add New Account (Onboarding Wizard)",
             f"  {k_style.render('/')}      Instant Fuzzy Search across local SQLite store",
             f"  {k_style.render('t')}      Toggle Conversation Threading view",
             f"  {k_style.render('T')}      Cycle Color Scheme / Theme ({self.theme.name})",
             f"  {k_style.render('i')}      Cycle Terminal Image Renderer (Chafa / Sixel / Kitty / Half-Block)",
             f"  {k_style.render('B')}      Local Address Book    {k_style.render('F')}  ManageSieve Filters",
-            f"  {k_style.render('G')}      GPG/PGP Keyring       {k_style.render('O')}  Account Onboarding Wizard",
-            f"  {k_style.render('Ctrl+P')} Command Palette       {k_style.render('q')}  Quit EspressoMail",
+            f"  {k_style.render('G')}      GPG/PGP Keyring       {k_style.render('Ctrl+P')} Command Palette",
+            f"  {k_style.render('q')}      Quit EspressoMail",
         ]
         return self.theme.modal_style(modal_w, "⌨️ EspressoMail Keyboard & Mouse Shortcuts").render(
             "\n".join(lines)
         )
+

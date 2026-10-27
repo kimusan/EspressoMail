@@ -12,7 +12,11 @@ from espressomail.protocols.sieve import (
     compile_sieve_script,
     validate_sieve_script,
 )
-from espressomail.protocols.smtp_client import SMTPClient, build_mime_message
+from espressomail.protocols.smtp_client import (
+    SMTPClient,
+    build_mime_message,
+    validate_account_credentials,
+)
 from espressomail.protocols.threading import build_threads, normalize_subject
 
 __all__ = [
@@ -22,6 +26,7 @@ __all__ = [
     "parse_rfc5322_bytes",
     "SMTPClient",
     "build_mime_message",
+    "validate_account_credentials",
     "build_threads",
     "normalize_subject",
     "ManageSieveClient",

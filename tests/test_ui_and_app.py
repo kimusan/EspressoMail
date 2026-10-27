@@ -1,4 +1,4 @@
-"""Unit and integration tests for the 3-pane EspressoMail TUI, themes, splash, menus, onboarding, and modals."""
+"""Unit and integration tests for the 3-pane EspressoMail TUI, themes, splash, menus, onboarding, and account settings."""
 
 from __future__ import annotations
 
@@ -6,9 +6,12 @@ import tempfile
 import unittest
 
 from espresso import KeyMsg, MouseAction, MouseButton, MouseMsg, WindowSizeMsg
+from espressomail.models import AccountConfig
 from espressomail.storage import LocalStore
 from espressomail.themes import ThemeEngine
 from espressomail.ui import (
+     PROVIDER_PRESETS,
+    AccountSettingsModal,
     EspressoMailApp,
     ImageRenderBackend,
     OnboardingWizard,
@@ -18,6 +21,7 @@ from espressomail.ui import (
     TerminalImageRenderer,
     html_to_terminal_text,
 )
+from tests.test_storage_and_search import populate_test_store
 
 
 class TestUIAndApp(unittest.TestCase):
@@ -46,34 +50,99 @@ class TestUIAndApp(unittest.TestCase):
         assert cmd is not None
         self.assertIsInstance(cmd(), SplashDoneMsg)
 
-    def test_onboarding_wizard_account_creation(self) -> None:
+    def test_onboarding_custom_imap_first_and_credential_validation(self) -> None:
+        # Verify "Custom IMAP / SMTP Server" is the very first option and there are no demo presets
+        self.assertTrue(PROVIDER_PRESETS[0].is_custom)
+        self.assertIn("Custom IMAP", PROVIDER_PRESETS[0].label)
+        for preset in PROVIDER_PRESETS:
+            self.assertNotIn("Demo", preset.label)
+
         theme = ThemeEngine("espresso").current
-        wiz = OnboardingWizard(theme, allow_cancel=True)
-        # Select Fastmail (index 1)
-        wiz, _ = wiz.update(KeyMsg("down"))
+
+        # Validator that rejects bad-password and accepts valid-password
+        def fake_validator(acc: AccountConfig) -> tuple[bool, str]:
+            if acc.imap_password != "valid-secret-99":
+                return False, "IMAP authentication failed: Invalid credentials"
+            return True, "Verified IMAP & SMTP credentials"
+
+        wiz = OnboardingWizard(theme, allow_cancel=True, credential_validator=fake_validator)
+
+        # Press Enter immediately on Step 1 -> selects first option ("Custom IMAP / SMTP Server")
         wiz, _ = wiz.update(KeyMsg("enter"))
         self.assertEqual(wiz.step, 2)
+        self.assertTrue(wiz.selected_preset.is_custom)
 
-        # Fill Step 2: Account Name -> Full Name -> Email -> Password
-        wiz.input_account_name.value = "Fastmail Personal"
+        # Fill Step 2 with wrong password first
+        wiz.input_account_name.value = "My Self-Hosted Mail"
         wiz.input_full_name.value = "Kim Schulz"
-        wiz.input_email.value = "kim@fastmail.com"
-        wiz.input_password.value = "app-secret-123"
-        wiz.step2_focus = 3
+        wiz.input_email.value = "kim@schulz.dk"
+        wiz.input_username.value = "kim@schulz.dk"
+        wiz.input_password.value = "wrong-password"
+        wiz.step2_focus = 4
+        wiz, _ = wiz.update(KeyMsg("enter"))
+        self.assertEqual(wiz.step, 3)
+        # Sensible defaults derived from domain when Custom IMAP is used
+        self.assertEqual(wiz.input_imap_host.value, "imap.schulz.dk")
+        self.assertEqual(wiz.input_smtp_host.value, "smtp.schulz.dk")
+
+        # Try to finish Step 3 with invalid password -> must fail validation and NOT finish
+        wiz, cmd = wiz.update(KeyMsg("enter"))
+        self.assertIsNone(cmd)
+        self.assertIn("Invalid credentials", wiz.error_msg)
+
+        # Go back to Step 2 with Esc, update password, advance to Step 3, and finish
+        wiz, _ = wiz.update(KeyMsg("esc"))
+        self.assertEqual(wiz.step, 2)
+        wiz.input_password.value = "valid-secret-99"
+        wiz.step2_focus = 4
         wiz, _ = wiz.update(KeyMsg("enter"))
         self.assertEqual(wiz.step, 3)
 
-        # Finalize Step 3
         wiz, cmd = wiz.update(KeyMsg("enter"))
         self.assertIsNotNone(cmd)
         assert cmd is not None
         done_msg = cmd()
         self.assertIsNotNone(done_msg.account)
-        self.assertEqual(done_msg.account.email, "kim@fastmail.com")
-        self.assertEqual(done_msg.account.imap_host, "imap.fastmail.com")
+        self.assertEqual(done_msg.account.email, "kim@schulz.dk")
+        self.assertEqual(done_msg.account.imap_password, "valid-secret-99")
+
+    def test_account_settings_modal_edit_password_and_servers(self) -> None:
+        populate_test_store(self.store)
+        app = EspressoMailApp(
+            store=self.store,
+            show_splash=False,
+            credential_validator=lambda acc: (
+                (True, "Verified") if acc.imap_password == "new-updated-pass!" else (False, "Bad password")
+            ),
+        )
+        # Select acc_work and open AccountSettingsModal with 'A'
+        app.active_account_id = "acc_work"
+        app, _ = app.update(KeyMsg("A"))
+        self.assertIsInstance(app.active_modal, AccountSettingsModal)
+        modal = app.active_modal
+        assert isinstance(modal, AccountSettingsModal)
+        self.assertEqual(modal.current_account.id, "acc_work")
+
+        # Try saving with invalid password -> stays open and shows validation error
+        modal.input_password.value = "wrong"
+        app, _ = app.update(KeyMsg("ctrl+s"))
+        self.assertIsInstance(app.active_modal, AccountSettingsModal)
+        self.assertIn("Bad password", modal.error_msg)
+
+        # Update password and IMAP host, then save with Ctrl+S -> validates, persists to store, and closes modal
+        modal.input_password.value = "new-updated-pass!"
+        modal.input_imap_host.value = "mail2.schulz.dk"
+        app, _ = app.update(KeyMsg("ctrl+s"))
+        self.assertIsNone(app.active_modal)
+
+        updated_acc = self.store.get_account("acc_work")
+        assert updated_acc is not None
+        self.assertEqual(updated_acc.imap_password, "new-updated-pass!")
+        self.assertEqual(updated_acc.smtp_password, "new-updated-pass!")
+        self.assertEqual(updated_acc.imap_host, "mail2.schulz.dk")
 
     def test_image_renderer_backends_and_html_formatter(self) -> None:
-        self.store.seed_demo_data()
+        populate_test_store(self.store)
         msg = self.store.get_message("msg_thread1_1")
         assert msg is not None
         img_att = msg.attachments[0]
@@ -96,11 +165,11 @@ class TestUIAndApp(unittest.TestCase):
         self.assertIn("• Item A", converted)
 
     def test_3pane_app_keyboard_mouse_and_modals(self) -> None:
+        populate_test_store(self.store)
         with tempfile.TemporaryDirectory() as tmpdir:
             app = EspressoMailApp(
                 store=self.store,
                 show_splash=False,
-                demo_mode=True,
                 download_dir=tmpdir,
             )
             app, _ = app.update(WindowSizeMsg(125, 36))
@@ -122,7 +191,11 @@ class TestUIAndApp(unittest.TestCase):
             app, _ = app.update(KeyMsg("t"))
             self.assertTrue(app.threading_enabled)
 
-            # Download attachments with 'w'
+            # Download attachments with 'w' (select msg_thread1_1 which has attachments)
+            for idx, r in enumerate(app.message_rows):
+                if r.message.id == "msg_thread1_1":
+                    app.message_cursor = idx
+                    break
             app, _ = app.update(KeyMsg("w"))
             self.assertIn("Saved", app.status_message)
 

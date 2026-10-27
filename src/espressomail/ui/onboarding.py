@@ -1,21 +1,29 @@
-"""Guided, interactive first-time account configuration wizard for EspressoMail."""
+"""Guided, interactive account configuration wizard for EspressoMail."""
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from typing import Callable
 
 from espresso import Cmd, KeyMsg, Model, Msg
 from espresso.beans import EchoMode, SelectPrompt, SelectSubmitMsg, TextInput
 from espresso.crema import DOUBLE_BORDER, Align, Style, join_vertical, place
 
 from espressomail.models.entities import AccountConfig, SecurityType
+from espressomail.protocols.smtp_client import validate_account_credentials
 from espressomail.themes.engine import Theme
+
+SECURITY_CYCLE: tuple[SecurityType, ...] = (
+    SecurityType.SSL_TLS,
+    SecurityType.STARTTLS,
+    SecurityType.NONE,
+)
 
 
 @dataclass(frozen=True)
 class ProviderPreset:
-    """Pre-configured IMAP, SMTP, and ManageSieve endpoints for popular email providers."""
+    """Pre-configured IMAP, SMTP, and ManageSieve endpoints for email providers."""
 
     label: str
     imap_host: str
@@ -25,19 +33,19 @@ class ProviderPreset:
     smtp_port: int
     smtp_security: SecurityType
     sieve_port: int = 4190
-    is_demo: bool = False
+    is_custom: bool = False
 
 
 PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
     ProviderPreset(
-        label="☕ Multi-Account Demo Workspace (Instant Offline Tour)",
-        imap_host="imap.schulz.dk",
+        label="Custom IMAP / SMTP Server",
+        imap_host="",
         imap_port=993,
         imap_security=SecurityType.SSL_TLS,
-        smtp_host="smtp.schulz.dk",
+        smtp_host="",
         smtp_port=587,
         smtp_security=SecurityType.STARTTLS,
-        is_demo=True,
+        is_custom=True,
     ),
     ProviderPreset(
         label="Fastmail (IMAP SSL + SMTP STARTTLS + ManageSieve)",
@@ -84,41 +92,42 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         smtp_port=587,
         smtp_security=SecurityType.STARTTLS,
     ),
-    ProviderPreset(
-        label="Custom Self-Hosted IMAP & SMTP Server (Dovecot / Postfix)",
-        imap_host="mail.example.com",
-        imap_port=993,
-        imap_security=SecurityType.SSL_TLS,
-        smtp_host="mail.example.com",
-        smtp_port=587,
-        smtp_security=SecurityType.STARTTLS,
-    ),
 )
 
 
 @dataclass(frozen=True)
 class OnboardingCompleteMsg(Msg):
-    """Emitted when the onboarding wizard finishes or is cancelled."""
+    """Emitted when the onboarding wizard finishes validating and creating an account, or is cancelled."""
 
     account: AccountConfig | None
-    use_demo: bool = False
     generate_pgp: bool = True
     cancelled: bool = False
+    validation_summary: str = ""
 
 
 class OnboardingWizard(Model):
-    """Guided 3-step interactive onboarding flow for configuring email accounts."""
+    """Guided 3-step interactive onboarding flow with live IMAP/SMTP credential validation."""
 
-    def __init__(self, theme: Theme, allow_cancel: bool = False) -> None:
+    def __init__(
+        self,
+        theme: Theme,
+        allow_cancel: bool = False,
+        credential_validator: Callable[[AccountConfig], tuple[bool, str]] | None = None,
+    ) -> None:
         self.theme = theme
         self.allow_cancel = allow_cancel
-        self.step = 1  # 1: Provider Preset, 2: Identity & Credentials, 3: Server Endpoints & PGP
+        self.credential_validator: Callable[[AccountConfig], tuple[bool, str]] = (
+            credential_validator or validate_account_credentials
+        )
+        self.step = 1  # 1: Provider Preset, 2: Identity & Credentials, 3: Server Endpoints & Validation
         self.selected_preset: ProviderPreset = PROVIDER_PRESETS[0]
         self.error_msg = ""
+        self.status_msg = ""
         self.generate_pgp = True
+        self.show_password = False
 
         self.provider_prompt = SelectPrompt(
-            question="Select your email provider or launch the Demo Workspace:",
+            question="Select your email server type or provider preset:",
             options=[p.label for p in PROVIDER_PRESETS],
             default_index=0,
         )
@@ -127,18 +136,26 @@ class OnboardingWizard(Model):
         self.input_account_name = TextInput(placeholder="Work / Personal", prompt="Account Name:  ")
         self.input_full_name = TextInput(placeholder="Jane Doe", prompt="Full Name:     ")
         self.input_email = TextInput(placeholder="jane@example.com", prompt="Email Address: ")
+        self.input_username = TextInput(
+            placeholder="(Optional — defaults to Email Address)",
+            prompt="Login User:    ",
+        )
         self.input_password = TextInput(
-            placeholder="App Password or IMAP Password",
+            placeholder="IMAP / SMTP Password or App Password",
             prompt="Password:      ",
             echo_mode=EchoMode.PASSWORD,
         )
         self.step2_focus = 0
 
-        # Step 3 inputs
+        # Step 3 inputs & security selectors
         self.input_imap_host = TextInput(placeholder="imap.example.com", prompt="IMAP Host:     ")
         self.input_imap_port = TextInput(placeholder="993", prompt="IMAP Port:     ")
+        self.imap_security: SecurityType = SecurityType.SSL_TLS
         self.input_smtp_host = TextInput(placeholder="smtp.example.com", prompt="SMTP Host:     ")
         self.input_smtp_port = TextInput(placeholder="587", prompt="SMTP Port:     ")
+        self.smtp_security: SecurityType = SecurityType.STARTTLS
+        # Focus indices on Step 3:
+        # 0=IMAP Host, 1=IMAP Port, 2=IMAP Security, 3=SMTP Host, 4=SMTP Port, 5=SMTP Security
         self.step3_focus = 0
 
         self._sync_focus()
@@ -148,6 +165,7 @@ class OnboardingWizard(Model):
             self.input_account_name,
             self.input_full_name,
             self.input_email,
+            self.input_username,
             self.input_password,
         ]
         for idx, f in enumerate(s2_fields):
@@ -156,13 +174,13 @@ class OnboardingWizard(Model):
             else:
                 f.blur()
 
-        s3_fields = [
-            self.input_imap_host,
-            self.input_imap_port,
-            self.input_smtp_host,
-            self.input_smtp_port,
-        ]
-        for idx, f in enumerate(s3_fields):
+        s3_input_map = {
+            0: self.input_imap_host,
+            1: self.input_imap_port,
+            3: self.input_smtp_host,
+            4: self.input_smtp_port,
+        }
+        for idx, f in s3_input_map.items():
             if self.step == 3 and idx == self.step3_focus:
                 f.focus()
             else:
@@ -172,11 +190,12 @@ class OnboardingWizard(Model):
         return None
 
     def update(self, msg: Msg) -> tuple[OnboardingWizard, Cmd | None]:
-        """Handle multi-step navigation, form validation, and submission."""
+        """Handle multi-step navigation, form validation, and live IMAP/SMTP credential verification."""
         if isinstance(msg, KeyMsg) and str(msg.key) == "esc":
             if self.step > 1:
                 self.step -= 1
                 self.error_msg = ""
+                self.status_msg = ""
                 self._sync_focus()
                 return self, None
             if self.allow_cancel:
@@ -197,10 +216,17 @@ class OnboardingWizard(Model):
                 self.input_account_name,
                 self.input_full_name,
                 self.input_email,
+                self.input_username,
                 self.input_password,
             ]
             if isinstance(msg, KeyMsg):
                 k = str(msg.key)
+                if k == "ctrl+r":
+                    self.show_password = not self.show_password
+                    self.input_password.echo_mode = (
+                        EchoMode.NORMAL if self.show_password else EchoMode.PASSWORD
+                    )
+                    return self, None
                 if k in ("tab", "down"):
                     self.step2_focus = (self.step2_focus + 1) % len(s2_fields)
                     self._sync_focus()
@@ -221,49 +247,67 @@ class OnboardingWizard(Model):
             return self, cmd
 
         if self.step == 3:
-            s3_fields = [
-                self.input_imap_host,
-                self.input_imap_port,
-                self.input_smtp_host,
-                self.input_smtp_port,
-            ]
             if isinstance(msg, KeyMsg):
                 k = str(msg.key)
                 if k == "ctrl+g":
                     self.generate_pgp = not self.generate_pgp
                     return self, None
                 if k in ("tab", "down"):
-                    self.step3_focus = (self.step3_focus + 1) % len(s3_fields)
+                    self.step3_focus = (self.step3_focus + 1) % 6
                     self._sync_focus()
                     return self, None
                 if k in ("shift+tab", "up"):
-                    self.step3_focus = (self.step3_focus - 1) % len(s3_fields)
+                    self.step3_focus = (self.step3_focus - 1) % 6
                     self._sync_focus()
+                    return self, None
+                if self.step3_focus in (2, 5) and k in ("left", "right", "h", "l", " ", "space"):
+                    delta = 1 if k in ("right", "l", " ", "space") else -1
+                    if self.step3_focus == 2:
+                        cur_idx = SECURITY_CYCLE.index(self.imap_security)
+                        self.imap_security = SECURITY_CYCLE[(cur_idx + delta) % len(SECURITY_CYCLE)]
+                        if self.imap_security == SecurityType.SSL_TLS and self.input_imap_port.value == "143":
+                            self.input_imap_port.value = "993"
+                        elif self.imap_security != SecurityType.SSL_TLS and self.input_imap_port.value == "993":
+                            self.input_imap_port.value = "143"
+                    else:
+                        cur_idx = SECURITY_CYCLE.index(self.smtp_security)
+                        self.smtp_security = SECURITY_CYCLE[(cur_idx + delta) % len(SECURITY_CYCLE)]
+                        if self.smtp_security == SecurityType.SSL_TLS and self.input_smtp_port.value == "587":
+                            self.input_smtp_port.value = "465"
+                        elif self.smtp_security != SecurityType.SSL_TLS and self.input_smtp_port.value == "465":
+                            self.input_smtp_port.value = "587"
                     return self, None
                 if k == "enter":
                     return self._finalize_account()
 
-            active_input = s3_fields[self.step3_focus]
-            s3_fields[self.step3_focus], cmd = active_input.update(msg)
-            return self, cmd
+            s3_input_map = {
+                0: self.input_imap_host,
+                1: self.input_imap_port,
+                3: self.input_smtp_host,
+                4: self.input_smtp_port,
+            }
+            if self.step3_focus in s3_input_map:
+                target = s3_input_map[self.step3_focus]
+                _, cmd = target.update(msg)
+                return self, cmd
 
         return self, None
 
     def _handle_preset_selected(self, idx: int) -> tuple[OnboardingWizard, Cmd | None]:
         preset = PROVIDER_PRESETS[idx % len(PROVIDER_PRESETS)]
         self.selected_preset = preset
-        if preset.is_demo:
-            return self, lambda: OnboardingCompleteMsg(account=None, use_demo=True)
-
         self.input_imap_host.value = preset.imap_host
         self.input_imap_port.value = str(preset.imap_port)
+        self.imap_security = preset.imap_security
         self.input_smtp_host.value = preset.smtp_host
         self.input_smtp_port.value = str(preset.smtp_port)
-        if not self.input_account_name.value:
+        self.smtp_security = preset.smtp_security
+        if not preset.is_custom and not self.input_account_name.value:
             self.input_account_name.value = preset.label.split("(")[0].strip()[:20]
         self.step = 2
         self.step2_focus = 0
         self.error_msg = ""
+        self.status_msg = ""
         self._sync_focus()
         return self, None
 
@@ -272,13 +316,28 @@ class OnboardingWizard(Model):
         if not email_val or "@" not in email_val:
             self.error_msg = "Please enter a valid email address containing '@'."
             return self, None
+        if not self.input_password.value:
+            self.error_msg = "Password is required to authenticate with the mail server."
+            return self, None
+
+        domain = email_val.split("@")[-1]
         if not self.input_full_name.value.strip():
             self.input_full_name.value = email_val.split("@")[0].replace(".", " ").title()
         if not self.input_account_name.value.strip():
-            self.input_account_name.value = email_val.split("@")[-1]
+            self.input_account_name.value = domain
+        if not self.input_username.value.strip():
+            self.input_username.value = email_val
+
+        # If Custom IMAP/SMTP was selected and hosts are still blank, pre-fill sensible domain defaults
+        if not self.input_imap_host.value.strip():
+            self.input_imap_host.value = f"imap.{domain}"
+        if not self.input_smtp_host.value.strip():
+            self.input_smtp_host.value = f"smtp.{domain}"
+
         self.step = 3
         self.step3_focus = 0
         self.error_msg = ""
+        self.status_msg = ""
         self._sync_focus()
         return self, None
 
@@ -291,39 +350,58 @@ class OnboardingWizard(Model):
         try:
             imap_port = int(self.input_imap_port.value.strip() or "993")
             smtp_port = int(self.input_smtp_port.value.strip() or "587")
+            if not (1 <= imap_port <= 65535 and 1 <= smtp_port <= 65535):
+                raise ValueError
         except ValueError:
-            self.error_msg = "IMAP and SMTP ports must be valid numbers."
+            self.error_msg = "IMAP and SMTP ports must be valid port numbers (1–65535)."
+            return self, None
+
+        email_addr = self.input_email.value.strip()
+        username = self.input_username.value.strip() or email_addr
+        password = self.input_password.value
+        if not password:
+            self.error_msg = "Password is required to validate account credentials."
             return self, None
 
         acc = AccountConfig(
             id=f"acc_{uuid.uuid4().hex[:8]}",
-            name=self.input_account_name.value.strip(),
-            email=self.input_email.value.strip(),
-            full_name=self.input_full_name.value.strip(),
+            name=self.input_account_name.value.strip() or email_addr,
+            email=email_addr,
+            full_name=self.input_full_name.value.strip() or email_addr,
             imap_host=imap_host,
             imap_port=imap_port,
-            imap_security=self.selected_preset.imap_security,
-            imap_username=self.input_email.value.strip(),
-            imap_password=self.input_password.value,
+            imap_security=self.imap_security,
+            imap_username=username,
+            imap_password=password,
             smtp_host=smtp_host,
             smtp_port=smtp_port,
-            smtp_security=self.selected_preset.smtp_security,
-            smtp_username=self.input_email.value.strip(),
-            smtp_password=self.input_password.value,
+            smtp_security=self.smtp_security,
+            smtp_username=username,
+            smtp_password=password,
             sieve_host=imap_host,
             sieve_port=self.selected_preset.sieve_port,
         )
+
+        # Validate IMAP and SMTP credentials before completing onboarding
+        ok, summary = self.credential_validator(acc)
+        if not ok:
+            self.error_msg = summary
+            self.status_msg = ""
+            return self, None
+
+        self.error_msg = ""
+        self.status_msg = summary
         return self, lambda: OnboardingCompleteMsg(
             account=acc,
-            use_demo=False,
             generate_pgp=self.generate_pgp,
+            validation_summary=summary,
         )
 
     def view(self, width: int = 100, height: int = 30) -> str:
         """Render the guided onboarding wizard card."""
         step_badges = []
         for idx, title in enumerate(
-            ("1. Provider Preset", "2. Identity & Auth", "3. Server & PGP"), start=1
+            ("1. Server Type", "2. Identity & Auth", "3. Endpoints & Verify"), start=1
         ):
             if idx == self.step:
                 step_badges.append(
@@ -347,44 +425,64 @@ class OnboardingWizard(Model):
                 Align.LEFT,
                 Style()
                 .foreground(self.theme.fg_secondary)
-                .render("Welcome to EspressoMail! Configure your first IMAP/SMTP account or explore the Demo Workspace:"),
+                .render("Welcome to EspressoMail! Configure your IMAP & SMTP email account:"),
                 "",
                 self.provider_prompt.view(),
                 "",
                 Style()
                 .foreground(self.theme.fg_muted)
-                .render("[↑/↓] Navigate   [Enter] Select Provider" + ("   [Esc] Cancel" if self.allow_cancel else "")),
+                .render(
+                    "[↑/↓] Navigate   [Enter] Select Option"
+                    + ("   [Esc] Cancel" if self.allow_cancel else "")
+                ),
             )
         elif self.step == 2:
+            pwd_hint = "Plaintext (Ctrl+R to mask)" if self.show_password else "Masked (Ctrl+R to reveal)"
             body = join_vertical(
                 Align.LEFT,
                 Style()
                 .bold(True)
                 .foreground(self.theme.accent_secondary)
-                .render(f"Provider: {self.selected_preset.label}"),
+                .render(f"Selected: {self.selected_preset.label}"),
                 "",
                 self.input_account_name.view(),
                 self.input_full_name.view(),
                 self.input_email.view(),
+                self.input_username.view(),
                 self.input_password.view(),
+                Style().foreground(self.theme.fg_muted).render(f"  Password mode: {pwd_hint}"),
                 "",
                 Style()
                 .foreground(self.theme.fg_muted)
-                .render("[Tab/↑/↓] Next/Prev Field   [Enter] Continue to Step 3   [Esc] Back"),
+                .render("[Tab/↑/↓] Next/Prev Field   [Ctrl+R] Show/Hide Password   [Enter] Next   [Esc] Back"),
             )
         else:
+            imap_sec_style = (
+                Style().bold(True).foreground(self.theme.accent_primary)
+                if self.step3_focus == 2
+                else Style().foreground(self.theme.fg_primary)
+            )
+            smtp_sec_style = (
+                Style().bold(True).foreground(self.theme.accent_primary)
+                if self.step3_focus == 5
+                else Style().foreground(self.theme.fg_primary)
+            )
+            imap_sec_row = f"IMAP Security: ◀ {imap_sec_style.render(self.imap_security.value.upper())} ▶"
+            smtp_sec_row = f"SMTP Security: ◀ {smtp_sec_style.render(self.smtp_security.value.upper())} ▶"
             pgp_mark = "[x]" if self.generate_pgp else "[ ]"
             body = join_vertical(
                 Align.LEFT,
                 Style()
                 .bold(True)
                 .foreground(self.theme.accent_secondary)
-                .render(f"Endpoints for {self.input_email.value}:"),
+                .render(f"Endpoints & TLS for {self.input_email.value}:"),
                 "",
                 self.input_imap_host.view(),
                 self.input_imap_port.view(),
+                imap_sec_row,
                 self.input_smtp_host.view(),
                 self.input_smtp_port.view(),
+                smtp_sec_row,
                 "",
                 Style()
                 .foreground(self.theme.pgp_verified_fg if self.generate_pgp else self.theme.fg_muted)
@@ -392,7 +490,9 @@ class OnboardingWizard(Model):
                 "",
                 Style()
                 .foreground(self.theme.fg_muted)
-                .render("[Tab/↑/↓] Next/Prev Field   [Ctrl+G] Toggle PGP   [Enter] Finish Setup   [Esc] Back"),
+                .render(
+                    "[Tab/↑/↓] Field   [Space/←/→] Cycle TLS   [Ctrl+G] PGP   [Enter] Validate & Finish   [Esc] Back"
+                ),
             )
 
         err_block = (
@@ -400,8 +500,13 @@ class OnboardingWizard(Model):
             if self.error_msg
             else ""
         )
+        ok_block = (
+            "\n" + Style().bold(True).foreground(self.theme.pgp_verified_fg).render(f"✔ {self.status_msg}")
+            if self.status_msg
+            else ""
+        )
 
-        card_content = f"{header_line}\n\n{body}{err_block}"
+        card_content = f"{header_line}\n\n{body}{err_block}{ok_block}"
         card = (
             Style()
             .border(DOUBLE_BORDER)
@@ -414,7 +519,7 @@ class OnboardingWizard(Model):
                 align=Align.CENTER,
             )
             .padding(1, 3)
-            .width(min(78, max(56, width - 8)))
+            .width(min(82, max(58, width - 6)))
             .render(card_content)
         )
 

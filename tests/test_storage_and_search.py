@@ -4,28 +4,150 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from pathlib import Path
 
-from espressomail.models import AccountConfig, Attachment, Contact, EmailMessage, PGPStatus
+from espressomail.models import (
+    AccountConfig,
+    Attachment,
+    Contact,
+    EmailMessage,
+    PGPStatus,
+    SecurityType,
+)
 from espressomail.search import FuzzySearchEngine, fuzzy_score, parse_search_query
-from espressomail.storage import LocalStore
+from espressomail.storage import LocalStore, create_sample_ppm_image
+
+
+def populate_test_store(store: LocalStore) -> None:
+    """Populate an in-memory LocalStore with test accounts, messages, attachments, and contacts."""
+    acc1 = AccountConfig(
+        id="acc_work",
+        name="Schulz Engineering",
+        email="kim@schulz.dk",
+        full_name="Kim Schulz",
+        imap_host="imap.schulz.dk",
+        imap_port=993,
+        imap_security=SecurityType.SSL_TLS,
+        imap_username="kim@schulz.dk",
+        imap_password="initial-password-1",
+        smtp_host="smtp.schulz.dk",
+        smtp_port=587,
+        smtp_security=SecurityType.STARTTLS,
+        smtp_username="kim@schulz.dk",
+        smtp_password="initial-password-1",
+    )
+    acc2 = AccountConfig(
+        id="acc_oss",
+        name="Espresso Open Source",
+        email="maintainers@espressotui.dev",
+        full_name="Kim Schulz",
+        imap_host="imap.fastmail.com",
+        imap_port=993,
+        imap_security=SecurityType.SSL_TLS,
+        imap_username="maintainers@espressotui.dev",
+        imap_password="initial-password-2",
+        smtp_host="smtp.fastmail.com",
+        smtp_port=587,
+        smtp_security=SecurityType.STARTTLS,
+        smtp_username="maintainers@espressotui.dev",
+        smtp_password="initial-password-2",
+    )
+    store.save_account(acc1)
+    store.save_account(acc2)
+
+    ppm_bytes = create_sample_ppm_image(24, 14)
+
+    msgs = [
+        EmailMessage(
+            id="msg_thread1_1",
+            account_id="acc_oss",
+            folder="INBOX",
+            uid=101,
+            message_id="<release-1.2-plan@espressotui.dev>",
+            thread_id="thread_espresso_12",
+            subject="[EspressoTUI] Release v1.2.0 checklist & terminal graphics benchmark",
+            sender_name="Elena Rostova",
+            sender_email="elena@terminalcraft.io",
+            recipients_to=["maintainers@espressotui.dev"],
+            date_iso="2026-10-27T09:15:00+00:00",
+            is_read=True,
+            is_starred=True,
+            pgp_status=PGPStatus.SIGNED_VERIFIED,
+            body_text="Sixel and Kitty rasterization benchmarks completed.",
+            attachments=[
+                Attachment(
+                    id="att_mascot_ppm",
+                    message_id="msg_thread1_1",
+                    filename="espresso_mascot.ppm",
+                    content_type="image/x-portable-pixmap",
+                    size_bytes=len(ppm_bytes),
+                    is_inline=True,
+                    data=ppm_bytes,
+                ),
+                Attachment(
+                    id="att_bench_json",
+                    message_id="msg_thread1_1",
+                    filename="graphics_benchmark_v1.2.json",
+                    content_type="application/json",
+                    size_bytes=64,
+                    data=b'{"sixel_ms": 2.8, "kitty_ms": 1.4}\n',
+                ),
+            ],
+        ),
+        EmailMessage(
+            id="msg_thread1_3",
+            account_id="acc_oss",
+            folder="INBOX",
+            uid=103,
+            message_id="<release-1.2-reply2@espressotui.dev>",
+            in_reply_to="<release-1.2-plan@espressotui.dev>",
+            references=["<release-1.2-plan@espressotui.dev>"],
+            thread_id="thread_espresso_12",
+            subject="Re: [EspressoTUI] Release v1.2.0 checklist & terminal graphics benchmark",
+            sender_name="Elena Rostova",
+            sender_email="elena@terminalcraft.io",
+            recipients_to=["maintainers@espressotui.dev"],
+            date_iso="2026-10-27T11:30:00+00:00",
+            is_read=False,
+            is_starred=True,
+            body_text="Verified attachment download and SQLite persistence.",
+        ),
+        EmailMessage(
+            id="msg_work_pgp",
+            account_id="acc_work",
+            folder="INBOX",
+            uid=201,
+            message_id="<sec-audit-2026@schulz.dk>",
+            thread_id="thread_sec_audit",
+            subject="[PGP-ENCRYPTED] Production WireGuard & Nftables Mesh Key Rotation",
+            sender_name="Marcus Vance",
+            sender_email="marcus@cyberguard.dk",
+            recipients_to=["kim@schulz.dk"],
+            date_iso="2026-10-27T12:45:00+00:00",
+            is_read=False,
+            is_starred=True,
+            pgp_status=PGPStatus.DECRYPTED_VERIFIED,
+            body_text="All edge nodes rotated WireGuard preshared keys.",
+        ),
+    ]
+    for m in msgs:
+        store.save_message(m, harvest_contacts=True)
 
 
 class TestStorageAndSearch(unittest.TestCase):
     def setUp(self) -> None:
         self.store = LocalStore(":memory:")
-        self.store.seed_demo_data()
+        populate_test_store(self.store)
 
     def tearDown(self) -> None:
         self.store.close()
 
-    def test_seeded_accounts_and_unified_counts(self) -> None:
+    def test_accounts_and_unified_counts(self) -> None:
         accounts = self.store.list_accounts()
         self.assertEqual(len(accounts), 2)
         counts = self.store.get_unified_counts()
         unread_inbox, total_inbox = counts["INBOX"]
-        self.assertGreaterEqual(total_inbox, 4)
-        self.assertGreaterEqual(unread_inbox, 1)
+        self.assertEqual(total_inbox, 3)
+        self.assertEqual(unread_inbox, 2)
 
     def test_message_flags_and_trash_lifecycle(self) -> None:
         msg = self.store.get_message("msg_thread1_3")
@@ -72,7 +194,7 @@ class TestStorageAndSearch(unittest.TestCase):
 
     def test_contacts_address_book(self) -> None:
         contacts = self.store.list_contacts()
-        self.assertGreaterEqual(len(contacts), 3)
+        self.assertGreaterEqual(len(contacts), 2)
         new_contact = Contact(
             id="contact_test",
             name="Linus Torvalds",

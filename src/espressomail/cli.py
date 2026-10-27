@@ -33,11 +33,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the local SQLite email database file (default: ~/.local/share/espressomail/espressomail.db)",
     )
     parser.add_argument(
-        "--demo",
-        action="store_true",
-        help="Populate and launch with multi-account demo emails, threads, PGP messages, and Sieve filters",
-    )
-    parser.add_argument(
         "--no-splash",
         action="store_true",
         help="Skip the animated startup splash screen",
@@ -71,7 +66,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     app = EspressoMailApp(
         store=store,
         show_splash=not args.no_splash,
-        demo_mode=args.demo,
         initial_theme=args.theme,
     )
     Program(app, alt_screen=True, mouse=True).run()

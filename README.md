@@ -38,7 +38,8 @@
 
 ### 📬 Core Email & Advanced Features
 * **Multi-Account IMAP & SMTP**: Connect multiple work and personal accounts simultaneously over SSL/TLS or STARTTLS.
-* **Guided Onboarding Wizard**: Interactive 3-step setup flow with built-in presets for **Fastmail**, **Gmail**, **Outlook / Microsoft 365**, **ProtonMail Bridge**, **iCloud**, **Custom Dovecot/Postfix**, and an instant **Offline Demo Workspace**.
+* **Guided Onboarding Wizard (`O`)**: Interactive 3-step setup flow with **Custom IMAP / SMTP Server** as the default first option alongside presets for **Fastmail**, **Gmail**, **Outlook / Microsoft 365**, **ProtonMail Bridge**, and **iCloud**, validating IMAP and SMTP credentials before completing setup.
+* **Account Settings Editor (`A`)**: Modify existing account settings at any time (password, login username, IMAP/SMTP hosts, ports, SSL/TLS or STARTTLS security, display name, signature, or account deletion) with live connection testing (`Ctrl+T`).
 * **Local SQLite Store & Offline Access**: WAL-mode SQLite database caching accounts, folders, messages, MIME attachments, drafts, contacts, and Sieve scripts.
 * **Instant Fuzzy Search (`/`)**: Typo-tolerant multi-field fuzzy ranking combined with structured search operators (`from:`, `to:`, `subject:`, `folder:`, `has:attachment`, `is:unread`, `is:starred`, `is:pgp`).
 * **ManageSieve Filter Manager (`F`)**: Visual rule builder, RFC 5228 Sieve compiler, static syntax validator, local rule runner, and RFC 5804 ManageSieve uploader.
@@ -78,11 +79,8 @@ pip install -e ".[dev,images]"
 # Launch EspressoMail (starts onboarding wizard on first run)
 espressomail
 
-# Launch with pre-populated multi-account demo emails, threads, PGP messages, and Sieve filters
-espressomail --demo
-
 # Launch with a specific color theme and Sixel image rendering, skipping the splash screen
-espressomail --demo --no-splash --theme catppuccin --image-backend sixel
+espressomail --no-splash --theme catppuccin --image-backend sixel
 
 # Use a custom SQLite database file path
 espressomail --db ~/mail/custom_store.db
@@ -104,7 +102,7 @@ espressomail --db ~/mail/custom_store.db
 | **`f`** | Forward selected message |
 | **`s`** | Toggle Star / Flag (`★`) on selected message |
 | **`u`** | Toggle Read / Unread (`●`) status |
-| **`e`** | Archive selected message |
+| **`e`** | Archive selected message (or Edit Account Settings when Mailboxes pane is focused) |
 | **`d` / `Delete`** | Move message to Trash (or permanently delete if already in Trash) |
 | **`X`** | Empty Trash permanently |
 | **`w`** | Download / save incoming attachments from selected email to disk |
@@ -117,7 +115,8 @@ espressomail --db ~/mail/custom_store.db
 | **`B`** | Open Local Address Book & Contacts Manager |
 | **`F`** | Open Sieve Filter Rules & RFC 5228 Script Manager |
 | **`G`** | Open GPG / OpenPGP Keyring & Security Manager |
-| **`O`** | Launch Guided Account Onboarding Wizard |
+| **`A`** | Edit Existing Account Settings (Password, IMAP/SMTP hosts, ports, TLS) |
+| **`O`** | Launch Guided Account Onboarding Wizard (Add New Account) |
 | **`S`** | Synchronize all enabled IMAP accounts |
 | **`?`** | Show Keyboard & Mouse Shortcuts Help Modal |
 | **`q`** | Quit EspressoMail |

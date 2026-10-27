@@ -152,12 +152,13 @@ class SMTPClient:
         self.account = account
         self.timeout = timeout
 
-    def send_mime_message(
-        self,
-        mime_msg: StdlibEmailMessage,
-        all_recipients: Sequence[str] | None = None,
-    ) -> None:
-        """Transmit an RFC 5322 EmailMessage via the account's configured SMTP server."""
+    def _connect_and_authenticate(self) -> smtplib.SMTP:
+        """Connect to the configured SMTP server, negotiate TLS, and authenticate."""
+        if not self.account.smtp_host.strip():
+            raise ValueError("SMTP host is required.")
+        if not self.account.smtp_username.strip() or not self.account.smtp_password:
+            raise ValueError("SMTP username and password are required.")
+
         ctx = ssl.create_default_context()
         if self.account.smtp_security == SecurityType.SSL_TLS:
             server: smtplib.SMTP = smtplib.SMTP_SSL(
@@ -178,11 +179,62 @@ class SMTPClient:
             if self.account.smtp_security == SecurityType.STARTTLS:
                 server.starttls(context=ctx)
                 server.ehlo()
-            if self.account.smtp_password:
-                server.login(self.account.smtp_username, self.account.smtp_password)
+            server.login(self.account.smtp_username, self.account.smtp_password)
+            return server
+        except Exception:
+            try:
+                server.quit()
+            except Exception:
+                pass
+            raise
+
+    def verify_credentials(self) -> tuple[bool, str]:
+        """Validate SMTP server reachability, TLS handshake, and user credentials."""
+        try:
+            server = self._connect_and_authenticate()
+            try:
+                server.quit()
+            except Exception:
+                pass
+            return True, f"SMTP login verified ({self.account.smtp_host}:{self.account.smtp_port})"
+        except smtplib.SMTPAuthenticationError as exc:
+            return False, f"SMTP authentication failed ({self.account.smtp_host}:{self.account.smtp_port}): {exc}"
+        except Exception as exc:
+            return False, f"SMTP connection failed ({self.account.smtp_host}:{self.account.smtp_port}): {exc}"
+
+    def send_mime_message(
+        self,
+        mime_msg: StdlibEmailMessage,
+        all_recipients: Sequence[str] | None = None,
+    ) -> None:
+        """Transmit an RFC 5322 EmailMessage via the account's configured SMTP server."""
+        server = self._connect_and_authenticate()
+        try:
             server.send_message(mime_msg, to_addrs=list(all_recipients) if all_recipients else None)
         finally:
             try:
                 server.quit()
             except Exception:
                 pass
+
+
+def validate_account_credentials(
+    account: AccountConfig,
+    timeout: float = 8.0,
+) -> tuple[bool, str]:
+    """Verify both IMAP and SMTP server reachability and credentials for an account."""
+    from espressomail.protocols.imap_client import IMAPClient
+
+    if not account.imap_password or not account.smtp_password:
+        return False, "Account password is required to authenticate with IMAP/SMTP."
+
+    imap_ok, imap_msg = IMAPClient(account, timeout=timeout).verify_credentials()
+    if not imap_ok:
+        return False, imap_msg
+
+    smtp_ok, smtp_msg = SMTPClient(account, timeout=timeout).verify_credentials()
+    if not smtp_ok:
+        return False, smtp_msg
+
+    return True, f"Verified IMAP ({account.imap_host}:{account.imap_port}) & SMTP ({account.smtp_host}:{account.smtp_port})"
+

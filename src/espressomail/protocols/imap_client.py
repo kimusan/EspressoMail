@@ -255,6 +255,11 @@ class IMAPClient:
 
     def connect(self) -> None:
         """Connect and authenticate to the configured IMAP server."""
+        if not self.account.imap_host.strip():
+            raise ValueError("IMAP host is required.")
+        if not self.account.imap_username.strip() or not self.account.imap_password:
+            raise ValueError("IMAP username and password are required.")
+
         ctx = ssl.create_default_context()
         if self.account.imap_security == SecurityType.SSL_TLS:
             self._conn = imaplib.IMAP4_SSL(
@@ -272,8 +277,20 @@ class IMAPClient:
             if self.account.imap_security == SecurityType.STARTTLS:
                 self._conn.starttls(ssl_context=ctx)
 
-        if self.account.imap_password:
-            self._conn.login(self.account.imap_username, self.account.imap_password)
+        self._conn.login(self.account.imap_username, self.account.imap_password)
+
+    def verify_credentials(self) -> tuple[bool, str]:
+        """Validate IMAP server reachability, TLS handshake, and user credentials."""
+        try:
+            self.connect()
+            self.disconnect()
+            return True, f"IMAP login verified ({self.account.imap_host}:{self.account.imap_port})"
+        except imaplib.IMAP4.error as exc:
+            self.disconnect()
+            return False, f"IMAP authentication failed ({self.account.imap_host}:{self.account.imap_port}): {exc}"
+        except Exception as exc:
+            self.disconnect()
+            return False, f"IMAP connection failed ({self.account.imap_host}:{self.account.imap_port}): {exc}"
 
     def disconnect(self) -> None:
         """Gracefully close and logout from the IMAP connection."""

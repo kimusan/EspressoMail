@@ -41,7 +41,8 @@ DEFAULT_MENUS: tuple[MenuCategory, ...] = (
         hotkey="f",
         items=(
             MenuItem("sync_all", "Sync All Accounts", "S"),
-            MenuItem("new_account", "Add / Configure Account...", "O"),
+            MenuItem("account_settings", "Edit Account Settings...", "A"),
+            MenuItem("new_account", "Add New Account...", "O"),
             MenuItem("save_attachments", "Download Attachments", "w"),
             MenuItem("empty_trash", "Empty Trash", "X"),
             MenuItem("quit_app", "Quit EspressoMail", "q"),

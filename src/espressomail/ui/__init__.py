@@ -9,6 +9,7 @@ from espressomail.ui.formatter import (
 from espressomail.ui.image_renderer import ImageRenderBackend, TerminalImageRenderer
 from espressomail.ui.menus import DEFAULT_MENUS, MenuActionMsg, MenuBar, MenuCategory, MenuItem
 from espressomail.ui.modals import (
+    AccountSettingsModal,
     AddressBookModal,
     ComposeModal,
     ComposeSubmittedMsg,
@@ -42,6 +43,7 @@ __all__ = [
     "format_email_body",
     "format_message_for_reading_pane",
     "html_to_terminal_text",
+    "AccountSettingsModal",
     "ComposeModal",
     "ComposeSubmittedMsg",
     "SearchModal",

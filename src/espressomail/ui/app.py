@@ -47,8 +47,14 @@ from espressomail.models.entities import (
     FolderType,
     PGPStatus,
 )
+from typing import Callable
+
 from espressomail.protocols.imap_client import IMAPClient
-from espressomail.protocols.smtp_client import SMTPClient, build_mime_message
+from espressomail.protocols.smtp_client import (
+    SMTPClient,
+    build_mime_message,
+    validate_account_credentials,
+)
 from espressomail.protocols.threading import build_threads
 from espressomail.storage.database import LocalStore, default_data_dir
 from espressomail.themes.engine import Theme, ThemeEngine
@@ -56,6 +62,7 @@ from espressomail.ui.formatter import format_message_for_reading_pane
 from espressomail.ui.image_renderer import ImageRenderBackend, TerminalImageRenderer
 from espressomail.ui.menus import MenuActionMsg, MenuBar
 from espressomail.ui.modals import (
+    AccountSettingsModal,
     AddressBookModal,
     ComposeModal,
     ComposeSubmittedMsg,
@@ -110,13 +117,12 @@ class EspressoMailApp(Model):
         self,
         store: LocalStore | None = None,
         show_splash: bool = True,
-        demo_mode: bool = False,
         initial_theme: str = "",
         download_dir: str | Path | None = None,
+        credential_validator: Callable[[AccountConfig], tuple[bool, str]] | None = None,
     ) -> None:
         self.store = store if store is not None else LocalStore()
-        if demo_mode and not self.store.list_accounts():
-            self.store.seed_demo_data()
+        self.credential_validator = credential_validator or validate_account_credentials
 
         saved_theme = initial_theme or self.store.get_setting("theme", "espresso")
         self.theme_engine = ThemeEngine(saved_theme)
@@ -140,7 +146,11 @@ class EspressoMailApp(Model):
         self.show_splash = show_splash
         self.splash = SplashScreen(self.theme)
         self.show_onboarding = False
-        self.onboarding = OnboardingWizard(self.theme, allow_cancel=False)
+        self.onboarding = OnboardingWizard(
+            self.theme,
+            allow_cancel=False,
+            credential_validator=self.credential_validator,
+        )
 
         # Active 3-pane state
         self.focused_pane = "messages"  # "folders", "messages", "reader"
@@ -160,7 +170,7 @@ class EspressoMailApp(Model):
         self.reader_viewport = Viewport(width=50, height=24)
         self._last_rendered_msg_key = ""
 
-        # Active modal overlay (ComposeModal, SearchModal, AddressBookModal, SieveModal, PGPModal, HelpModal)
+        # Active modal overlay
         self.active_modal: Model | None = None
 
         # Command Palette (Ctrl+P)
@@ -189,7 +199,8 @@ class EspressoMailApp(Model):
             PaletteItem("address_book", "Tools: Local Address Book", "Manage contacts and PGP fingerprints", "B", "Tools"),
             PaletteItem("sieve_filters", "Tools: ManageSieve Filter Rules", "Configure RFC 5228 Sieve scripts", "F", "Tools"),
             PaletteItem("pgp_manager", "Security: GPG/PGP Keyring Manager", "Inspect keys, sign, verify, and decrypt", "G", "Security"),
-            PaletteItem("new_account", "Accounts: Onboarding Wizard", "Add or configure an IMAP/SMTP account", "O", "Accounts"),
+            PaletteItem("account_settings", "Accounts: Edit Account Settings", "Update password, IMAP/SMTP hosts, ports, and TLS", "A", "Accounts"),
+            PaletteItem("new_account", "Accounts: Add New Account", "Launch onboarding wizard for a new account", "O", "Accounts"),
             PaletteItem("sync_all", "Accounts: Sync IMAP Mailboxes", "Synchronize all enabled accounts", "S", "Accounts"),
             PaletteItem("empty_trash", "Mail: Empty Trash", "Permanently delete trashed messages", "X", "Mail"),
             PaletteItem("show_shortcuts", "Help: Keyboard & Mouse Shortcuts", "Display full hotkey guide", "?", "Help"),
@@ -414,7 +425,11 @@ class EspressoMailApp(Model):
                 self.show_splash = False
                 if not self.store.list_accounts():
                     self.show_onboarding = True
-                    self.onboarding = OnboardingWizard(self.theme, allow_cancel=False)
+                    self.onboarding = OnboardingWizard(
+                        self.theme,
+                        allow_cancel=False,
+                        credential_validator=self.credential_validator,
+                    )
                 return self, None
             self.splash, cmd = self.splash.update(msg)
             return self, cmd
@@ -423,17 +438,18 @@ class EspressoMailApp(Model):
         if self.show_onboarding:
             if isinstance(msg, OnboardingCompleteMsg):
                 self.show_onboarding = False
-                if msg.use_demo:
-                    self.store.seed_demo_data()
-                    self.status_message = "Loaded Multi-Account Demo Workspace."
-                elif msg.account is not None:
+                if msg.account is not None:
                     if msg.generate_pgp:
                         k_info = self.pgp.generate_key(msg.account.full_name, msg.account.email)
                         msg.account.pgp_key_id = k_info.key_id
                     self.store.save_account(msg.account)
                     self.active_account_id = msg.account.id
                     self.active_folder = "INBOX"
-                    self.status_message = f"Configured account {msg.account.email}!"
+                    self.status_message = (
+                        f"✔ Verified and configured account {msg.account.email}!"
+                    )
+                    self.refresh_data()
+                    return self, self._sync_accounts_cmd
                 self.refresh_data()
                 return self, None
             self.onboarding, cmd = self.onboarding.update(msg)
@@ -462,6 +478,13 @@ class EspressoMailApp(Model):
                 if msg.status_note:
                     self.status_message = msg.status_note
                 self.refresh_data()
+                if not self.store.list_accounts():
+                    self.show_onboarding = True
+                    self.onboarding = OnboardingWizard(
+                        self.theme,
+                        allow_cancel=False,
+                        credential_validator=self.credential_validator,
+                    )
                 return self, None
             if isinstance(msg, ComposeSubmittedMsg):
                 return self._handle_compose_submitted(msg)
@@ -546,6 +569,8 @@ class EspressoMailApp(Model):
         if k == "u":
             return self._execute_action("toggle_read")
         if k == "e":
+            if self.focused_pane == "folders":
+                return self._execute_action("account_settings")
             return self._execute_action("archive_msg")
         if k in ("d", "delete"):
             return self._execute_action("trash_msg")
@@ -569,6 +594,8 @@ class EspressoMailApp(Model):
             return self._execute_action("sieve_filters")
         if k == "G":
             return self._execute_action("pgp_manager")
+        if k == "A":
+            return self._execute_action("account_settings")
         if k == "O":
             return self._execute_action("new_account")
         if k == "S":
@@ -750,9 +777,22 @@ class EspressoMailApp(Model):
             )
             return self, None
 
+        if action_id == "account_settings":
+            self.active_modal = AccountSettingsModal(
+                store=self.store,
+                theme=self.theme,
+                active_account_id=self.active_account_id,
+                credential_validator=self.credential_validator,
+            )
+            return self, None
+
         if action_id == "new_account":
             self.show_onboarding = True
-            self.onboarding = OnboardingWizard(self.theme, allow_cancel=True)
+            self.onboarding = OnboardingWizard(
+                self.theme,
+                allow_cancel=True,
+                credential_validator=self.credential_validator,
+            )
             return self, None
 
         if action_id == "unified_inbox":

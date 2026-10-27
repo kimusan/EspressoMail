@@ -4,22 +4,30 @@ Welcome to **EspressoMail**! This guide covers setting up your accounts, navigat
 
 ---
 
-## 1. First-Time Account Setup (Onboarding Wizard)
+## 1. Account Setup & Editing Account Settings
 
-When you launch `espressomail` for the first time (or press **`O`** / **File → Add / Configure Account...** at any time), the guided 3-step Onboarding Wizard opens:
+### First-Time Account Setup (`O` / Onboarding Wizard)
+When you launch `espressomail` for the first time (or press **`O`** / **File → Add New Account...** at any time), the guided 3-step Onboarding Wizard opens:
 
-1. **Step 1 — Choose Provider Preset**:
-   - **Multi-Account Demo Workspace**: Immediately populates two sample accounts (`Schulz Engineering` and `Espresso Open Source`) with threaded conversations, PGP messages, attachments, contacts, and Sieve rules so you can test every feature offline.
+1. **Step 1 — Choose Server Type or Preset**:
+   - **Custom IMAP / SMTP Server** *(Default first option)*: Configure any standard self-hosted or custom IMAP and SMTP server (Dovecot, Postfix, Stalwart, Cyrus, etc.).
    - **Fastmail**: Pre-fills `imap.fastmail.com:993` (SSL/TLS), `smtp.fastmail.com:587` (STARTTLS), and ManageSieve port `4190`.
    - **Gmail / Google Workspace**: Pre-fills `imap.gmail.com:993` and `smtp.gmail.com:587` (use a 16-character Google App Password).
    - **Outlook / Microsoft 365**: Pre-fills `outlook.office365.com:993` and `smtp.office365.com:587`.
    - **ProtonMail Bridge**: Pre-fills `127.0.0.1:1143` (IMAP STARTTLS) and `127.0.0.1:1025` (SMTP STARTTLS).
-   - **Apple iCloud Mail** & **Custom Self-Hosted Server**.
+   - **Apple iCloud Mail**: Pre-fills `imap.mail.me.com:993` and `smtp.mail.me.com:587`.
 2. **Step 2 — Identity & Credentials**:
-   - Enter your Account Label, Full Name, Email Address, and Password. Use `Tab` / `Shift+Tab` to move between fields and `Enter` to advance.
-3. **Step 3 — Server Endpoints & OpenPGP**:
-   - Verify the IMAP/SMTP hostnames and ports.
+   - Enter your Account Label, Full Name, Email Address, Login Username (optional, defaults to Email Address), and Password (press `Ctrl+R` to toggle password visibility). Use `Tab` / `Shift+Tab` to move between fields and `Enter` to advance.
+3. **Step 3 — Server Endpoints, TLS Security & Credential Validation**:
+   - Verify or customize the IMAP/SMTP hostnames, ports, and TLS modes (`SSL_TLS`, `STARTTLS`, or `NONE` using `Space` or `←`/`→`).
    - Leave `[x] Auto-generate Ed25519 OpenPGP Key Pair` enabled (or toggle with `Ctrl+G`) to automatically provision a signing/encryption key for the account.
+   - Press **`Enter`** to validate both IMAP and SMTP credentials against the remote servers before finishing onboarding. If authentication fails, the wizard displays the server error so you can adjust your password or endpoints immediately.
+
+### Changing Existing Account Settings (`A` / `File → Edit Account Settings...`)
+Press **`A`** anywhere in the main workspace (or press **`e`** while focused on the `📁 Mailboxes` pane) to open the **Account Settings & Credentials** modal:
+* Switch between configured accounts at the top using `←` / `→`.
+* Update your **Password** (press `Ctrl+R` to reveal/mask), **Login Username**, **Account Name**, **Full Name**, **IMAP/SMTP Hosts & Ports**, **TLS Security**, or **Signature**.
+* Press **`Enter` / `Ctrl+S`** to validate the updated credentials and save, **`Ctrl+T`** to test authentication live, **`Ctrl+F`** to save offline without a live server check, or **`Ctrl+D`** to delete the account.
 
 ---
 
