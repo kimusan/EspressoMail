@@ -8,6 +8,7 @@ import io
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.parse
 import urllib.request
@@ -28,25 +29,25 @@ from espressomail.themes.engine import Theme
 # In-memory cache of fetched remote HTTP(S) image payloads (url -> bytes | None)
 _REMOTE_IMAGE_CACHE: dict[str, bytes | None] = {}
 
-# Classic 16-color DEC VT340 Sixel palette for Sixel mode inside split-pane viewports
-_VT340_PALETTE: list[tuple[int, int, int]] = [
-    (20, 20, 24),
-    (51, 51, 204),
-    (204, 33, 33),
-    (51, 204, 51),
-    (204, 51, 204),
-    (51, 204, 204),
-    (204, 204, 51),
-    (155, 155, 155),
-    (76, 76, 82),
-    (96, 96, 175),
-    (175, 76, 76),
-    (96, 175, 96),
-    (175, 96, 175),
-    (96, 175, 175),
-    (175, 175, 96),
-    (230, 230, 230),
-]
+
+def _import_pil_image():
+    """Import PIL.Image, falling back to system dist-packages if running in an isolated venv."""
+    try:
+        from PIL import Image as PILImage
+        return PILImage
+    except ImportError:
+        for sys_pkg in (
+            "/usr/lib/python3/dist-packages",
+            f"/usr/local/lib/python{sys.version_info.major}.{sys.version_info.minor}/dist-packages",
+            f"/usr/lib/python{sys.version_info.major}.{sys.version_info.minor}/dist-packages",
+        ):
+            if Path(sys_pkg).exists() and sys_pkg not in sys.path:
+                sys.path.append(sys_pkg)
+        try:
+            from PIL import Image as PILImage
+            return PILImage
+        except ImportError:
+            return None
 
 
 class ImageRenderBackend(str, Enum):
@@ -54,8 +55,8 @@ class ImageRenderBackend(str, Enum):
 
     AUTO = "auto"              # Chafa if available, otherwise 24-bit TrueColor Half-Block
     CHAFA = "chafa"            # External `chafa` CLI tool (with TrueColor Half-Block fallback)
-    SIXEL = "sixel"            # DEC Sixel palette mode
-    KITTY = "kitty"            # Kitty TrueColor HD block mode
+    SIXEL = "sixel"            # DEC Sixel graphics (`img2sixel` or Espresso native Sixel encoder)
+    KITTY = "kitty"            # Kitty Graphics Protocol (APC)
     HALF_BLOCK = "half_block"  # 24-bit TrueColor Unicode half-blocks (▀)
     BRAILLE = "braille"        # 2x4 Unicode Braille dot matrix (⣿)
     OFF = "off"                # Disable inline terminal image rendering
@@ -107,9 +108,11 @@ def resolve_html_image_src(
     allow_remote_fetch: bool = True,
 ) -> Attachment | None:
     """Resolve an HTML `<img src="...">` attribute (`cid:`, `data:`, or `http(s)://`) to an Attachment."""
-    raw_src = (src or "").strip()
+    raw_src = re.sub(r"[\r\n\t]+", "", (src or "").strip())
     if not raw_src:
         return None
+    if raw_src.startswith("//"):
+        raw_src = "https:" + raw_src
 
     # 1. Inline MIME Content-ID reference: cid:...
     if raw_src.lower().startswith("cid:"):
@@ -192,7 +195,7 @@ def resolve_html_image_src(
 
 
 def _fetch_remote_image_bytes(url: str, timeout: float = 2.5, max_bytes: int = 4 * 1024 * 1024) -> bytes | None:
-    """Download a remote image URL with a short timeout and size cap."""
+    """Download a remote image URL with a short timeout and verify it is not an HTML error page."""
     try:
         req = urllib.request.Request(
             url,
@@ -202,29 +205,18 @@ def _fetch_remote_image_bytes(url: str, timeout: float = 2.5, max_bytes: int = 4
             },
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ctype = str(resp.headers.get("Content-Type", "") or "").lower()
+            if "text/html" in ctype or "text/plain" in ctype:
+                return None
             data = resp.read(max_bytes)
-            if data and len(data) >= 32:
-                return data
+            if not data or len(data) < 24:
+                return None
+            head_strip = data[:64].lstrip().lower()
+            if head_strip.startswith((b"<!doctype html", b"<html", b"<head", b"<body")):
+                return None
+            return data
     except Exception:
         return None
-    return None
-
-
-def _quantize_to_sixel_palette(
-    matrix: list[list[tuple[int, int, int]]]
-) -> list[list[tuple[int, int, int]]]:
-    """Quantize an RGB matrix to the 16-color DEC VT340 Sixel palette."""
-    out: list[list[tuple[int, int, int]]] = []
-    for row in matrix:
-        q_row: list[tuple[int, int, int]] = []
-        for r, g, b in row:
-            best = min(
-                _VT340_PALETTE,
-                key=lambda p: (r - p[0]) ** 2 + (g - p[1]) ** 2 + (b - p[2]) ** 2,
-            )
-            q_row.append(best)
-        out.append(q_row)
-    return out
 
 
 class TerminalImageRenderer:
@@ -305,7 +297,6 @@ class TerminalImageRenderer:
         w = max(18, min(60, max_width - 6))
         h = max(6, min(16, max_height))
         if orig_dims is not None and orig_dims[0] > 0 and orig_dims[1] > 0:
-            # Preserve approximate aspect ratio in terminal cells (cells are ~1:2 aspect ratio)
             aspect = orig_dims[0] / max(1, orig_dims[1])
             ideal_h = int(round((w / max(0.25, aspect)) * 0.5))
             h = max(5, min(max_height, ideal_h))
@@ -320,38 +311,37 @@ class TerminalImageRenderer:
                 rendered_art = chafa_out
                 used_engine = "chafa"
 
-        # 2. Render using Espresso's cell-safe ImageViewer inside the 3-pane Viewport
-        # Note: Raw multi-line Sixel/Kitty escape sequences inside a side-by-side split-pane
-        # Viewport get overwritten by adjacent pane redraws or blank out on non-Sixel/Kitty
-        # terminals, so we render cell-accurate representations for every mode.
-        if not rendered_art:
-            active_matrix = matrix
-            if self.backend == ImageRenderBackend.BRAILLE:
-                proto = TerminalGraphicsProtocol.BRAILLE
-                used_engine = "braille"
-            elif self.backend == ImageRenderBackend.SIXEL:
-                active_matrix = _quantize_to_sixel_palette(matrix)
-                proto = TerminalGraphicsProtocol.HALF_BLOCK
-                used_engine = "sixel (16c)"
-            elif self.backend == ImageRenderBackend.KITTY:
-                proto = TerminalGraphicsProtocol.HALF_BLOCK
-                used_engine = "kitty (24b)"
-            elif self.backend == ImageRenderBackend.CHAFA:
-                proto = TerminalGraphicsProtocol.HALF_BLOCK
-                used_engine = "half_block (chafa fallback)"
-            else:
-                proto = TerminalGraphicsProtocol.HALF_BLOCK
-                used_engine = "half_block"
+        # 2. Try img2sixel CLI if SIXEL requested and img2sixel is installed
+        if not rendered_art and self.backend == ImageRenderBackend.SIXEL and self.img2sixel_bin and data:
+            sixel_out = self._run_img2sixel(data, attachment.filename, w * 8, h * 16)
+            if sixel_out:
+                rendered_art = sixel_out
+                used_engine = "img2sixel"
 
+        # 3. Use Espresso's ImageViewer with the decoded RGB pixel matrix
+        if not rendered_art:
+            proto_map = {
+                ImageRenderBackend.AUTO: TerminalGraphicsProtocol.HALF_BLOCK,
+                ImageRenderBackend.CHAFA: TerminalGraphicsProtocol.HALF_BLOCK,
+                ImageRenderBackend.SIXEL: TerminalGraphicsProtocol.SIXEL,
+                ImageRenderBackend.KITTY: TerminalGraphicsProtocol.KITTY,
+                ImageRenderBackend.HALF_BLOCK: TerminalGraphicsProtocol.HALF_BLOCK,
+                ImageRenderBackend.BRAILLE: TerminalGraphicsProtocol.BRAILLE,
+            }
+            proto = proto_map.get(self.backend, TerminalGraphicsProtocol.HALF_BLOCK)
             viewer = ImageViewer(
-                pixels=active_matrix,
+                pixels=matrix,
                 width=w,
                 height=h,
                 protocol=proto,
-                enable_native=False,
+                enable_native=(proto in (TerminalGraphicsProtocol.SIXEL, TerminalGraphicsProtocol.KITTY)),
                 show_border=False,
             )
             rendered_art = viewer.view()
+            if self.backend == ImageRenderBackend.CHAFA and not self.chafa_bin:
+                used_engine = "half_block (chafa fallback)"
+            else:
+                used_engine = proto.value
 
         dim_str = f" {orig_dims[0]}×{orig_dims[1]}px," if orig_dims else ""
         title = f" 🖼️ {attachment.filename} ({dim_str.strip()} {attachment.human_size}) [{used_engine}] "
@@ -394,11 +384,40 @@ class TerminalImageRenderer:
             pass
         return ""
 
+    def _run_img2sixel(self, data: bytes, filename: str, px_width: int, px_height: int) -> str:
+        """Invoke `img2sixel` CLI if available on the host system."""
+        if not self.img2sixel_bin:
+            return ""
+        suffix = Path(filename).suffix or ".png"
+        try:
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+                tmp.write(data)
+                tmp.flush()
+                proc = subprocess.run(
+                    [
+                        self.img2sixel_bin,
+                        "-w",
+                        str(px_width),
+                        "-h",
+                        str(px_height),
+                        tmp.name,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                    check=False,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    return proc.stdout
+        except Exception:
+            pass
+        return ""
+
     @staticmethod
     def _decode_to_rgb_matrix(
         data: bytes, filename: str
     ) -> tuple[list[list[tuple[int, int, int]]], tuple[int, int] | None]:
-        """Decode image bytes into a 2D RGB matrix and original (width, height) dimensions."""
+        """Decode image bytes into a 2D RGB matrix using PPM/BMP, Pillow (venv or system), or ImageMagick/ffmpeg."""
         ext = filename.lower()
         if data.startswith((b"P6", b"P3")) or ext.endswith((".ppm", ".pgm")):
             try:
@@ -414,51 +433,111 @@ class TerminalImageRenderer:
                     return mat, (len(mat[0]), len(mat))
             except Exception:
                 pass
+
+        # 1. Try Pillow (including automatic discovery of system dist-packages when inside an isolated venv)
         if data:
-            try:
-                from PIL import Image as PILImage
+            PILImage = _import_pil_image()
+            if PILImage is not None:
+                try:
+                    img = PILImage.open(io.BytesIO(data))
+                    orig_w, orig_h = img.size
 
-                img = PILImage.open(io.BytesIO(data))
-                orig_w, orig_h = img.size
+                    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                        rgba = img.convert("RGBA")
+                        raw_rgba = rgba.tobytes()
+                        lum_sum = 0.0
+                        opaque_cnt = 0
+                        for i in range(0, len(raw_rgba), 16):
+                            a = raw_rgba[i + 3]
+                            if a > 64:
+                                r_p, g_p, b_p = raw_rgba[i], raw_rgba[i + 1], raw_rgba[i + 2]
+                                lum_sum += 0.299 * r_p + 0.587 * g_p + 0.114 * b_p
+                                opaque_cnt += 1
+                        avg_lum = (lum_sum / opaque_cnt) if opaque_cnt else 128.0
+                        bg_color = (232, 228, 220, 255) if avg_lum < 75.0 else (34, 36, 44, 255)
+                        canvas = PILImage.new("RGBA", rgba.size, bg_color)
+                        img = PILImage.alpha_composite(canvas, rgba).convert("RGB")
+                    else:
+                        img = img.convert("RGB")
 
-                # Handle transparency properly so dark logos on transparent PNGs remain visible
-                if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
-                    rgba = img.convert("RGBA")
-                    # Sample average luminance of non-transparent pixels
-                    raw_rgba = rgba.tobytes()
-                    lum_sum = 0.0
-                    opaque_cnt = 0
-                    for i in range(0, len(raw_rgba), 16):
-                        a = raw_rgba[i + 3]
-                        if a > 64:
-                            r_p, g_p, b_p = raw_rgba[i], raw_rgba[i + 1], raw_rgba[i + 2]
-                            lum_sum += 0.299 * r_p + 0.587 * g_p + 0.114 * b_p
-                            opaque_cnt += 1
-                    avg_lum = (lum_sum / opaque_cnt) if opaque_cnt else 128.0
-                    bg_color = (232, 228, 220, 255) if avg_lum < 75.0 else (34, 36, 44, 255)
-                    canvas = PILImage.new("RGBA", rgba.size, bg_color)
-                    img = PILImage.alpha_composite(canvas, rgba).convert("RGB")
-                else:
-                    img = img.convert("RGB")
+                    resample = getattr(getattr(PILImage, "Resampling", PILImage), "LANCZOS", PILImage.BICUBIC)
+                    img.thumbnail((112, 64), resample)
+                    w, h = img.size
+                    raw = img.tobytes()
+                    matrix: list[list[tuple[int, int, int]]] = []
+                    idx = 0
+                    for _ in range(h):
+                        row: list[tuple[int, int, int]] = []
+                        for _ in range(w):
+                            row.append((raw[idx], raw[idx + 1], raw[idx + 2]))
+                            idx += 3
+                        matrix.append(row)
+                    if matrix and matrix[0]:
+                        return matrix, (orig_w, orig_h)
+                except Exception:
+                    pass
 
-                resample = getattr(getattr(PILImage, "Resampling", PILImage), "LANCZOS", PILImage.BICUBIC)
-                img.thumbnail((112, 64), resample)
-                w, h = img.size
-                raw = img.tobytes()
-                matrix: list[list[tuple[int, int, int]]] = []
-                idx = 0
-                for _ in range(h):
-                    row: list[tuple[int, int, int]] = []
-                    for _ in range(w):
-                        row.append((raw[idx], raw[idx + 1], raw[idx + 2]))
-                        idx += 3
-                    matrix.append(row)
-                if matrix and matrix[0]:
-                    return matrix, (orig_w, orig_h)
-            except Exception:
-                pass
+            # 2. Fallback to ImageMagick `convert` -> PPM (handles PNG/JPEG/GIF/WebP/SVG even without Pillow in venv)
+            convert_bin = shutil.which("convert")
+            if convert_bin:
+                try:
+                    proc = subprocess.run(
+                        [
+                            convert_bin,
+                            "-",
+                            "-background",
+                            "#22242c",
+                            "-flatten",
+                            "-thumbnail",
+                            "112x64",
+                            "ppm:-",
+                        ],
+                        input=data,
+                        capture_output=True,
+                        timeout=3.0,
+                        check=False,
+                    )
+                    if proc.returncode == 0 and proc.stdout.startswith(b"P6"):
+                        mat = parse_ppm(proc.stdout)
+                        if mat and mat[0]:
+                            return mat, (len(mat[0]), len(mat))
+                except Exception:
+                    pass
 
-        # Deterministic procedural gradient preview if binary format has no decoder installed
+            # 3. Fallback to `ffmpeg` -> PPM
+            ffmpeg_bin = shutil.which("ffmpeg")
+            if ffmpeg_bin:
+                try:
+                    proc = subprocess.run(
+                        [
+                            ffmpeg_bin,
+                            "-loglevel",
+                            "quiet",
+                            "-i",
+                            "pipe:0",
+                            "-vf",
+                            "scale='min(112,iw)':-1",
+                            "-frames:v",
+                            "1",
+                            "-f",
+                            "image2pipe",
+                            "-vcodec",
+                            "ppm",
+                            "pipe:1",
+                        ],
+                        input=data,
+                        capture_output=True,
+                        timeout=3.0,
+                        check=False,
+                    )
+                    if proc.returncode == 0 and proc.stdout.startswith(b"P6"):
+                        mat = parse_ppm(proc.stdout)
+                        if mat and mat[0]:
+                            return mat, (len(mat[0]), len(mat))
+                except Exception:
+                    pass
+
+        # Fallback gradient only if no binary image decoder succeeded
         digest = hashlib.sha256(data or filename.encode("utf-8")).digest()
         r0, g0, b0 = digest[0], digest[1], digest[2]
         r1, g1, b1 = digest[3], digest[4], digest[5]

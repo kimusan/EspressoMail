@@ -46,6 +46,7 @@ classifiers = [
 ]
 dependencies = [
     "espressoTUI>=1.2.0",
+    "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]

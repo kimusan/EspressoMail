@@ -170,8 +170,13 @@ class TestUIAndApp(unittest.TestCase):
             out = renderer.render_attachment(img_att, theme, max_width=40, max_height=8)
             self.assertTrue(len(out) > 10)
             if mode != ImageRenderBackend.OFF:
-                # Must contain actual rendered half-block or braille glyphs, never an empty box
-                self.assertTrue("▀" in out or "▄" in out or any(0x2800 <= ord(c) <= 0x28FF for c in out))
+                self.assertTrue(
+                    "▀" in out
+                    or "▄" in out
+                    or "\x1bPq" in out
+                    or "\x1b_G" in out
+                    or any(0x2800 <= ord(c) <= 0x28FF for c in out)
+                )
 
         # Test multipart/alternative email where body_text is non-empty AND body_html has data:image + cid: + 1x1 tracker
         pil_img = PILImage.new("RGBA", (36, 18), (220, 90, 40, 255))
