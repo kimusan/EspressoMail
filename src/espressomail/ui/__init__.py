@@ -13,9 +13,12 @@ from espressomail.ui.modals import (
     AddressBookModal,
     ComposeModal,
     ComposeSubmittedMsg,
+    DownloadAttachmentsModal,
     HelpModal,
     ModalClosedMsg,
     PGPModal,
+    PreferencesModal,
+    PreferencesSavedMsg,
     SearchModal,
     SieveModal,
 )
@@ -52,4 +55,7 @@ __all__ = [
     "PGPModal",
     "HelpModal",
     "ModalClosedMsg",
+    "DownloadAttachmentsModal",
+    "PreferencesModal",
+    "PreferencesSavedMsg",
 ]

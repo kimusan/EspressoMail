@@ -29,6 +29,7 @@ from espresso.crema import (
 from espressomail.crypto.pgp import PGPManager
 from espressomail.models.entities import (
     AccountConfig,
+    Attachment,
     Contact,
     EmailMessage,
     PGPStatus,
@@ -89,6 +90,19 @@ class ComposeToContactMsg(Msg):
     """Emitted when the user presses Enter/c on a contact in the Address Book."""
 
     recipient: str
+
+
+@dataclass(frozen=True)
+class PreferencesSavedMsg(Msg):
+    """Emitted when user saves updated settings from PreferencesModal."""
+
+    download_dir: str
+    image_backend: str
+    theme: str
+    threading: bool
+    show_raw_headers: bool
+    sync_on_startup: bool
+    allow_remote_images: bool
 
 
 # ---------------------------------------------------------------------------
@@ -950,7 +964,12 @@ class AccountSettingsModal(Model):
         self.input_smtp_host = TextInput(placeholder="smtp.example.com", prompt="SMTP Host:     ")
         self.input_smtp_port = TextInput(placeholder="587", prompt="SMTP Port:     ")
         self.smtp_security: SecurityType = SecurityType.STARTTLS
-        self.input_signature = TextInput(placeholder="Optional email signature", prompt="Signature:     ")
+        self.input_signature = TextArea(
+            placeholder="Optional email signature...",
+            height=3,
+            width=54,
+            show_line_numbers=False,
+        )
 
         # Focus indices:
         # 0: Account selector
@@ -1111,7 +1130,7 @@ class AccountSettingsModal(Model):
                     trigger_sync=True,
                 )
 
-            if k in ("enter", "ctrl+s"):
+            if k in ("ctrl+s", "ctrl+enter") or (k == "enter" and self.focus_idx != 12):
                 updated, err = self._build_updated_account()
                 if updated is None:
                     self.error_msg = err
@@ -1219,6 +1238,10 @@ class AccountSettingsModal(Model):
             self.input_smtp_host.view(),
             self.input_smtp_port.view(),
             f"SMTP Security: ◀ {smtp_sec_style.render(self.smtp_security.value.upper())} ▶",
+            "",
+            Style().bold(True).foreground(
+                self.theme.accent_primary if self.focus_idx == 12 else self.theme.accent_secondary
+            ).render("Email Signature (appended to messages):"),
             self.input_signature.view(),
         ]
 
@@ -1285,6 +1308,7 @@ class HelpModal(Model):
             h_style.render("Accounts, Search, Security, Filters & Themes"),
             f"  {k_style.render('A')}      Edit Account Settings (Password, IMAP/SMTP hosts, ports, TLS)",
             f"  {k_style.render('O')}      Add New Account (Onboarding Wizard)",
+            f"  {k_style.render('p')}      General Preferences (Downloads folder, image renderer, theme)",
             f"  {k_style.render('/')}      Instant Fuzzy Search across local SQLite store",
             f"  {k_style.render('t')}      Toggle Conversation Threading view",
             f"  {k_style.render('T')}      Cycle Color Scheme / Theme ({self.theme.name})",
@@ -1295,5 +1319,386 @@ class HelpModal(Model):
         ]
         return self.theme.modal_style(modal_w, "⌨️ EspressoMail Keyboard & Mouse Shortcuts").render(
             "\n".join(lines)
+        )
+
+
+# ---------------------------------------------------------------------------
+# 8. Download Attachments Selection Modal
+# ---------------------------------------------------------------------------
+
+
+class DownloadAttachmentsModal(Model):
+    """Interactive modal allowing users to selectively choose which attachments to save and customize target directory."""
+
+    def __init__(
+        self,
+        attachments: list[Attachment],
+        download_dir: Path | str,
+        theme: Theme,
+        store: LocalStore,
+    ) -> None:
+        self.attachments = attachments
+        self.download_dir_path = Path(download_dir).expanduser()
+        self.theme = theme
+        self.store = store
+        self.selected_indices: set[int] = set(range(len(attachments)))
+        self.cursor_idx: int = 0
+        self.focus_target: str = "list"  # "list" or "dir"
+        self.input_dir = TextInput(placeholder="Download directory path...", prompt="Target Folder: ")
+        self.input_dir.value = str(self.download_dir_path)
+        self.error_msg = ""
+
+    def init(self) -> Cmd | None:
+        return None
+
+    def update(self, msg: Msg) -> tuple[DownloadAttachmentsModal, Cmd | None]:
+        if isinstance(msg, KeyMsg):
+            k = str(msg.key)
+            if k == "esc":
+                return self, lambda: ModalClosedMsg("Download cancelled.")
+
+            if k in ("tab", "shift+tab"):
+                self.focus_target = "dir" if self.focus_target == "list" else "list"
+                if self.focus_target == "dir":
+                    self.input_dir.focus()
+                else:
+                    self.input_dir.blur()
+                return self, None
+
+            if self.focus_target == "list":
+                if k in ("up", "k"):
+                    if self.attachments:
+                        self.cursor_idx = (self.cursor_idx - 1) % len(self.attachments)
+                    return self, None
+                if k in ("down", "j"):
+                    if self.attachments:
+                        self.cursor_idx = (self.cursor_idx + 1) % len(self.attachments)
+                    return self, None
+                if k in (" ", "space"):
+                    if self.cursor_idx in self.selected_indices:
+                        self.selected_indices.remove(self.cursor_idx)
+                    else:
+                        self.selected_indices.add(self.cursor_idx)
+                    return self, None
+                if k == "a":
+                    if len(self.selected_indices) == len(self.attachments):
+                        self.selected_indices.clear()
+                    else:
+                        self.selected_indices = set(range(len(self.attachments)))
+                    return self, None
+                if k in ("enter", "d", "ctrl+s"):
+                    return self._execute_download()
+
+            elif self.focus_target == "dir":
+                if k in ("enter", "ctrl+s"):
+                    return self._execute_download()
+
+        if self.focus_target == "dir":
+            self.input_dir, cmd = self.input_dir.update(msg)
+            return self, cmd
+
+        return self, None
+
+    def _execute_download(self) -> tuple[DownloadAttachmentsModal, Cmd | None]:
+        if not self.selected_indices:
+            self.error_msg = "Please select at least one attachment to download."
+            return self, None
+
+        target_str = self.input_dir.value.strip() or str(self.download_dir_path)
+        target_dir = Path(target_str).expanduser()
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self.error_msg = f"Cannot create folder: {e}"
+            return self, None
+
+        saved_files: list[str] = []
+        for idx in sorted(self.selected_indices):
+            att = self.attachments[idx]
+            out_p = self.store.save_attachment_to_disk(att.id, target_dir)
+            saved_files.append(out_p.name)
+
+        note = f"✔ Saved {len(saved_files)} attachment(s) to {target_dir}: {', '.join(saved_files)}"
+        return self, lambda: ModalClosedMsg(note)
+
+    def view(self, width: int = 80) -> str:
+        modal_w = min(76, max(54, width - 8))
+        rows: list[str] = []
+
+        rows.append(
+            Style()
+            .bold(True)
+            .foreground(self.theme.accent_secondary)
+            .render("Select attachments to save to disk:")
+        )
+        rows.append("")
+
+        for idx, att in enumerate(self.attachments):
+            is_cur = idx == self.cursor_idx and self.focus_target == "list"
+            is_chk = idx in self.selected_indices
+            chk_str = "[x]" if is_chk else "[ ]"
+            icon = "🖼️" if att.is_image else "📎"
+            line_str = f" {chk_str} {icon} {att.filename}  ({att.human_size})"
+            if is_cur:
+                rows.append(
+                    Style()
+                    .bold(True)
+                    .foreground(self.theme.bg_primary)
+                    .background(self.theme.accent_primary)
+                    .width(modal_w - 4)
+                    .render(line_str)
+                )
+            elif is_chk:
+                rows.append(
+                    Style()
+                    .bold(True)
+                    .foreground(self.theme.attachment_fg)
+                    .render(line_str)
+                )
+            else:
+                rows.append(
+                    Style()
+                    .foreground(self.theme.fg_muted)
+                    .render(line_str)
+                )
+
+        rows.append("")
+        rows.append(self.input_dir.view())
+
+        if self.error_msg:
+            rows.append("")
+            rows.append(
+                Style()
+                .bold(True)
+                .foreground(self.theme.pgp_error_fg)
+                .render(f"⚠ {self.error_msg}")
+            )
+
+        rows.append("")
+        rows.append(
+            Style()
+            .foreground(self.theme.fg_muted)
+            .render(
+                "[Space] Toggle  [a] Select All  [Tab] Edit Folder  [Enter/d] Download  [Esc] Cancel"
+            )
+        )
+
+        return self.theme.modal_style(modal_w, "💾 Download Attachments").render(
+            join_vertical(Align.LEFT, *rows)
+        )
+
+
+# ---------------------------------------------------------------------------
+# 9. General Application Preferences & Configuration Modal
+# ---------------------------------------------------------------------------
+
+
+class PreferencesModal(Model):
+    """General application settings & preferences dialog for configuring downloads, image renderer, theme, and behavior."""
+
+    IMAGE_BACKENDS: tuple[str, ...] = ("auto", "chafa", "half_block", "braille", "sixel", "kitty", "off")
+    THEMES: tuple[str, ...] = (
+        "espresso",
+        "dracula",
+        "gruvbox",
+        "nord",
+        "tokyonight",
+        "monokai",
+        "solarized-dark",
+        "solarized-light",
+    )
+
+    def __init__(
+        self,
+        store: LocalStore,
+        current_theme: Theme,
+        download_dir: Path | str,
+        current_image_backend: str = "auto",
+        threading_enabled: bool = True,
+        show_raw_headers: bool = False,
+    ) -> None:
+        self.store = store
+        self.current_theme = current_theme
+        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=threading, 4=raw_headers, 5=sync_startup, 6=remote_imgs
+        self.status_msg = ""
+        self.error_msg = ""
+
+        # Settings
+        self.input_download_dir = TextInput(placeholder="Download folder path...", prompt="Download Folder:     ")
+        self.input_download_dir.value = str(download_dir)
+
+        backend_clean = current_image_backend.lower()
+        self.backend_idx = (
+            self.IMAGE_BACKENDS.index(backend_clean)
+            if backend_clean in self.IMAGE_BACKENDS
+            else 0
+        )
+
+        theme_clean = current_theme.id.lower()
+        self.theme_idx = (
+            self.THEMES.index(theme_clean)
+            if theme_clean in self.THEMES
+            else 0
+        )
+
+        self.threading_enabled = threading_enabled
+        self.show_raw_headers = show_raw_headers
+        self.sync_on_startup = self.store.get_setting("sync_on_startup", "1") == "1"
+        self.allow_remote_images = self.store.get_setting("allow_remote_images", "1") == "1"
+
+        self._sync_focus()
+
+    def _sync_focus(self) -> None:
+        if self.focus_idx == 0:
+            self.input_download_dir.focus()
+        else:
+            self.input_download_dir.blur()
+
+    def init(self) -> Cmd | None:
+        return None
+
+    def update(self, msg: Msg) -> tuple[PreferencesModal, Cmd | None]:
+        if isinstance(msg, KeyMsg):
+            k = str(msg.key)
+            if k == "esc":
+                return self, lambda: ModalClosedMsg("Closed preferences.")
+
+            if k in ("enter", "ctrl+s"):
+                return self._save_preferences()
+
+            if k in ("tab", "down"):
+                self.focus_idx = (self.focus_idx + 1) % 7
+                self._sync_focus()
+                return self, None
+            if k in ("shift+tab", "up"):
+                self.focus_idx = (self.focus_idx - 1) % 7
+                self._sync_focus()
+                return self, None
+
+            # Cycling / toggling options
+            if self.focus_idx == 1 and k in ("left", "right", "h", "l", " ", "space"):
+                delta = 1 if k in ("right", "l", " ", "space") else -1
+                self.backend_idx = (self.backend_idx + delta) % len(self.IMAGE_BACKENDS)
+                return self, None
+
+            if self.focus_idx == 2 and k in ("left", "right", "h", "l", " ", "space"):
+                delta = 1 if k in ("right", "l", " ", "space") else -1
+                self.theme_idx = (self.theme_idx + delta) % len(self.THEMES)
+                return self, None
+
+            if self.focus_idx == 3 and k in (" ", "space", "left", "right"):
+                self.threading_enabled = not self.threading_enabled
+                return self, None
+
+            if self.focus_idx == 4 and k in (" ", "space", "left", "right"):
+                self.show_raw_headers = not self.show_raw_headers
+                return self, None
+
+            if self.focus_idx == 5 and k in (" ", "space", "left", "right"):
+                self.sync_on_startup = not self.sync_on_startup
+                return self, None
+
+            if self.focus_idx == 6 and k in (" ", "space", "left", "right"):
+                self.allow_remote_images = not self.allow_remote_images
+                return self, None
+
+        if self.focus_idx == 0:
+            self.input_download_dir, cmd = self.input_download_dir.update(msg)
+            return self, cmd
+
+        return self, None
+
+    def _save_preferences(self) -> tuple[PreferencesModal, Cmd | None]:
+        dir_val = self.input_download_dir.value.strip()
+        if not dir_val:
+            self.error_msg = "Download folder cannot be empty."
+            return self, None
+
+        try:
+            p = Path(dir_val).expanduser().resolve()
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self.error_msg = f"Invalid download directory: {e}"
+            return self, None
+
+        backend_val = self.IMAGE_BACKENDS[self.backend_idx]
+        theme_val = self.THEMES[self.theme_idx]
+
+        self.store.set_setting("download_dir", str(p))
+        self.store.set_setting("image_backend", backend_val)
+        self.store.set_setting("theme", theme_val)
+        self.store.set_setting("threading", "1" if self.threading_enabled else "0")
+        self.store.set_setting("show_raw_headers", "1" if self.show_raw_headers else "0")
+        self.store.set_setting("sync_on_startup", "1" if self.sync_on_startup else "0")
+        self.store.set_setting("allow_remote_images", "1" if self.allow_remote_images else "0")
+
+        return self, lambda: PreferencesSavedMsg(
+            download_dir=str(p),
+            image_backend=backend_val,
+            theme=theme_val,
+            threading=self.threading_enabled,
+            show_raw_headers=self.show_raw_headers,
+            sync_on_startup=self.sync_on_startup,
+            allow_remote_images=self.allow_remote_images,
+        )
+
+    def view(self, width: int = 80) -> str:
+        modal_w = min(74, max(56, width - 8))
+        rows: list[str] = []
+
+        def _opt_style(idx: int, text: str) -> str:
+            if idx == self.focus_idx:
+                return Style().bold(True).foreground(self.current_theme.accent_primary).render(text)
+            return Style().foreground(self.current_theme.fg_primary).render(text)
+
+        rows.append(self.input_download_dir.view())
+
+        cur_b = self.IMAGE_BACKENDS[self.backend_idx].upper()
+        rows.append(
+            f"Image Rendering Mode: ◀ {_opt_style(1, cur_b)} ▶"
+        )
+
+        cur_t = self.THEMES[self.theme_idx].capitalize()
+        rows.append(
+            f"Terminal Theme:       ◀ {_opt_style(2, cur_t)} ▶"
+        )
+
+        th_val = "[x] Enabled" if self.threading_enabled else "[ ] Disabled"
+        rows.append(
+            f"Message Threading:    {_opt_style(3, th_val)}"
+        )
+
+        rh_val = "[x] Enabled" if self.show_raw_headers else "[ ] Disabled"
+        rows.append(
+            f"Show Raw RFC Headers: {_opt_style(4, rh_val)}"
+        )
+
+        su_val = "[x] Enabled" if self.sync_on_startup else "[ ] Disabled"
+        rows.append(
+            f"Sync On Startup:      {_opt_style(5, su_val)}"
+        )
+
+        ri_val = "[x] Allowed" if self.allow_remote_images else "[ ] Blocked"
+        rows.append(
+            f"Remote Image Fetch:   {_opt_style(6, ri_val)}"
+        )
+
+        if self.error_msg:
+            rows.append("")
+            rows.append(
+                Style().bold(True).foreground(self.current_theme.pgp_error_fg).render(f"⚠ {self.error_msg}")
+            )
+
+        rows.append("")
+        rows.append(
+            Style()
+            .foreground(self.current_theme.fg_muted)
+            .render(
+                "[Tab/Arrows] Navigate  [Space/Left/Right] Change/Toggle  [Enter/Ctrl+S] Save  [Esc] Cancel"
+            )
+        )
+
+        return self.current_theme.modal_style(modal_w, "⚙️ General Preferences").render(
+            join_vertical(Align.LEFT, *rows)
         )
 

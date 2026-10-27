@@ -10,15 +10,18 @@ from espressomail.models import AccountConfig
 from espressomail.storage import LocalStore
 from espressomail.themes import ThemeEngine
 from espressomail.ui import (
-     PROVIDER_PRESETS,
+    PROVIDER_PRESETS,
     AccountSettingsModal,
+    DownloadAttachmentsModal,
     EspressoMailApp,
     ImageRenderBackend,
     OnboardingWizard,
+    PreferencesModal,
     SplashDoneMsg,
     SplashScreen,
     SplashTickMsg,
     TerminalImageRenderer,
+    format_message_for_reading_pane,
     html_to_terminal_text,
 )
 from tests.test_storage_and_search import populate_test_store
@@ -222,6 +225,19 @@ class TestUIAndApp(unittest.TestCase):
         self.assertIn("## Release Notes", converted)
         self.assertIn("• Item A", converted)
 
+        # Test inline placement between paragraphs in message body flow
+        inline_msg = EmailMessage(
+            id="msg_inline",
+            account_id="acc_work",
+            subject="Inline Test",
+            body_html=f'<p>Paragraph Above</p><img src="data:image/png;base64,{b64_png}" alt="Inline Pic" /><p>Paragraph Below</p>',
+        )
+        inline_out = format_message_for_reading_pane(inline_msg, theme, width=72, image_renderer=renderer)
+        pos_above = inline_out.find("Paragraph Above")
+        pos_img = inline_out.find("Inline_Pic.png", pos_above)
+        pos_below = inline_out.find("Paragraph Below")
+        self.assertTrue(pos_above < pos_img < pos_below, "Image must be placed inline between text paragraphs!")
+
     def test_3pane_app_keyboard_mouse_and_modals(self) -> None:
         populate_test_store(self.store)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -249,12 +265,15 @@ class TestUIAndApp(unittest.TestCase):
             app, _ = app.update(KeyMsg("t"))
             self.assertTrue(app.threading_enabled)
 
-            # Download attachments with 'w' (select msg_thread1_1 which has attachments)
+            # Download attachments with 'w' (opens DownloadAttachmentsModal, then confirm with Enter)
             for idx, r in enumerate(app.message_rows):
                 if r.message.id == "msg_thread1_1":
                     app.message_cursor = idx
                     break
             app, _ = app.update(KeyMsg("w"))
+            self.assertIsInstance(app.active_modal, DownloadAttachmentsModal)
+            app, _ = app.update(KeyMsg("enter"))
+            self.assertIsNone(app.active_modal)
             self.assertIn("Saved", app.status_message)
 
             # Open Reply modal with 'r', then save as Draft with 'ctrl+s'
@@ -378,6 +397,176 @@ class TestUIAndApp(unittest.TestCase):
             r for r in app_new_session.folder_rows if r.account_id == "acc_tree" and not r.is_header
         ]
         self.assertEqual([r.depth for r in collapsed_rows if r.depth > 0], [])
+
+    def test_download_attachments_modal_selection_and_target_dir(self) -> None:
+        from pathlib import Path
+        from espressomail.models.entities import Attachment
+
+        populate_test_store(self.store)
+        msg = self.store.get_message("msg_thread1_1")
+        assert msg is not None
+        self.assertTrue(len(msg.attachments) >= 1)
+
+        theme = ThemeEngine("espresso").current
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom_download = Path(tmpdir) / "custom_downloads"
+            modal = DownloadAttachmentsModal(
+                attachments=msg.attachments,
+                download_dir=custom_download,
+                theme=theme,
+                store=self.store,
+            )
+            # Default state: all attachments selected
+            self.assertEqual(modal.selected_indices, set(range(len(msg.attachments))))
+            view_str = modal.view(70)
+            self.assertIn("Select attachments", view_str)
+            self.assertIn(msg.attachments[0].filename, view_str)
+
+            # Deselect with space
+            modal, _ = modal.update(KeyMsg("space"))
+            self.assertNotIn(0, modal.selected_indices)
+
+            # Deselect all with 'a'
+            modal.selected_indices.clear()
+
+            # Try downloading with none selected -> shows error message
+            modal, cmd = modal.update(KeyMsg("enter"))
+            self.assertIn("select at least one", modal.error_msg)
+            self.assertIsNone(cmd)
+
+            # Re-select with 'a' (toggle all)
+            modal, _ = modal.update(KeyMsg("a"))
+            self.assertEqual(modal.selected_indices, set(range(len(msg.attachments))))
+
+            # Execute download
+            modal, cmd = modal.update(KeyMsg("enter"))
+            self.assertIsNotNone(cmd)
+            closed_msg = cmd()
+            self.assertIn("Saved", closed_msg.status_note)
+            self.assertTrue((custom_download / msg.attachments[0].filename).exists())
+
+    def test_preferences_modal_configuration_and_persistence(self) -> None:
+        from pathlib import Path
+
+        populate_test_store(self.store)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            initial_dl = Path(tmpdir) / "init_dl"
+            app = EspressoMailApp(store=self.store, show_splash=False, download_dir=initial_dl)
+
+            # Press 'p' to open PreferencesModal
+            app, _ = app.update(KeyMsg("p"))
+            self.assertIsInstance(app.active_modal, PreferencesModal)
+            pref_modal = app.active_modal
+            assert isinstance(pref_modal, PreferencesModal)
+
+            # Cycle image mode (focus 1)
+            pref_modal.focus_idx = 1
+            pref_modal, _ = pref_modal.update(KeyMsg("right"))
+            chosen_backend = pref_modal.IMAGE_BACKENDS[pref_modal.backend_idx]
+
+            # Cycle theme (focus 2)
+            pref_modal.focus_idx = 2
+            pref_modal, _ = pref_modal.update(KeyMsg("right"))
+            chosen_theme = pref_modal.THEMES[pref_modal.theme_idx]
+
+            # Toggle threading (focus 3)
+            pref_modal.focus_idx = 3
+            initial_th = pref_modal.threading_enabled
+            pref_modal, _ = pref_modal.update(KeyMsg("space"))
+            self.assertNotEqual(pref_modal.threading_enabled, initial_th)
+
+            # Change download folder
+            new_dl = Path(tmpdir) / "new_preferences_dl"
+            pref_modal.input_download_dir.value = str(new_dl)
+
+            # Save preferences with Enter
+            app, _ = app.update(KeyMsg("enter"))
+            self.assertIsNone(app.active_modal)
+            self.assertIn("Saved preferences", app.status_message)
+            self.assertEqual(app.download_dir, new_dl.resolve())
+            self.assertEqual(app.theme.id, chosen_theme)
+            self.assertEqual(app.image_renderer.backend.value, chosen_backend)
+
+            # Assert persisted to SQLite store
+            self.assertEqual(self.store.get_setting("download_dir"), str(new_dl.resolve()))
+            self.assertEqual(self.store.get_setting("image_backend"), chosen_backend)
+            self.assertEqual(self.store.get_setting("theme"), chosen_theme)
+
+    def test_account_signature_in_editor_and_replies(self) -> None:
+        from espressomail.models.entities import EmailMessage
+        from espressomail.ui.modals import ComposeModal
+
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+
+        # Open AccountSettingsModal on acc_work
+        app.active_account_id = "acc_work"
+        app, _ = app.update(KeyMsg("A"))
+        self.assertIsInstance(app.active_modal, AccountSettingsModal)
+        modal = app.active_modal
+        assert isinstance(modal, AccountSettingsModal)
+
+        # Set multi-line signature
+        multi_sig = "Best regards,\nKim Schulz\nCTO & Architect"
+        modal.input_signature.value = multi_sig
+        # Save offline with Ctrl+F
+        app, _ = app.update(KeyMsg("ctrl+f"))
+        self.assertIsNone(app.active_modal)
+
+        # Verify persisted in database
+        acc = self.store.get_account("acc_work")
+        assert acc is not None
+        self.assertEqual(acc.signature, multi_sig)
+
+        # 1. Test Compose Modal pre-populates signature for new message
+        app, _ = app.update(KeyMsg("c"))
+        self.assertIsInstance(app.active_modal, ComposeModal)
+        comp = app.active_modal
+        assert isinstance(comp, ComposeModal)
+        self.assertIn(multi_sig, comp.editor.value)
+        app, _ = app.update(KeyMsg("esc"))
+
+        # 2. Test Reply modal includes signature before quoted message
+        msg = self.store.get_message("msg_thread1_1")
+        assert msg is not None
+        for idx, r in enumerate(app.message_rows):
+            if r.message.id == "msg_thread1_1":
+                app.message_cursor = idx
+                break
+        app, _ = app.update(KeyMsg("r"))
+        self.assertIsInstance(app.active_modal, ComposeModal)
+        reply_comp = app.active_modal
+        assert isinstance(reply_comp, ComposeModal)
+        self.assertIn(multi_sig, reply_comp.editor.value)
+        self.assertIn("wrote:", reply_comp.editor.value)
+
+    def test_unified_inbox_account_identification(self) -> None:
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+
+        # Switch to Unified Inbox
+        app, _ = app.update(KeyMsg("U"))
+        self.assertEqual(app.active_account_id, "*")
+
+        # Render message list pane
+        list_output = app._render_message_list_pane(width=80, height=20)
+        # Verify account badge tags (e.g. [Schulz], [Espres]) appear in the rendered list
+        self.assertIn("[Schulz]", list_output)
+        self.assertIn("[Espres]", list_output)
+
+        # Check reading pane shows account badge
+        m = app.selected_message
+        assert m is not None
+        acc = app._accounts_cache.get(m.account_id)
+        assert acc is not None
+        reader_out = format_message_for_reading_pane(
+            msg=m,
+            theme=app.theme,
+            width=80,
+            image_renderer=app.image_renderer,
+            account=acc,
+        )
+        self.assertIn(f"● {acc.name}", reader_out)
 
 
 if __name__ == "__main__":

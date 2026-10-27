@@ -70,9 +70,12 @@ from espressomail.ui.modals import (
     ComposeModal,
     ComposeSubmittedMsg,
     ComposeToContactMsg,
+    DownloadAttachmentsModal,
     HelpModal,
     ModalClosedMsg,
     PGPModal,
+    PreferencesModal,
+    PreferencesSavedMsg,
     SearchModal,
     SearchSelectMessageMsg,
     SieveModal,
@@ -190,6 +193,7 @@ class EspressoMailApp(Model):
 
         self.reader_viewport = Viewport(width=50, height=24)
         self._last_rendered_msg_key = ""
+        self._accounts_cache: dict[str, AccountConfig] = {}
 
         # Active modal overlay
         self.active_modal: Model | None = None
@@ -242,6 +246,7 @@ class EspressoMailApp(Model):
             PaletteItem("sieve_filters", "Tools: ManageSieve Filter Rules", "Configure RFC 5228 Sieve scripts", "F", "Tools"),
             PaletteItem("pgp_manager", "Security: GPG/PGP Keyring Manager", "Inspect keys, sign, verify, and decrypt", "G", "Security"),
             PaletteItem("account_settings", "Accounts: Edit Account Settings", "Update password, IMAP/SMTP hosts, ports, and TLS", "A", "Accounts"),
+            PaletteItem("preferences", "Settings: General Preferences", "Configure download folder, image renderer, theme, threading", "p", "Settings"),
             PaletteItem("new_account", "Accounts: Add New Account", "Launch onboarding wizard for a new account", "O", "Accounts"),
             PaletteItem("sync_all", "Accounts: Sync IMAP Mailboxes", "Synchronize all enabled accounts", "S", "Accounts"),
             PaletteItem("empty_trash", "Mail: Empty Trash", "Permanently delete trashed messages", "X", "Mail"),
@@ -438,6 +443,7 @@ class EspressoMailApp(Model):
             )
 
         accounts = self.store.list_accounts()
+        self._accounts_cache = {acc.id: acc for acc in accounts}
         for acc in accounts:
             rows.append(
                 FolderTreeRow(
@@ -580,6 +586,7 @@ class EspressoMailApp(Model):
 
         prev_y = self.reader_viewport.y_offset
         self._last_rendered_msg_key = cache_key
+        acc = self._accounts_cache.get(m.account_id)
         rendered = format_message_for_reading_pane(
             msg=m,
             theme=self.theme,
@@ -587,6 +594,7 @@ class EspressoMailApp(Model):
             image_renderer=self.image_renderer,
             thread=row.thread if self.threading_enabled else None,
             show_raw_headers=self.show_raw_headers,
+            account=acc,
         )
         self.reader_viewport.set_content(rendered)
         if prev_msg_id == m.id:
@@ -703,10 +711,21 @@ class EspressoMailApp(Model):
                 )
                 return self, None
 
+            if isinstance(msg, PreferencesSavedMsg):
+                self.active_modal = None
+                self.download_dir = Path(msg.download_dir).expanduser().resolve()
+                self.theme_engine.set_theme(msg.theme)
+                self.image_renderer.set_backend(ImageRenderBackend(msg.image_backend))
+                self.threading_enabled = msg.threading
+                self.show_raw_headers = msg.show_raw_headers
+                self.refresh_data()
+                self.status_message = f"✔ Saved preferences: theme={msg.theme}, renderer={msg.image_backend}, downloads={self.download_dir}"
+                return self, None
+
             self.active_modal, cmd = self.active_modal.update(msg)
             if cmd is not None and callable(cmd):
                 emitted = cmd()
-                if isinstance(emitted, (ModalClosedMsg, ComposeSubmittedMsg, SearchSelectMessageMsg, ComposeToContactMsg)):
+                if isinstance(emitted, (ModalClosedMsg, ComposeSubmittedMsg, SearchSelectMessageMsg, ComposeToContactMsg, PreferencesSavedMsg)):
                     return self.update(emitted)
             return self, None
 
@@ -798,6 +817,8 @@ class EspressoMailApp(Model):
             return self._execute_action("pgp_manager")
         if k == "A":
             return self._execute_action("account_settings")
+        if k in ("p", "P"):
+            return self._execute_action("preferences")
         if k == "O":
             return self._execute_action("new_account")
         if k == "S":
@@ -1057,6 +1078,17 @@ class EspressoMailApp(Model):
             )
             return self, None
 
+        if action_id == "preferences":
+            self.active_modal = PreferencesModal(
+                store=self.store,
+                current_theme=self.theme,
+                download_dir=self.download_dir,
+                current_image_backend=self.image_renderer.backend.value,
+                threading_enabled=self.threading_enabled,
+                show_raw_headers=self.show_raw_headers,
+            )
+            return self, None
+
         if action_id == "new_account":
             self.show_onboarding = True
             self.onboarding = OnboardingWizard(
@@ -1168,12 +1200,12 @@ class EspressoMailApp(Model):
             if not m or not m.attachments:
                 self.status_message = "Selected message has no attachments to download."
                 return self, None
-            saved_paths: list[str] = []
-            for att in m.attachments:
-                out_p = self.store.save_attachment_to_disk(att.id, self.download_dir)
-                saved_paths.append(out_p.name)
-            self.refresh_data()
-            self.status_message = f"✔ Saved {len(saved_paths)} attachment(s) to {self.download_dir}: {', '.join(saved_paths)}"
+            self.active_modal = DownloadAttachmentsModal(
+                attachments=m.attachments,
+                download_dir=self.download_dir,
+                theme=self.theme,
+                store=self.store,
+            )
             return self, None
 
         if action_id == "sync_all":
@@ -1187,6 +1219,10 @@ class EspressoMailApp(Model):
     ) -> tuple[EspressoMailApp, Cmd | None]:
         quoted_lines = "\n".join(f"> {line}" for line in msg.body_text.splitlines())
         header_intro = f"\n\nOn {msg.date_iso or msg.short_date}, {msg.sender_display} wrote:\n{quoted_lines}"
+
+        acc = self.store.get_account(msg.account_id)
+        sig = f"\n\n-- \n{acc.signature}" if acc and acc.signature else ""
+        body_init = f"\n{sig}\n{header_intro}" if sig else header_intro
 
         if mode == "forward":
             subj = msg.subject if msg.subject.lower().startswith("fwd:") else f"Fwd: {msg.subject}"
@@ -1209,7 +1245,7 @@ class EspressoMailApp(Model):
             to_initial=to_init,
             cc_initial=cc_init,
             subject_initial=subj,
-            body_initial=header_intro,
+            body_initial=body_init,
             in_reply_to=msg.message_id,
             references=refs,
         )
@@ -1499,6 +1535,7 @@ class EspressoMailApp(Model):
                 Style().italic(True).foreground(self.theme.fg_muted).render("  (No messages in folder)")
             )
         else:
+            is_unified = self.active_account_id == "*"
             for offset, row in enumerate(visible):
                 abs_idx = self.message_scroll + offset
                 m = row.message
@@ -1519,12 +1556,25 @@ class EspressoMailApp(Model):
                     else ""
                 )
 
+                acc_prefix = ""
+                acc_prefix_len = 0
+                if is_unified:
+                    acc = self._accounts_cache.get(m.account_id)
+                    b_color = (
+                        acc.color_badge
+                        if acc and acc.color_badge
+                        else self.theme.accent_secondary
+                    )
+                    acc_short = (acc.name if acc else m.account_id)[:6]
+                    acc_prefix = Style().bold(True).foreground(b_color).render(f"[{acc_short}] ")
+                    acc_prefix_len = len(f"[{acc_short}] ")
+
                 sender_col = truncate_ansi(f"{tree_prefix}{m.sender_short}", 14)
                 date_col = f"{m.short_date:>6}"
-                subj_avail = max(8, inner_w - 28)
+                subj_avail = max(6, inner_w - 28 - acc_prefix_len)
                 subj_col = truncate_ansi(f"{thread_cnt}{m.subject}", subj_avail)
 
-                raw_line = f"{unread_ch}{star_ch} {sender_col:<14} {subj_col:<{subj_avail}} {att_ch}{pgp_ch}{date_col}"
+                raw_line = f"{unread_ch}{star_ch} {acc_prefix}{sender_col:<14} {subj_col:<{subj_avail}} {att_ch}{pgp_ch}{date_col}"
                 trimmed = truncate_ansi(raw_line, inner_w)
 
                 if is_sel and self.focused_pane == "messages":

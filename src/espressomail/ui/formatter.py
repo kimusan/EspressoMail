@@ -146,13 +146,16 @@ class _HTMLToTerminalParser(HTMLParser):
         return "\n".join(cleaned).strip()
 
 
-def html_to_terminal_text(raw_html: str) -> str:
+def html_to_terminal_text(raw_html: str, include_image_markers: bool = False) -> str:
     """Convert HTML email content into clean Markdown-like terminal text."""
     if not raw_html.strip():
         return ""
     parser = _HTMLToTerminalParser()
-    parser.feed(raw_html)
-    return parser.get_text(include_image_markers=False)
+    try:
+        parser.feed(raw_html)
+    except Exception:
+        pass
+    return parser.get_text(include_image_markers=include_image_markers)
 
 
 def extract_html_images(raw_html: str) -> list[tuple[str, str]]:
@@ -320,6 +323,11 @@ def format_email_body(
             out_lines.append(Style().foreground(theme.fg_muted).render("─" * min(32, wrap_w)))
             continue
 
+        # Image marker pass-through (preserved for inline placement)
+        if re.match(r"^\[\[IMAGE:\d+\]\]$", stripped):
+            out_lines.append(stripped)
+            continue
+
         styled_line = _apply_inline_formatting(line, theme)
         wrapped = wrap_ansi(styled_line, width=wrap_w)
         out_lines.extend(wrapped.splitlines() if wrapped else [""])
@@ -357,6 +365,7 @@ def format_message_for_reading_pane(
     image_renderer: TerminalImageRenderer,
     thread: EmailThread | None = None,
     show_raw_headers: bool = False,
+    account: AccountConfig | None = None,
 ) -> str:
     """Format a complete EmailMessage (or multi-message thread) for the Reading Pane viewport."""
     inner_w = max(30, width - 4)
@@ -392,9 +401,13 @@ def format_message_for_reading_pane(
         header_rows.append(
             f"{lbl_style.render('Cc:      ')} {val_style.render(', '.join(msg.recipients_cc))}"
         )
+
+    acc_name = account.name if account else msg.account_id
+    acc_color = (account.color_badge if (account and account.color_badge) else theme.fg_muted)
+    acc_badge = Style().foreground(acc_color).bold(True).render(f"● {acc_name}")
     header_rows.append(
         f"{lbl_style.render('Date:    ')} {muted_style.render(msg.date_iso or msg.short_date)}  "
-        f"{muted_style.render(f'[{msg.account_id} / {msg.folder}]')}"
+        f"{acc_badge} {muted_style.render(f'[{msg.folder}]')}"
     )
     if thread and thread.message_count > 1:
         participants_str = " → ".join(thread.participants)
@@ -455,31 +468,40 @@ def format_message_for_reading_pane(
 
     sections.append(Style().foreground(theme.border_unfocused).render("━" * inner_w))
 
-    # 4. Inline Terminal Image Previews (shown prominently at top of message content)
-    rendered_image_blocks: list[str] = []
-    if all_images:
-        for img_att in all_images:
-            rendered_box = image_renderer.render_attachment(
-                img_att,
+    # 4. Map HTML inline images to [[IMAGE:{idx}]] markers
+    rendered_marker_blocks: dict[str, str] = {}
+    used_image_ids: set[str] = set()
+
+    for idx, (src, alt) in enumerate(html_img_tags, start=1):
+        marker = f"[[IMAGE:{idx}]]"
+        target_att = None
+        for img in all_images:
+            if img.id == f"html_img_{msg.id}_{idx}" or (img.filename and alt and alt in img.filename):
+                target_att = img
+                break
+        if target_att is None and idx - 1 < len(all_images):
+            target_att = all_images[idx - 1]
+
+        if target_att:
+            used_image_ids.add(target_att.id)
+            box = image_renderer.render_attachment(
+                target_att,
                 theme=theme,
                 max_width=inner_w,
                 max_height=12,
                 skip_tiny_trackers=True,
             )
-            if rendered_box:
-                rendered_image_blocks.append(rendered_box)
-    elif html_img_tags and image_renderer.backend == ImageRenderBackend.OFF:
-        rendered_image_blocks.append(
-            Style()
-            .foreground(theme.fg_muted)
-            .italic(True)
-            .render(
-                f"  [Image preview disabled ({len(html_img_tags)} HTML image(s)) — press 'i' to enable]"
+            if box:
+                rendered_marker_blocks[marker] = box
+        elif image_renderer.backend == ImageRenderBackend.OFF:
+            rendered_marker_blocks[marker] = (
+                Style()
+                .foreground(theme.fg_muted)
+                .italic(True)
+                .render(
+                    f"  [Image preview disabled ({alt or f'Image {idx}'}) — press 'i' to enable]"
+                )
             )
-        )
-
-    if rendered_image_blocks:
-        sections.append("\n\n".join(rendered_image_blocks))
 
     # 5. Earlier messages in the conversation thread (if part of a multi-message thread)
     if thread and thread.message_count > 1:
@@ -502,11 +524,36 @@ def format_message_for_reading_pane(
                 f"{Style().foreground(theme.border_unfocused).render('╰' + '─' * min(40, inner_w - 2))}"
             )
 
-    # 6. Primary Message Body
-    body_source = msg.body_text.strip()
-    if not body_source and msg.body_html:
-        body_source = html_to_terminal_text(msg.body_html)
-    sections.append(format_email_body(body_source or "(Empty message body)", theme, inner_w))
+    # 6. Primary Message Body (images rendered inline in the flow)
+    if msg.body_html:
+        body_source = html_to_terminal_text(msg.body_html, include_image_markers=True)
+    else:
+        body_source = msg.body_text.strip()
+
+    body_formatted = format_email_body(body_source or "(Empty message body)", theme, inner_w)
+    for marker, box in rendered_marker_blocks.items():
+        if marker in body_formatted:
+            body_formatted = body_formatted.replace(marker, f"\n{box}\n")
+    body_formatted = re.sub(r"\n*\[\[IMAGE:\d+\]\]\n*", "\n", body_formatted)
+    sections.append(body_formatted)
+
+    # 7. Leftover image attachments not placed inline in the text
+    leftover_images = [img for img in all_images if img.id not in used_image_ids]
+    if leftover_images:
+        leftover_boxes: list[str] = []
+        for img in leftover_images:
+            box = image_renderer.render_attachment(
+                img,
+                theme=theme,
+                max_width=inner_w,
+                max_height=12,
+                skip_tiny_trackers=True,
+            )
+            if box:
+                leftover_boxes.append(box)
+        if leftover_boxes:
+            att_hdr = Style().bold(True).foreground(theme.accent_secondary).render("── Image Attachments ──")
+            sections.append(f"{att_hdr}\n\n" + "\n\n".join(leftover_boxes))
 
     return "\n\n".join(sections)
 
