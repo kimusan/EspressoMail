@@ -323,35 +323,61 @@ class TestUIAndApp(unittest.TestCase):
         self.assertEqual(depth0_labels.count("Sent"), 1)
         self.assertIn("Archives", depth0_labels)
 
-        # Archives (depth 0) -> 2025 (depth 1) -> inbox & Sent (depth 2)
+        # Folders with children start collapsed by default
         archives_row = next(r for r in acc_rows if r.depth == 0 and r.label == "Archives")
         self.assertTrue(archives_row.has_children)
-        self.assertTrue(archives_row.is_expanded)
+        self.assertFalse(archives_row.is_expanded)
+        self.assertEqual([r for r in acc_rows if r.depth > 0], [])
 
-        depth1_labels = [r.label for r in acc_rows if r.depth == 1]
-        self.assertEqual(depth1_labels, ["2025", "2024"])
-
-        depth2_rows = [r for r in acc_rows if r.depth == 2]
-        self.assertEqual([(r.folder_name, r.label) for r in depth2_rows], [
-            ("Archives/2025/inbox", "inbox"),
-            ("Archives/2025/Sent", "Sent"),
-            ("Archives/2024/Sent", "Sent"),
-        ])
-
-        # 3. Collapse "Archives" via Space key in folders pane and verify children are hidden
+        # 3. Expand "Archives" via Space key -> reveals depth 1 ("2025", "2024"), which also start collapsed
         app.focused_pane = "folders"
         for idx, r in enumerate(app.folder_rows):
             if r.account_id == "acc_tree" and r.depth == 0 and r.label == "Archives":
                 app.folder_cursor = idx
                 break
         app, _ = app.update(KeyMsg(" "))
-        collapsed_acc_rows = [r for r in app.folder_rows if r.account_id == "acc_tree" and not r.is_header]
-        self.assertEqual([r.depth for r in collapsed_acc_rows if r.depth > 0], [])
+        acc_rows = [r for r in app.folder_rows if r.account_id == "acc_tree" and not r.is_header]
+        depth1_labels = [r.label for r in acc_rows if r.depth == 1]
+        self.assertEqual(depth1_labels, ["2025", "2024"])
+        self.assertEqual([r for r in acc_rows if r.depth == 2], [])
 
-        # Expand "Archives" again with 'l'
+        # 4. Expand "2025" via 'l' -> reveals depth 2 ("inbox", "Sent")
+        for idx, r in enumerate(app.folder_rows):
+            if r.account_id == "acc_tree" and r.depth == 1 and r.label == "2025":
+                app.folder_cursor = idx
+                break
         app, _ = app.update(KeyMsg("l"))
-        expanded_acc_rows = [r for r in app.folder_rows if r.account_id == "acc_tree" and not r.is_header]
-        self.assertGreater(len([r for r in expanded_acc_rows if r.depth > 0]), 0)
+        acc_rows = [r for r in app.folder_rows if r.account_id == "acc_tree" and not r.is_header]
+        depth2_rows = [r for r in acc_rows if r.depth == 2]
+        self.assertEqual(
+            [(r.folder_name, r.label) for r in depth2_rows],
+            [
+                ("Archives/2025/inbox", "inbox"),
+                ("Archives/2025/Sent", "Sent"),
+            ],
+        )
+
+        # 5. Verify fold/unfold state is persisted across sessions in LocalStore
+        app_new_session = EspressoMailApp(store=self.store, show_splash=False)
+        session2_rows = [
+            r for r in app_new_session.folder_rows if r.account_id == "acc_tree" and not r.is_header
+        ]
+        self.assertEqual(
+            [(r.depth, r.label) for r in session2_rows if r.depth > 0],
+            [(1, "2025"), (2, "inbox"), (2, "Sent"), (1, "2024")],
+        )
+
+        # 6. Collapse "Archives" with 'h' and verify children are hidden and persisted
+        for idx, r in enumerate(app_new_session.folder_rows):
+            if r.account_id == "acc_tree" and r.depth == 0 and r.label == "Archives":
+                app_new_session.folder_cursor = idx
+                break
+        app_new_session.focused_pane = "folders"
+        app_new_session, _ = app_new_session.update(KeyMsg("h"))
+        collapsed_rows = [
+            r for r in app_new_session.folder_rows if r.account_id == "acc_tree" and not r.is_header
+        ]
+        self.assertEqual([r.depth for r in collapsed_rows if r.depth > 0], [])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -179,7 +180,7 @@ class EspressoMailApp(Model):
         self.folder_rows: list[FolderTreeRow] = []
         self.folder_cursor = 0
         self.folder_scroll = 0
-        self.collapsed_folders: set[str] = set()
+        self.expanded_folders: set[str] = self._load_expanded_folders()
         self.active_account_id = "*"
         self.active_folder = "INBOX"
 
@@ -199,6 +200,27 @@ class EspressoMailApp(Model):
         self.refresh_data()
         if not self.show_splash and not self.store.list_accounts():
             self.show_onboarding = True
+
+    def _load_expanded_folders(self) -> set[str]:
+        """Load persisted expanded folder tree keys from the SQLite settings table."""
+        raw = self.store.get_setting("expanded_folders", "[]")
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return {str(k) for k in parsed if k}
+        except Exception:
+            pass
+        return set()
+
+    def _save_expanded_folders(self) -> None:
+        """Persist expanded folder tree keys to the SQLite settings table across sessions."""
+        try:
+            self.store.set_setting(
+                "expanded_folders",
+                json.dumps(sorted(self.expanded_folders)),
+            )
+        except Exception:
+            pass
 
     @property
     def theme(self) -> Theme:
@@ -317,7 +339,7 @@ class EspressoMailApp(Model):
         def _emit(node: _FolderTreeNode, depth: int, is_last: bool) -> None:
             tree_key = f"{account_id}:{'/'.join(node.path_parts)}"
             has_children = bool(node.children)
-            is_expanded = tree_key not in self.collapsed_folders
+            is_expanded = tree_key in self.expanded_folders
             sub_u, sub_t = _subtree_counts(node)
 
             if (
@@ -808,7 +830,8 @@ class EspressoMailApp(Model):
                 if 0 <= self.folder_cursor < len(self.folder_rows):
                     cur_row = self.folder_rows[self.folder_cursor]
                     if cur_row.has_children and cur_row.is_expanded and cur_row.tree_key:
-                        self.collapsed_folders.add(cur_row.tree_key)
+                        self.expanded_folders.discard(cur_row.tree_key)
+                        self._save_expanded_folders()
                         self._rebuild_folder_rows()
                         self.status_message = f"Collapsed '{cur_row.label}'."
                 return self, None
@@ -816,7 +839,8 @@ class EspressoMailApp(Model):
                 if 0 <= self.folder_cursor < len(self.folder_rows):
                     cur_row = self.folder_rows[self.folder_cursor]
                     if cur_row.has_children and not cur_row.is_expanded and cur_row.tree_key:
-                        self.collapsed_folders.discard(cur_row.tree_key)
+                        self.expanded_folders.add(cur_row.tree_key)
+                        self._save_expanded_folders()
                         self._rebuild_folder_rows()
                         self.status_message = f"Expanded '{cur_row.label}'."
                         return self, None
@@ -837,7 +861,8 @@ class EspressoMailApp(Model):
                         self._toggle_folder_expand(cur_row)
                         return self, None
                     if cur_row.has_children and not cur_row.is_expanded and cur_row.tree_key:
-                        self.collapsed_folders.discard(cur_row.tree_key)
+                        self.expanded_folders.add(cur_row.tree_key)
+                        self._save_expanded_folders()
                         self._rebuild_folder_rows()
                 self._activate_selected_folder()
                 self.focused_pane = "messages"
@@ -878,14 +903,16 @@ class EspressoMailApp(Model):
     def _toggle_folder_expand(self, row: FolderTreeRow) -> None:
         if not row.tree_key:
             return
-        if row.tree_key in self.collapsed_folders:
-            self.collapsed_folders.discard(row.tree_key)
-            self._rebuild_folder_rows()
-            self.status_message = f"Expanded '{row.label}'."
-        else:
-            self.collapsed_folders.add(row.tree_key)
+        if row.tree_key in self.expanded_folders:
+            self.expanded_folders.discard(row.tree_key)
+            self._save_expanded_folders()
             self._rebuild_folder_rows()
             self.status_message = f"Collapsed '{row.label}'."
+        else:
+            self.expanded_folders.add(row.tree_key)
+            self._save_expanded_folders()
+            self._rebuild_folder_rows()
+            self.status_message = f"Expanded '{row.label}'."
 
     def _handle_mouse(self, msg: MouseMsg) -> tuple[EspressoMailApp, Cmd | None]:
         # Top menu bar row (y == 0)
