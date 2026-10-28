@@ -30,6 +30,7 @@ try:
         format_message_for_reading_pane,
         html_to_terminal_text,
     )
+    from espressomail.ui.formatter import _apply_inline_formatting
     from espressomail.themes import ThemeEngine
     HAS_ESPRESSO = True
 except ImportError:
