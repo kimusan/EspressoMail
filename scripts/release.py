@@ -163,6 +163,19 @@ def check_tag_exists(tag: str) -> bool:
     return tag in res.stdout.split()
 
 
+def get_python_exe() -> str:
+    """Find a Python executable with PIL/Pillow and build dependencies installed."""
+    candidates = ["/usr/bin/python3", sys.executable, "python3"]
+    for cand in candidates:
+        try:
+            res = subprocess.run([cand, "-c", "import PIL"], capture_output=True)
+            if res.returncode == 0:
+                return cand
+        except Exception:
+            pass
+    return sys.executable
+
+
 def run_tests() -> None:
     """Run full test suite."""
     log("Running test suite...")
@@ -179,7 +192,8 @@ def run_tests() -> None:
     pythonpath_val = ":".join(extra_paths)
     env = {"PYTHONPATH": pythonpath_val}
 
-    test_cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"]
+    py_exe = get_python_exe()
+    test_cmd = [py_exe, "-m", "unittest", "discover", "-s", "tests", "-v"]
     run_cmd(test_cmd, env=env)
     log_success("All tests passed.")
 
@@ -187,7 +201,8 @@ def run_tests() -> None:
 def run_build_check() -> None:
     """Test building wheel and sdist to ensure package configuration is valid."""
     log("Verifying package build (sdist & wheel)...")
-    build_cmd = [sys.executable, "-m", "build", "--no-isolation"]
+    py_exe = get_python_exe()
+    build_cmd = [py_exe, "-m", "build", "--no-isolation"]
     run_cmd(build_cmd)
     log_success("Package build verification succeeded.")
 
