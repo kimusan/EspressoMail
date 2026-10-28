@@ -46,7 +46,11 @@ def extract_notes(tag: str, manual_notes: str = "", repo_root: Path | None = Non
     body_parts: list[str] = []
     # If tag_msg has custom content (not just 'Release vX.Y.Z'), include it at top
     default_tag_msg = f"Release {tag}"
-    if tag_msg and tag_msg != default_tag_msg and tag_msg not in changelog_notes:
+    is_commit_title = any(
+        tag_msg.strip().startswith(prefix)
+        for prefix in ("feat:", "feat(", "fix:", "fix(", "chore:", "chore(", "docs:", "docs(", "refactor:", "refactor(")
+    )
+    if tag_msg and tag_msg != default_tag_msg and tag_msg not in changelog_notes and not is_commit_title:
         first_line = tag_msg.split("\n")[0].strip()
         if first_line not in changelog_notes:
             body_parts.append(f"### {tag_msg}\n")
