@@ -82,7 +82,8 @@ def _format_sieve_action(rule: SieveFilterRule) -> str:
     if act == "redirect":
         return f'redirect "{arg}";'
     if act in ("flag", "addflag", "setflag"):
-        return f'addflag "{arg or "\\\\Flagged"}";'
+        flag_val = arg or "\\\\Flagged"
+        return f'addflag "{flag_val}";'
     if act == "reject":
         return f'reject "{arg or "Message rejected by filter"}";'
     if act == "discard":
