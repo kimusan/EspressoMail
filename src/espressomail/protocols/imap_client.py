@@ -171,7 +171,11 @@ def parse_rfc5322_bytes(
                 fname = filename or (
                     f"image_{idx + 1}.{effective_ctype.split('/')[-1]}"
                     if effective_ctype.startswith("image/")
-                    else f"attachment_{idx + 1}.bin"
+                    else (
+                        "invite.ics"
+                        if effective_ctype in ("text/calendar", "application/ics")
+                        else f"attachment_{idx + 1}.bin"
+                    )
                 )
                 att_id = f"{local_id}:att:{idx}:{fname}"
                 attachments.append(
@@ -183,6 +187,21 @@ def parse_rfc5322_bytes(
                         size_bytes=len(payload_bytes),
                         content_id=cid_val,
                         is_inline=(disp == "inline" or bool(cid_val)),
+                        data=payload_bytes,
+                    )
+                )
+            elif ctype in ("text/calendar", "application/ics") or (payload_bytes and b"BEGIN:VCALENDAR" in payload_bytes):
+                fname = filename or "invite.ics"
+                att_id = f"{local_id}:att:{idx}:{fname}"
+                attachments.append(
+                    Attachment(
+                        id=att_id,
+                        message_id=local_id,
+                        filename=fname,
+                        content_type=effective_ctype or "text/calendar",
+                        size_bytes=len(payload_bytes),
+                        content_id=cid_val,
+                        is_inline=True,
                         data=payload_bytes,
                     )
                 )
@@ -247,6 +266,19 @@ def parse_rfc5322_bytes(
                     data=payload_bytes,
                 )
             )
+        elif effective_root_ctype in ("text/calendar", "application/ics") or (payload_bytes and b"BEGIN:VCALENDAR" in payload_bytes):
+            fname = decode_mime_header(msg.get_filename()) or "invite.ics"
+            attachments.append(
+                Attachment(
+                    id=f"{local_id}:att:0:{fname}",
+                    message_id=local_id,
+                    filename=fname,
+                    content_type=effective_root_ctype or "text/calendar",
+                    size_bytes=len(payload_bytes),
+                    is_inline=True,
+                    data=payload_bytes,
+                )
+            )
         else:
             charset = msg.get_content_charset() or "utf-8"
             if charset.lower() in ("unknown-8bit", "x-unknown"):
@@ -259,6 +291,7 @@ def parse_rfc5322_bytes(
                 body_html_parts.append(text)
             else:
                 body_text_parts.append(text)
+
 
     body_text = "\n".join(body_text_parts).strip()
     body_html = "\n".join(body_html_parts).strip()

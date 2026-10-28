@@ -70,6 +70,7 @@ DEFAULT_MENUS: tuple[MenuCategory, ...] = (
             MenuItem("reply", "Reply to Sender", "r"),
             MenuItem("reply_all", "Reply to All", "R"),
             MenuItem("forward", "Forward Message", "f"),
+            MenuItem("rsvp_calendar", "RSVP to Calendar Invite...", "1/2/3"),
             MenuItem("toggle_star", "Toggle Star / Flag", "s"),
             MenuItem("toggle_read", "Toggle Read / Unread", "u"),
             MenuItem("add_sender_contact", "Add Sender to Contacts", "a"),

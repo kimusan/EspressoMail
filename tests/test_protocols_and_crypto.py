@@ -585,6 +585,159 @@ class TestProtocolsAndCrypto(unittest.TestCase):
                 root.handlers = old_handlers
                 log_mod._LOG_CONFIGURED = orig_configured
 
+    def test_icalendar_parsing_and_rsvp_generation(self) -> None:
+        """Verify RFC 5545 iCalendar parsing, line unfolding, and RFC 6047 iMIP RSVP generation."""
+        from datetime import timezone
+        from espressomail.models.entities import Attachment
+        from espressomail.protocols.icalendar import (
+            CalendarEvent,
+            build_ics_reply,
+            build_rsvp_mime_message,
+            find_calendar_event,
+            parse_ics,
+            unfold_ical_text,
+        )
+
+        sample_ics = (
+            "BEGIN:VCALENDAR\r\n"
+            "PRODID:-//Google Inc//Google Calendar 70.9054//EN\r\n"
+            "VERSION:2.0\r\n"
+            "CALSCALE:GREGORIAN\r\n"
+            "METHOD:REQUEST\r\n"
+            "BEGIN:VEVENT\r\n"
+            "DTSTART:20261029T140000Z\r\n"
+            "DTEND:20261029T153000Z\r\n"
+            "DTSTAMP:20261028T220000Z\r\n"
+            "ORGANIZER;CN=\"Alice Smith\":mailto:alice@example.com\r\n"
+            "UID:team-sync-9988@example.com\r\n"
+            "ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;CN=\"Alice\r\n"
+            "  Smith\";X-NUM-GUESTS=0:mailto:alice@example.com\r\n"
+            "ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=\r\n"
+            " TRUE;CN=\"Kim Schulz\";X-NUM-GUESTS=0:mailto:kim@schulz.dk\r\n"
+            "SUMMARY:Q4 Engineering Roadmap \\, Planning \\; Sync\r\n"
+            "DESCRIPTION:Quarterly engineering sync\\nDiscussing Q4 roadmap\\nJoin Meet: \r\n"
+            " https://meet.jit.si/team-sync\r\n"
+            "LOCATION:Room 404 / Video Call (https://meet.jit.si/team-sync)\r\n"
+            "SEQUENCE:1\r\n"
+            "STATUS:CONFIRMED\r\n"
+            "END:VEVENT\r\n"
+            "END:VCALENDAR\r\n"
+        )
+
+        # 1. Test unfolding
+        unfolded = unfold_ical_text(sample_ics)
+        self.assertTrue(any("Kim Schulz" in line and "RSVP=TRUE" in line for line in unfolded))
+
+        # 2. Test parse_ics
+        events = parse_ics(sample_ics)
+        self.assertEqual(len(events), 1)
+        ev = events[0]
+        self.assertEqual(ev.uid, "team-sync-9988@example.com")
+        self.assertEqual(ev.summary, "Q4 Engineering Roadmap , Planning ; Sync")
+        self.assertIn("Quarterly engineering sync\nDiscussing Q4 roadmap", ev.description)
+        self.assertEqual(ev.location, "Room 404 / Video Call (https://meet.jit.si/team-sync)")
+        self.assertEqual(ev.organizer_email, "alice@example.com")
+        self.assertEqual(ev.organizer_cn, "Alice Smith")
+        self.assertEqual(ev.organizer_display, "Alice Smith <alice@example.com>")
+        self.assertEqual(ev.status, "CONFIRMED")
+        self.assertEqual(ev.method, "REQUEST")
+        self.assertEqual(ev.sequence, 1)
+        self.assertFalse(ev.is_all_day)
+        self.assertIsNotNone(ev.dtstart)
+        self.assertIsNotNone(ev.dtend)
+        self.assertEqual(ev.dtstart.year, 2026)
+        self.assertEqual(ev.dtstart.month, 10)
+        self.assertEqual(ev.dtstart.day, 29)
+        self.assertEqual(ev.dtstart.hour, 14)
+        self.assertEqual(ev.dtend.hour, 15)
+        self.assertEqual(ev.dtend.minute, 30)
+        self.assertIn("14:00 – 15:30", ev.formatted_time_range())
+        self.assertEqual(len(ev.attendees), 2)
+        self.assertEqual(ev.attendees[1].email, "kim@schulz.dk")
+        self.assertEqual(ev.attendees[1].cn, "Kim Schulz")
+        self.assertTrue(ev.attendees[1].rsvp)
+
+        # 3. Test all-day event
+        all_day_ics = (
+            "BEGIN:VCALENDAR\r\n"
+            "VERSION:2.0\r\n"
+            "BEGIN:VEVENT\r\n"
+            "UID:hackathon-2026@example.com\r\n"
+            "SUMMARY:Global Hackathon\r\n"
+            "DTSTART;VALUE=DATE:20261105\r\n"
+            "DTEND;VALUE=DATE:20261107\r\n"
+            "STATUS:CONFIRMED\r\n"
+            "END:VEVENT\r\n"
+            "END:VCALENDAR\r\n"
+        )
+        all_day_evs = parse_ics(all_day_ics)
+        self.assertEqual(len(all_day_evs), 1)
+        self.assertTrue(all_day_evs[0].is_all_day)
+        self.assertIn("All Day", all_day_evs[0].formatted_time_range())
+
+        # 4. Test find_calendar_event via attachment
+        msg = EmailMessage(
+            id="msg_cal_1",
+            account_id="acc_test",
+            subject="Invitation: Q4 Roadmap",
+            sender_email="alice@example.com",
+            sender_name="Alice",
+            attachments=[
+                Attachment(
+                    id="att_cal_1",
+                    message_id="msg_cal_1",
+                    filename="invite.ics",
+                    content_type="text/calendar",
+                    size_bytes=len(sample_ics),
+                    data=sample_ics.encode("utf-8"),
+                )
+            ],
+        )
+        found = find_calendar_event(msg)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.summary, ev.summary)
+
+        # 5. Test find_calendar_event via body text
+        msg_body = EmailMessage(
+            id="msg_cal_2",
+            account_id="acc_test",
+            subject="Event Details",
+            sender_email="alice@example.com",
+            body_text=f"Please find the calendar payload below:\n{sample_ics}",
+        )
+        found_body = find_calendar_event(msg_body)
+        self.assertIsNotNone(found_body)
+        self.assertEqual(found_body.uid, "team-sync-9988@example.com")
+
+        # 6. Test build_ics_reply
+        reply_ics = build_ics_reply(
+            event=ev,
+            user_email="kim@schulz.dk",
+            user_name="Kim Schulz",
+            partstat="ACCEPTED",
+            comment="Looking forward to it!",
+        )
+        self.assertIn("METHOD:REPLY", reply_ics)
+        self.assertIn("ATTENDEE;PARTSTAT=ACCEPTED;CN=\"Kim Schulz\":mailto:kim@schulz.dk", reply_ics)
+        self.assertIn("COMMENT:Looking forward to it!", reply_ics)
+        self.assertIn("UID:team-sync-9988@example.com", reply_ics)
+
+        # 7. Test build_rsvp_mime_message
+        mime_msg, domain_msg = build_rsvp_mime_message(
+            account=self.account,
+            orig_msg=msg,
+            event=ev,
+            partstat="ACCEPTED",
+            comment="Looking forward to it!",
+        )
+        self.assertEqual(mime_msg["To"], "alice@example.com")
+        self.assertIn("Accepted: Q4 Engineering Roadmap", mime_msg["Subject"])
+        self.assertEqual(domain_msg.folder, "Sent")
+        self.assertEqual(len(domain_msg.attachments), 1)
+        self.assertEqual(domain_msg.attachments[0].filename, "invite.ics")
+        self.assertIn(b"PARTSTAT=ACCEPTED", domain_msg.attachments[0].data)
+
+
 
 if __name__ == "__main__":
     unittest.main()

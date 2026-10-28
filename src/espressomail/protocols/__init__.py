@@ -5,6 +5,14 @@ from espressomail.protocols.carddav import (
     format_vcard,
     parse_vcards,
 )
+from espressomail.protocols.icalendar import (
+    CalendarAttendee,
+    CalendarEvent,
+    build_ics_reply,
+    build_rsvp_mime_message,
+    find_calendar_event,
+    parse_ics,
+)
 from espressomail.protocols.imap_client import (
     IMAPClient,
     decode_mime_header,
@@ -41,4 +49,11 @@ __all__ = [
     "CardDAVClient",
     "parse_vcards",
     "format_vcard",
+    "CalendarAttendee",
+    "CalendarEvent",
+    "parse_ics",
+    "find_calendar_event",
+    "build_ics_reply",
+    "build_rsvp_mime_message",
 ]
+

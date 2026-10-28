@@ -21,6 +21,7 @@ from espressomail.models.entities import (
     EmailThread,
     PGPStatus,
 )
+from espressomail.protocols.icalendar import CalendarEvent, find_calendar_event
 from espressomail.themes.engine import Theme
 from espressomail.ui.image_renderer import (
     ImageRenderBackend,
@@ -448,11 +449,16 @@ def format_message_for_reading_pane(
 
     sections.append("\n".join(header_rows))
 
-    # 2. Cryptographic PGP Status Banner
+    # 2. Calendar Event / Invitation Banner
+    cal_event = find_calendar_event(msg)
+    if cal_event:
+        sections.append(_render_calendar_banner(cal_event, theme, inner_w))
+
+    # 3. Cryptographic PGP Status Banner
     if msg.pgp_status != PGPStatus.NONE:
         sections.append(_render_pgp_banner(msg, theme, inner_w))
 
-    # 3. Attachments & Images Bar
+    # 4. Attachments & Images Bar
     display_attachments = list(msg.attachments)
     existing_att_ids = {a.id for a in display_attachments}
     for img_att in all_images:
@@ -463,7 +469,8 @@ def format_message_for_reading_pane(
     if display_attachments or html_img_tags:
         att_chips: list[str] = []
         for idx, att in enumerate(display_attachments, start=1):
-            icon = "🖼️" if att.is_image else "📎"
+            is_ics = att.filename.lower().endswith(".ics") or "calendar" in att.content_type.lower()
+            icon = "🖼️" if att.is_image else ("📅" if is_ics else "📎")
             saved_mark = " ✔saved" if att.local_path else ""
             chip = (
                 Style()
@@ -620,3 +627,102 @@ def _render_pgp_banner(msg: EmailMessage, theme: Theme, width: int) -> str:
         .foreground(color)
         .render(truncate_ansi(badge, max(20, width)))
     )
+
+
+def _render_calendar_banner(event: CalendarEvent, theme: Theme, width: int) -> str:
+    """Render a visual, interactive iCalendar event invitation / cancellation banner."""
+    inner_w = max(28, width - 4)
+    b_color = theme.accent_primary
+    title_icon = "📅"
+    title_text = "Calendar Event"
+
+    is_cancelled = event.method == "CANCEL" or event.status == "CANCELLED"
+    is_reply = event.method == "REPLY"
+
+    if is_cancelled:
+        b_color = theme.pgp_error_fg
+        title_icon = "🚫"
+        title_text = "Event Cancelled"
+    elif is_reply:
+        b_color = theme.accent_secondary
+        title_icon = "📨"
+        title_text = "Event RSVP Response"
+    elif event.method in ("REQUEST", "PUBLISH"):
+        b_color = theme.accent_primary
+        title_icon = "📅"
+        title_text = "Calendar Invitation"
+
+    border_style = Style().foreground(b_color)
+    lbl_style = Style().bold(True).foreground(theme.accent_primary)
+    val_style = Style().foreground(theme.fg_primary)
+    muted_style = Style().foreground(theme.fg_muted)
+
+    top_title = f" {title_icon} {title_text}: {event.summary} "
+    top_title_cut = truncate_ansi(top_title, inner_w - 6)
+    rem_bar = max(2, inner_w - string_width(top_title_cut) - 2)
+    top_border = border_style.render(f"╭─{top_title_cut}{'─' * rem_bar}╮")
+    bottom_border = border_style.render(f"╰{'─' * (inner_w + 2)}╯")
+
+    rows: list[str] = []
+
+    # Time range
+    time_str = event.formatted_time_range()
+    rows.append(f"{lbl_style.render('When:        ')} {val_style.render(time_str)}")
+
+    # Location
+    if event.location:
+        loc_formatted = _apply_inline_formatting(event.location, theme)
+        rows.append(f"{lbl_style.render('Where:       ')} {loc_formatted}")
+
+    # Organizer
+    if event.organizer_display:
+        rows.append(f"{lbl_style.render('Organizer:   ')} {val_style.render(event.organizer_display)}")
+
+    # Status
+    if is_cancelled:
+        rows.append(
+            f"{lbl_style.render('Status:      ')} "
+            f"{Style().bold(True).foreground(theme.pgp_error_fg).render('Cancelled by Organizer')}"
+        )
+    elif is_reply:
+        first_att = event.attendees[0] if event.attendees else None
+        reply_stat = first_att.partstat if first_att else "Replied"
+        rows.append(
+            f"{lbl_style.render('Status:      ')} "
+            f"{Style().bold(True).foreground(theme.accent_secondary).render(reply_stat)}"
+        )
+    else:
+        rows.append(f"{lbl_style.render('Status:      ')} {muted_style.render(event.status or 'Confirmed')}")
+
+    # Attendees snippet
+    if event.attendees:
+        att_names = [a.cn or a.email for a in event.attendees[:6]]
+        att_str = ", ".join(att_names)
+        if len(event.attendees) > 6:
+            att_str += f" (+{len(event.attendees) - 6} more)"
+        rows.append(f"{lbl_style.render('Attendees:   ')} {muted_style.render(att_str)}")
+
+    # Description (if present)
+    if event.description:
+        desc_line = " ".join(event.description.splitlines())
+        if desc_line.strip():
+            desc_cut = desc_line[:120] + ("…" if len(desc_line) > 120 else "")
+            rows.append(f"{lbl_style.render('Details:     ')} {val_style.render(desc_cut)}")
+
+    # RSVP Action options
+    if event.method in ("REQUEST", "PUBLISH") and not is_cancelled:
+        rows.append("")
+        btn_accept = Style().bold(True).foreground(theme.unread_fg).render("[1] Accept")
+        btn_tentative = Style().bold(True).foreground(theme.starred_fg).render("[2] Tentative")
+        btn_decline = Style().bold(True).foreground(theme.pgp_error_fg).render("[3] Decline")
+        hint = muted_style.render("(Press '1', '2', or '3' to respond)")
+        rows.append(f"{btn_accept}   {btn_tentative}   {btn_decline}   {hint}")
+
+    content_lines: list[str] = [top_border]
+    v_bar = border_style.render("│ ")
+    for r in rows:
+        content_lines.append(f"{v_bar}{r}")
+    content_lines.append(bottom_border)
+
+    return "\n".join(content_lines)
+

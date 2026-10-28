@@ -39,6 +39,7 @@ from espressomail.models.entities import (
     SieveScript,
 )
 from espressomail.protocols.carddav import CardDAVClient
+from espressomail.protocols.icalendar import CalendarEvent
 from espressomail.protocols.sieve import (
     ManageSieveClient,
     apply_sieve_rules_locally,
@@ -62,6 +63,18 @@ class ModalClosedMsg(Msg):
 
     status_note: str = ""
     trigger_sync: bool = False
+
+
+@dataclass(frozen=True)
+class RSVPSubmittedMsg(Msg):
+    """Emitted when user submits an RSVP response to a calendar invitation."""
+
+    account: AccountConfig
+    orig_message: EmailMessage
+    event: CalendarEvent
+    partstat: str  # "ACCEPTED", "DECLINED", "TENTATIVE"
+    comment: str = ""
+
 
 
 @dataclass(frozen=True)
@@ -1755,6 +1768,7 @@ class HelpModal(Model):
             h_style.render("Mail Actions"),
             f"  {k_style.render('c')}  Compose new mail      {k_style.render('r / R')}  Reply / Reply All",
             f"  {k_style.render('f')}  Forward message       {k_style.render('s')}      Toggle Star / Flag",
+            f"  {k_style.render('1/2/3')} Calendar RSVP (Accept/Tentative/Decline)",
             f"  {k_style.render('w')}  Save attachments      {k_style.render('M')}      Fetch older messages",
             f"  {k_style.render('S')}  Sync all accounts     {k_style.render('X')}      Empty Trash",
             "",
@@ -2332,5 +2346,223 @@ class PreferencesModal(Model):
         self.last_pos_x = max(0, (width - self.last_modal_w) // 2)
         self.last_pos_y = max(0, (height - self.last_modal_h) // 2)
         return rendered
+
+
+# ---------------------------------------------------------------------------
+# 7. Calendar RSVP Modal
+# ---------------------------------------------------------------------------
+
+
+class RSVPModal(Model):
+    """Interactive modal to review invitation details and send an iMIP RSVP response."""
+
+    def __init__(
+        self,
+        account: AccountConfig,
+        orig_message: EmailMessage,
+        event: CalendarEvent,
+        theme: Theme,
+        initial_response: str = "ACCEPTED",
+    ) -> None:
+        self.account = account
+        self.orig_message = orig_message
+        self.event = event
+        self.theme = theme
+
+        self.selected_response = initial_response.upper()
+        if self.selected_response not in ("ACCEPTED", "TENTATIVE", "DECLINED"):
+            self.selected_response = "ACCEPTED"
+
+        self.comment_input = TextInput(placeholder="Optional note / comment for organizer...")
+        self.focused_field = "options"  # "options", "comment", "send_btn", "cancel_btn"
+
+        # Hit-testing coordinates
+        self.last_pos_x = 0
+        self.last_pos_y = 0
+        self.last_modal_w = 64
+        self.last_modal_h = 16
+        self.options_y_offset = 0
+        self.comment_y_offset = 0
+        self.buttons_y_offset = 0
+
+    def init(self) -> Cmd | None:
+        return None
+
+    def update(self, msg: Msg) -> tuple[RSVPModal, Cmd | None]:
+        if isinstance(msg, KeyMsg):
+            k = str(msg.key).lower()
+            if k == "esc":
+                return self, lambda: ModalClosedMsg("RSVP response cancelled.")
+
+            if k == "1":
+                self.selected_response = "ACCEPTED"
+                return self, None
+            if k == "2":
+                self.selected_response = "TENTATIVE"
+                return self, None
+            if k == "3":
+                self.selected_response = "DECLINED"
+                return self, None
+
+            if k in ("tab", "down"):
+                order = ["options", "comment", "send_btn", "cancel_btn"]
+                idx = order.index(self.focused_field)
+                self.focused_field = order[(idx + 1) % len(order)]
+                if self.focused_field == "comment":
+                    self.comment_input.focus()
+                else:
+                    self.comment_input.blur()
+                return self, None
+
+            if k in ("shift+tab", "up"):
+                order = ["options", "comment", "send_btn", "cancel_btn"]
+                idx = order.index(self.focused_field)
+                self.focused_field = order[(idx - 1) % len(order)]
+                if self.focused_field == "comment":
+                    self.comment_input.focus()
+                else:
+                    self.comment_input.blur()
+                return self, None
+
+            if self.focused_field == "options":
+                if k in ("left", "h"):
+                    opts = ["ACCEPTED", "TENTATIVE", "DECLINED"]
+                    idx = opts.index(self.selected_response)
+                    self.selected_response = opts[max(0, idx - 1)]
+                    return self, None
+                if k in ("right", "l"):
+                    opts = ["ACCEPTED", "TENTATIVE", "DECLINED"]
+                    idx = opts.index(self.selected_response)
+                    self.selected_response = opts[min(len(opts) - 1, idx + 1)]
+                    return self, None
+                if k in ("enter", " "):
+                    return self._submit()
+
+            elif self.focused_field == "comment":
+                if k == "enter":
+                    return self._submit()
+                self.comment_input, cmd = self.comment_input.update(msg)
+                return self, cmd
+
+            elif self.focused_field == "send_btn":
+                if k in ("enter", " "):
+                    return self._submit()
+
+            elif self.focused_field == "cancel_btn":
+                if k in ("enter", " "):
+                    return self, lambda: ModalClosedMsg("RSVP response cancelled.")
+
+        if isinstance(msg, MouseMsg) and msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
+            rel_x = msg.x - self.last_pos_x
+            rel_y = msg.y - self.last_pos_y
+            if 0 <= rel_x < self.last_modal_w and 0 <= rel_y < self.last_modal_h:
+                line_idx = rel_y - 1
+                if line_idx == self.options_y_offset:
+                    self.focused_field = "options"
+                    self.comment_input.blur()
+                    if rel_x < 20:
+                        self.selected_response = "ACCEPTED"
+                    elif rel_x < 36:
+                        self.selected_response = "TENTATIVE"
+                    else:
+                        self.selected_response = "DECLINED"
+                    return self, None
+                elif line_idx == self.comment_y_offset:
+                    self.focused_field = "comment"
+                    self.comment_input.focus()
+                    return self, None
+                elif line_idx == self.buttons_y_offset:
+                    if rel_x < 30:
+                        self.focused_field = "send_btn"
+                        return self._submit()
+                    else:
+                        return self, lambda: ModalClosedMsg("RSVP response cancelled.")
+
+        return self, None
+
+    def _submit(self) -> tuple[RSVPModal, Cmd]:
+        cmd = lambda: RSVPSubmittedMsg(
+            account=self.account,
+            orig_message=self.orig_message,
+            event=self.event,
+            partstat=self.selected_response,
+            comment=self.comment_input.value.strip(),
+        )
+        return self, cmd
+
+    def view(self, width: int = 80, height: int = 24) -> str:
+        modal_w = min(68, max(48, width - 8))
+        lbl_style = Style().bold(True).foreground(self.theme.accent_primary)
+        val_style = Style().foreground(self.theme.fg_primary)
+        muted_style = Style().foreground(self.theme.fg_muted)
+
+        rows: list[str] = [
+            f"{lbl_style.render('Event:       ')} {val_style.render(truncate_ansi(self.event.summary, modal_w - 18))}",
+            f"{lbl_style.render('When:        ')} {val_style.render(self.event.formatted_time_range())}",
+        ]
+        if self.event.location:
+            rows.append(f"{lbl_style.render('Where:       ')} {val_style.render(truncate_ansi(self.event.location, modal_w - 18))}")
+        if self.event.organizer_display:
+            rows.append(f"{lbl_style.render('Organizer:   ')} {muted_style.render(truncate_ansi(self.event.organizer_display, modal_w - 18))}")
+
+        rows.append("")
+        rows.append(lbl_style.render("Your Response:"))
+        self.options_y_offset = len(rows)
+
+        # Radio options
+        def _fmt_opt(key: str, label: str, shortcut: str, active_color: str) -> str:
+            selected = self.selected_response == key
+            marker = "●" if selected else "○"
+            box = f"[{marker}] [{shortcut}] {label}"
+            if selected:
+                return Style().bold(True).foreground(active_color).render(box)
+            return Style().foreground(self.theme.fg_muted).render(box)
+
+        opt_accept = _fmt_opt("ACCEPTED", "Accept", "1", self.theme.unread_fg)
+        opt_tentative = _fmt_opt("TENTATIVE", "Tentative", "2", self.theme.starred_fg)
+        opt_decline = _fmt_opt("DECLINED", "Decline", "3", self.theme.pgp_error_fg)
+
+        options_focus_highlight = " ◄" if self.focused_field == "options" else ""
+        rows.append(f"  {opt_accept}    {opt_tentative}    {opt_decline}{options_focus_highlight}")
+
+        rows.append("")
+        comment_focus_str = " (focused)" if self.focused_field == "comment" else ""
+        rows.append(lbl_style.render(f"Optional Note / Comment{comment_focus_str}:"))
+        self.comment_y_offset = len(rows)
+        comment_box = self.comment_input.view()
+        rows.append(f"  {comment_box}")
+
+        rows.append("")
+        self.buttons_y_offset = len(rows)
+        send_focus = self.focused_field == "send_btn"
+        cancel_focus = self.focused_field == "cancel_btn"
+
+        send_btn = (
+            Style().bold(True).background(self.theme.accent_primary).foreground(self.theme.bg_primary).render(" [ Send Response (Enter) ] ")
+            if send_focus
+            else Style().background(self.theme.bg_highlight).foreground(self.theme.accent_primary).render(" [ Send Response (Enter) ] ")
+        )
+        cancel_btn = (
+            Style().bold(True).background(self.theme.bg_highlight).foreground(self.theme.fg_primary).render(" [ Cancel (Esc) ] ")
+            if cancel_focus
+            else Style().background(self.theme.bg_highlight).foreground(self.theme.fg_muted).render(" [ Cancel (Esc) ] ")
+        )
+        rows.append(f"  {send_btn}   {cancel_btn}")
+
+        rows.append("")
+        rows.append(
+            muted_style.render(
+                "  [1/2/3] Quick response  [Tab/Arrows] Navigate  [Enter] Send  [Esc] Cancel"
+            )
+        )
+
+        rendered = self.theme.modal_style(modal_w, "📅 RSVP to Calendar Invitation").render("\n".join(rows))
+        modal_lines = rendered.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        self.last_modal_h = len(modal_lines)
+        self.last_modal_w = max((string_width(l) for l in modal_lines), default=modal_w)
+        self.last_pos_x = max(0, (width - self.last_modal_w) // 2)
+        self.last_pos_y = max(0, (height - self.last_modal_h) // 2)
+        return rendered
+
 
 

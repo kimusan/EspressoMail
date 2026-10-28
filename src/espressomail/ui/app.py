@@ -62,6 +62,11 @@ from espressomail.models.entities import (
     classify_folder_type,
     split_folder_hierarchy,
 )
+from espressomail.protocols.icalendar import (
+    CalendarEvent,
+    build_rsvp_mime_message,
+    find_calendar_event,
+)
 from espressomail.protocols.imap_client import IMAPClient
 from espressomail.protocols.sieve import ManageSieveClient
 from espressomail.protocols.smtp_client import (
@@ -93,6 +98,8 @@ from espressomail.ui.modals import (
     PGPModal,
     PreferencesModal,
     PreferencesSavedMsg,
+    RSVPModal,
+    RSVPSubmittedMsg,
     SearchModal,
     SearchSelectMessageMsg,
     SieveModal,
@@ -421,6 +428,7 @@ class EspressoMailApp(Model):
             PaletteItem("reply", "Mail: Reply to Sender", "Reply to selected message", "r", "Mail"),
             PaletteItem("reply_all", "Mail: Reply All", "Reply to all recipients", "R", "Mail"),
             PaletteItem("forward", "Mail: Forward Message", "Forward selected message", "f", "Mail"),
+            PaletteItem("rsvp_calendar", "Mail: RSVP to Calendar Invitation", "Respond to invitation (Accept, Tentative, Decline)", "1/2/3", "Mail"),
             PaletteItem("fuzzy_search", "Search: Fuzzy Search Local Store", "Instant search across all emails", "/", "Search"),
             PaletteItem("unified_inbox", "View: Unified Inbox", "Aggregate Inbox across all accounts", "U", "View"),
             PaletteItem("toggle_unread_filter", "View: Toggle Unread Only Filter", "Show only unread emails in current folder", "Ctrl+U", "View"),
@@ -1022,6 +1030,8 @@ class EspressoMailApp(Model):
                 return self, None
             if isinstance(msg, ComposeSubmittedMsg):
                 return self._handle_compose_submitted(msg)
+            if isinstance(msg, RSVPSubmittedMsg):
+                return self._handle_rsvp_submitted(msg)
             if isinstance(msg, SearchSelectMessageMsg):
                 self.active_modal = None
                 return self._jump_to_message(msg.message)
@@ -1038,7 +1048,7 @@ class EspressoMailApp(Model):
             self.active_modal, cmd = self.active_modal.update(msg)
             if cmd is not None and callable(cmd):
                 emitted = cmd()
-                if isinstance(emitted, (ModalClosedMsg, ComposeSubmittedMsg, SearchSelectMessageMsg, ComposeToContactMsg, PreferencesSavedMsg)):
+                if isinstance(emitted, (ModalClosedMsg, ComposeSubmittedMsg, SearchSelectMessageMsg, ComposeToContactMsg, PreferencesSavedMsg, RSVPSubmittedMsg)):
                     return self.update(emitted)
                 if cmd is quit_app or (hasattr(emitted, "__class__") and emitted.__class__.__name__ == "QuitMsg"):
                     return self, quit_app
@@ -1191,6 +1201,22 @@ class EspressoMailApp(Model):
             return self._execute_action("fuzzy_search")
         if k == "c":
             return self._execute_action("compose")
+        if k in ("1", "2", "3") and self.selected_message and self.active_modal is None:
+            ev = find_calendar_event(self.selected_message)
+            if ev and ev.method in ("REQUEST", "PUBLISH"):
+                resp = {"1": "ACCEPTED", "2": "TENTATIVE", "3": "DECLINED"}[k]
+                acc = self.store.get_account(self.selected_message.account_id) or (
+                    self.store.list_accounts()[0] if self.store.list_accounts() else None
+                )
+                if acc:
+                    self.active_modal = RSVPModal(
+                        account=acc,
+                        orig_message=self.selected_message,
+                        event=ev,
+                        theme=self.theme,
+                        initial_response=resp,
+                    )
+                    return self, None
         if k == "r":
             return self._execute_action("reply")
         if k == "R":
@@ -1527,6 +1553,28 @@ class EspressoMailApp(Model):
                     all_lines = self.reader_viewport.lines
                     if 0 <= line_idx < len(all_lines):
                         clicked_line = all_lines[line_idx]
+                        if "[1] Accept" in clicked_line and self.selected_message:
+                            ev = find_calendar_event(self.selected_message)
+                            if ev:
+                                acc = self.store.get_account(self.selected_message.account_id) or (
+                                    self.store.list_accounts()[0] if self.store.list_accounts() else None
+                                )
+                                if acc:
+                                    reader_x = msg.x - (folder_w + list_w)
+                                    if reader_x < 22:
+                                        resp = "ACCEPTED"
+                                    elif reader_x < 38:
+                                        resp = "TENTATIVE"
+                                    else:
+                                        resp = "DECLINED"
+                                    self.active_modal = RSVPModal(
+                                        account=acc,
+                                        orig_message=self.selected_message,
+                                        event=ev,
+                                        theme=self.theme,
+                                        initial_response=resp,
+                                    )
+                                    return self, None
                         osc_match = re.search(r"\x1b\]8;;(https?://[^\x1b]+|mailto:[^\x1b]+)\x1b\\", clicked_line)
                         raw_match = re.search(r"(https?://[^\s<>\"']+|mailto:[^\s<>\"']+)", clicked_line)
                         url_to_open = osc_match.group(1) if osc_match else (raw_match.group(1) if raw_match else None)
@@ -1938,6 +1986,30 @@ class EspressoMailApp(Model):
                 return self, None
             return self._open_reply_or_forward(m, mode=action_id)
 
+        if action_id == "rsvp_calendar":
+            m = self.selected_message
+            if not m:
+                self.status_message = "No message selected."
+                return self, None
+            ev = find_calendar_event(m)
+            if not ev:
+                self.status_message = "Selected message does not contain a calendar invitation."
+                return self, None
+            acc = self.store.get_account(m.account_id) or (
+                self.store.list_accounts()[0] if self.store.list_accounts() else None
+            )
+            if not acc:
+                self.status_message = "No configured account found."
+                return self, None
+            self.active_modal = RSVPModal(
+                account=acc,
+                orig_message=m,
+                event=ev,
+                theme=self.theme,
+                initial_response="ACCEPTED",
+            )
+            return self, None
+
         if action_id == "toggle_star":
             m = self.selected_message
             if m:
@@ -2193,6 +2265,37 @@ class EspressoMailApp(Model):
         self.active_modal = None
         self.refresh_data()
         self.status_message = f"📤 {smtp_note}: '{msg.subject}' to {', '.join(msg.to_addrs) or '(no recipient)'}"
+        return self, None
+
+    def _handle_rsvp_submitted(
+        self, msg: RSVPSubmittedMsg
+    ) -> tuple[EspressoMailApp, Cmd | None]:
+        self.active_modal = None
+        mime_msg, domain_msg = build_rsvp_mime_message(
+            account=msg.account,
+            orig_msg=msg.orig_message,
+            event=msg.event,
+            partstat=msg.partstat,
+            comment=msg.comment,
+        )
+        smtp_note = "Saved to Sent"
+        if msg.account.smtp_host and msg.account.smtp_password:
+            try:
+                client = SMTPClient(msg.account, timeout=5.0)
+                client.send_mime_message(mime_msg)
+                smtp_note = f"Sent via {msg.account.smtp_host}"
+            except Exception as exc:
+                smtp_note = f"Queued locally in Sent (SMTP offline: {type(exc).__name__})"
+
+        self.store.save_message(domain_msg)
+        self.refresh_data()
+        status_label = {
+            "ACCEPTED": "Accepted",
+            "DECLINED": "Declined",
+            "TENTATIVE": "Tentative",
+        }.get(msg.partstat, "Accepted")
+        dest = msg.event.organizer_email or msg.orig_message.sender_email or "organizer"
+        self.status_message = f"📅 RSVP {status_label} ({smtp_note}) to {dest}"
         return self, None
 
     def _jump_to_message(self, target: EmailMessage) -> tuple[EspressoMailApp, Cmd | None]:

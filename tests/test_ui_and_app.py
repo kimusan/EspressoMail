@@ -2212,8 +2212,160 @@ class TestUIAndApp(unittest.TestCase):
         # User's selection was preserved on the message they were looking at, rather than shifting index
         self.assertEqual(app.selected_message.id if app.selected_message else "", cur_msg_id)
 
+    def test_calendar_invitation_render_and_rsvp_modal_flow(self) -> None:
+        """Verify calendar invitation rendering in reading pane and interactive RSVP modal flow."""
+        from espresso import MouseAction, MouseButton, MouseMsg
+        from espressomail.models.entities import Attachment
+        from espressomail.ui.modals import RSVPModal, RSVPSubmittedMsg
+
+        sample_ics = (
+            "BEGIN:VCALENDAR\r\n"
+            "VERSION:2.0\r\n"
+            "METHOD:REQUEST\r\n"
+            "BEGIN:VEVENT\r\n"
+            "UID:sprint-planning-4455@example.com\r\n"
+            "SUMMARY:Sprint Planning & Retrospective\r\n"
+            "DTSTART:20261029T100000Z\r\n"
+            "DTEND:20261029T113000Z\r\n"
+            "LOCATION:Room 201 / Zoom (https://zoom.us/j/123456)\r\n"
+            "ORGANIZER;CN=\"Sarah Connor\":mailto:sarah@skynet.com\r\n"
+            "ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=\"Kim Schulz\":mailto:kim@schulz.dk\r\n"
+            "DESCRIPTION:Sprint review, velocity retrospective, and backlog grooming.\r\n"
+            "SEQUENCE:0\r\n"
+            "STATUS:CONFIRMED\r\n"
+            "END:VEVENT\r\n"
+            "END:VCALENDAR\r\n"
+        )
+
+        acc = AccountConfig(
+            id="acc_cal",
+            name="Personal",
+            email="kim@schulz.dk",
+            full_name="Kim Schulz",
+            imap_host="imap.example.com",
+            smtp_host="smtp.example.com",
+            smtp_password="password123",
+        )
+        self.store.save_account(acc)
+
+        cal_msg = EmailMessage(
+            id="msg_cal_invite",
+            account_id="acc_cal",
+            folder="INBOX",
+            uid=101,
+            message_id="<cal-invite-101@example.com>",
+            subject="Invitation: Sprint Planning & Retrospective",
+            sender_name="Sarah Connor",
+            sender_email="sarah@skynet.com",
+            recipients_to=["kim@schulz.dk"],
+            body_text="Hi Kim,\n\nPlease see the calendar invite attached.",
+            timestamp=1761730000.0,
+            attachments=[
+                Attachment(
+                    id="att_cal_1",
+                    message_id="msg_cal_invite",
+                    filename="invite.ics",
+                    content_type="text/calendar",
+                    size_bytes=len(sample_ics),
+                    data=sample_ics.encode("utf-8"),
+                )
+            ],
+        )
+        self.store.save_message(cal_msg)
+
+        app = EspressoMailApp(self.store, show_splash=False)
+        app.update(WindowSizeMsg(width=110, height=30))
+        app.active_account_id = "acc_cal"
+        app.active_folder = "INBOX"
+        app.refresh_data()
+
+        # Step cursor to the calendar invite message
+        app.message_cursor = 0
+        app._on_message_selection_changed()
+
+        # 1. Verify Reading Pane displays Calendar Banner
+        reader_text = "\n".join(app.reader_viewport.lines)
+        self.assertIn("Calendar Invitation", reader_text)
+        self.assertIn("Sprint Planning & Retrospective", reader_text)
+        self.assertIn("Sarah Connor <sarah@skynet.com>", reader_text)
+        self.assertIn("Room 201", reader_text)
+        self.assertIn("[1] Accept", reader_text)
+        self.assertIn("[2] Tentative", reader_text)
+        self.assertIn("[3] Decline", reader_text)
+
+        # 2. Press '1' to open RSVPModal pre-selected to ACCEPTED
+        app, _ = app.update(KeyMsg("1"))
+        self.assertIsInstance(app.active_modal, RSVPModal)
+        modal = app.active_modal
+        self.assertEqual(modal.selected_response, "ACCEPTED")
+        self.assertIn("Sprint Planning", modal.view())
+        self.assertIn("[●] [1] Accept", modal.view())
+
+        # 3. Test quick keys inside modal
+        modal, _ = modal.update(KeyMsg("2"))
+        self.assertEqual(modal.selected_response, "TENTATIVE")
+        self.assertIn("[●] [2] Tentative", modal.view())
+
+        modal, _ = modal.update(KeyMsg("3"))
+        self.assertEqual(modal.selected_response, "DECLINED")
+        self.assertIn("[●] [3] Decline", modal.view())
+
+        # 4. Tab to comment field and type note
+        modal, _ = modal.update(KeyMsg("tab"))
+        self.assertEqual(modal.focused_field, "comment")
+        modal, _ = modal.update(KeyMsg("C"))
+        modal, _ = modal.update(KeyMsg("a"))
+        modal, _ = modal.update(KeyMsg("n"))
+        modal, _ = modal.update(KeyMsg("t"))
+        self.assertEqual(modal.comment_input.value, "Cant")
+
+        # 5. Submit modal with Enter
+        modal, submit_cmd = modal.update(KeyMsg("enter"))
+        self.assertIsNotNone(submit_cmd)
+        emitted_msg = submit_cmd()
+        self.assertIsInstance(emitted_msg, RSVPSubmittedMsg)
+        self.assertEqual(emitted_msg.partstat, "DECLINED")
+        self.assertEqual(emitted_msg.comment, "Cant")
+
+        # 6. Dispatch RSVPSubmittedMsg into app
+        with mock.patch("espressomail.ui.app.SMTPClient.send_mime_message") as mock_smtp_send:
+            app, _ = app.update(emitted_msg)
+
+        # Modal is closed and status message shows confirmation
+        self.assertIsNone(app.active_modal)
+        self.assertIn("RSVP Declined", app.status_message)
+        self.assertIn("sarah@skynet.com", app.status_message)
+        mock_smtp_send.assert_called_once()
+
+        # Check Sent folder has the reply message
+        sent_msgs = self.store.list_messages(account_id="acc_cal", folder="Sent")
+        self.assertTrue(any("Declined: Sprint Planning" in m.subject for m in sent_msgs))
+
+        # 7. Test mouse click on RSVP option in reading pane
+        folder_w, list_w, _ = app._pane_widths()
+        target_line_idx = -1
+        for idx, line in enumerate(app.reader_viewport.lines):
+            if "[1] Accept" in line:
+                target_line_idx = idx
+                break
+        self.assertNotEqual(target_line_idx, -1)
+
+        # Click on the Accept button in the reader pane
+        click_x = folder_w + list_w + 5
+        click_y = 2 + target_line_idx  # 2 rows for menu bar + border
+        mouse_msg = MouseMsg(
+            x=click_x,
+            y=click_y,
+            button=MouseButton.LEFT,
+            action=MouseAction.PRESS,
+        )
+        app, _ = app.update(mouse_msg)
+        self.assertIsInstance(app.active_modal, RSVPModal)
+        self.assertEqual(app.active_modal.selected_response, "ACCEPTED")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
