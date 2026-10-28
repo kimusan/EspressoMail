@@ -7,6 +7,19 @@ from dataclasses import dataclass
 from espresso import Cmd, KeyMsg, Model, MouseAction, MouseButton, MouseMsg, Msg
 from espresso.crema import NORMAL_BORDER, Style, place_overlay, string_width
 
+try:
+    from espresso.beans import (
+        MenuBar as CoreMenuBar,
+        MenuCategory as CoreMenuCategory,
+        MenuItem as CoreMenuItem,
+        MenuSelectMsg,
+    )
+except ImportError:
+    CoreMenuBar = None  # type: ignore[assignment, misc]
+    CoreMenuCategory = None  # type: ignore[assignment, misc]
+    CoreMenuItem = None  # type: ignore[assignment, misc]
+    MenuSelectMsg = None  # type: ignore[assignment, misc]
+
 from espressomail.themes.engine import Theme
 
 
@@ -308,3 +321,39 @@ class MenuBar(Model):
             center=False,
             dim_backdrop=False,
         )
+
+
+def to_core_menubar(
+    categories: tuple[MenuCategory, ...] = DEFAULT_MENUS,
+    width: int = 80,
+    brand: str = " ☕ EspressoMail ",
+    right_status: str = "",
+) -> CoreMenuBar | None:
+    """Convert EspressoMail menu categories into an upstream espresso.beans.MenuBar instance."""
+    if CoreMenuBar is None or CoreMenuCategory is None or CoreMenuItem is None:
+        return None
+    core_cats: list[CoreMenuCategory] = []
+    for cat in categories:
+        items = [
+            CoreMenuItem(
+                id=item.action_id,
+                label=item.label,
+                shortcut=item.shortcut,
+            )
+            for item in cat.items
+        ]
+        core_cats.append(
+            CoreMenuCategory(
+                id=cat.title.lower(),
+                label=cat.title,
+                mnemonic=cat.hotkey,
+                items=items,
+            )
+        )
+    return CoreMenuBar(
+        categories=core_cats,
+        width=width,
+        brand=brand,
+        right_status=right_status,
+    )
+

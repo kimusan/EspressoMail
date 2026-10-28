@@ -46,7 +46,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "espressoTUI>=1.2.0",
+    "espressoTUI>=1.3.0",
     "Pillow>=10.0.0",
 ]
 

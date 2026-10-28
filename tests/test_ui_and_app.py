@@ -2030,6 +2030,83 @@ class TestUIAndApp(unittest.TestCase):
         self.assertEqual(engine.current.id, "nord")
         self.assertEqual(engine.color_mode, "dark")
 
+    def test_upstream_espresso_1_3_0_beans_integration(self) -> None:
+        """Verify integration and availability of upstream Espresso 1.3.0 beans."""
+        from espressomail.ui.menus import DEFAULT_MENUS, to_core_menubar
+        from espresso.beans import (
+            CardActivateMsg,
+            CardItem,
+            CardList,
+            CardSelectMsg,
+            MenuBar as CoreMenuBar,
+            MultiSplitter,
+            MultiSplitterResizeMsg,
+            Wizard,
+            WizardCompleteMsg,
+            WizardNextMsg,
+            WizardStep,
+        )
+
+        # 1. MenuBar bean integration
+        core_menu = to_core_menubar(DEFAULT_MENUS, width=100)
+        self.assertIsNotNone(core_menu)
+        assert isinstance(core_menu, CoreMenuBar)
+        self.assertEqual(len(core_menu.categories), len(DEFAULT_MENUS))
+        self.assertIn("File", [c.label for c in core_menu.categories])
+
+        # Test keyboard activation on MenuBar
+        core_menu, cmd = core_menu.update(KeyMsg("f10"))
+        self.assertTrue(core_menu.is_open)
+        self.assertEqual(core_menu.active_cat_idx, 0)
+
+        # Press Enter on first item (Sync All Accounts)
+        core_menu, cmd = core_menu.update(KeyMsg("enter"))
+        self.assertFalse(core_menu.is_open)
+        self.assertIsNotNone(cmd)
+        select_msg = cmd()
+        self.assertEqual(select_msg.category_id, "file")
+        self.assertEqual(select_msg.item_id, "sync_all")
+
+        # 2. MultiSplitter bean integration (3 panes)
+        splitter = MultiSplitter(
+            panes=["Folders", "Messages", "Reader"],
+            ratios=[0.2, 0.35, 0.45],
+            min_sizes=[15, 20, 25],
+            width=100,
+            height=30,
+        )
+        self.assertEqual(splitter.num_panes, 3)
+        self.assertEqual(splitter.num_dividers, 2)
+        sizes = splitter.pane_sizes
+        self.assertEqual(len(sizes), 3)
+        self.assertEqual(sum(sizes) + 2, 100)
+        # Nudge divider 0 right
+        splitter.nudge_divider(0, 2)
+        new_sizes = splitter.pane_sizes
+        self.assertEqual(new_sizes[0], sizes[0] + 2)
+
+        # 3. Wizard bean integration
+        step1 = WizardStep(id="acc", title="Account", content="Enter email")
+        step2 = WizardStep(id="done", title="Finish", content="All set")
+        wizard = Wizard(steps=[step1, step2], width=60, height=15)
+        self.assertEqual(wizard.current_step, 0)
+        wizard, cmd = wizard.update(KeyMsg("enter"))
+        self.assertEqual(wizard.current_step, 1)
+
+        # 4. CardList bean integration
+        card1 = CardItem(id="1", title="Alice", subtitle="Meeting update", badge_text="10:30 AM", is_unread=True)
+        card2 = CardItem(id="2", title="Bob", subtitle="Review requested", badge_text="Yesterday")
+        card_list = CardList(items=[card1, card2], width=50, height=10)
+        self.assertEqual(len(card_list.items), 2)
+        self.assertEqual(card_list.selected_index, 0)
+        card_list, _ = card_list.update(KeyMsg("down"))
+        self.assertEqual(card_list.selected_index, 1)
+        card_list, cmd = card_list.update(KeyMsg("enter"))
+        self.assertIsNotNone(cmd)
+        act_msg = cmd()
+        self.assertIsInstance(act_msg, CardActivateMsg)
+        self.assertEqual(act_msg.item.id, "2")
+
 
 if __name__ == "__main__":
     unittest.main()
