@@ -17,7 +17,9 @@ if [ ! -f "${BINARY_PATH}" ]; then
     exit 1
 fi
 
+BINARY_PATH="$(cd "$(dirname "${BINARY_PATH}")" && pwd)/$(basename "${BINARY_PATH}")"
 mkdir -p "${OUTPUT_DIR}"
+OUTPUT_DIR="$(cd "${OUTPUT_DIR}" && pwd)"
 BUILD_DIR="$(mktemp -d /tmp/espressomail-arch.XXXXXX)"
 trap 'rm -rf "${BUILD_DIR}"' EXIT
 

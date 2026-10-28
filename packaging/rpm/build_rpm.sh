@@ -22,7 +22,9 @@ if ! command -v rpmbuild &>/dev/null; then
     exit 1
 fi
 
+BINARY_PATH="$(cd "$(dirname "${BINARY_PATH}")" && pwd)/$(basename "${BINARY_PATH}")"
 mkdir -p "${OUTPUT_DIR}"
+OUTPUT_DIR="$(cd "${OUTPUT_DIR}" && pwd)"
 RPM_DIR="$(mktemp -d /tmp/espressomail-rpm.XXXXXX)"
 trap 'rm -rf "${RPM_DIR}"' EXIT
 
