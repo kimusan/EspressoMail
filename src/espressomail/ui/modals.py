@@ -51,6 +51,7 @@ from espressomail.protocols.smtp_client import validate_account_credentials
 from espressomail.search.fuzzy import FuzzySearchEngine, SearchResult
 from espressomail.storage.database import LocalStore
 from espressomail.themes.engine import COLOR_MODES, THEME_FAMILIES, THEMES, Theme
+from espressomail.ui.formatter import format_email_body
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +95,7 @@ class ComposeSubmittedMsg(Msg):
     pgp_encrypt: bool = False
     is_draft: bool = False
     draft_id: str = ""
+    render_markdown: bool = True
 
 
 @dataclass(frozen=True)
@@ -188,6 +190,8 @@ class ComposeModal(Model):
         self.attachments: list[str] = []
         self.pgp_sign = bool(self.active_account and self.active_account.pgp_key_id)
         self.pgp_encrypt = False
+        self.render_markdown = True
+        self.preview_mode = False
         self.show_file_picker = False
         self.file_picker = FilePicker(
             directory=".",
@@ -279,6 +283,12 @@ class ComposeModal(Model):
             if k == "ctrl+e":
                 self.pgp_encrypt = not self.pgp_encrypt
                 return self, None
+            if k == "ctrl+m":
+                self.render_markdown = not self.render_markdown
+                return self, None
+            if k in ("f4", "ctrl+v", "alt+p"):
+                self.preview_mode = not self.preview_mode
+                return self, None
             if k == "ctrl+s":
                 return self._emit_submit(is_draft=True)
             if k in ("f5", "ctrl+enter", "ctrl+x"):
@@ -356,6 +366,7 @@ class ComposeModal(Model):
             pgp_encrypt=self.pgp_encrypt,
             is_draft=is_draft,
             draft_id=self.draft_id,
+            render_markdown=self.render_markdown,
         )
 
     def view(self, width: int = 80, height: int = 30) -> str:
@@ -399,6 +410,16 @@ class ComposeModal(Model):
             if self.pgp_encrypt
             else Style().foreground(self.theme.fg_muted).render("[ ] PGP Encrypt (Ctrl+E)")
         )
+        md_badge = (
+            Style().bold(True).foreground(self.theme.accent_primary).render("[x] Markdown (Ctrl+M)")
+            if self.render_markdown
+            else Style().foreground(self.theme.fg_muted).render("[ ] Markdown (Ctrl+M)")
+        )
+        preview_badge = (
+            Style().bold(True).foreground(self.theme.accent_secondary).render("[F4] Preview: ON")
+            if self.preview_mode
+            else Style().foreground(self.theme.fg_muted).render("[F4] Preview: OFF")
+        )
 
         att_names: list[str] = []
         for p_str in self.attachments:
@@ -432,22 +453,35 @@ class ComposeModal(Model):
         body_border_fg = (
             self.theme.border_focused if self.focus_idx == 4 else self.theme.border_unfocused
         )
-        editor_box = (
-            Style()
-            .border(ROUNDED_BORDER)
-            .border_foreground(body_border_fg)
-            .border_background(self.theme.bg_primary)
-            .background(self.theme.bg_primary)
-            .border_title(" Message Body ", align=Align.LEFT)
-            .width(modal_w - 6)
-            .render(self.editor.view())
-        )
+        if self.preview_mode:
+            preview_rendered = format_email_body(self.editor.value or "(Empty body)", self.theme, modal_w - 10)
+            editor_box = (
+                Style()
+                .border(ROUNDED_BORDER)
+                .border_foreground(self.theme.accent_secondary)
+                .border_background(self.theme.bg_primary)
+                .background(self.theme.bg_primary)
+                .border_title(" 👁 Markdown Live Preview (F4 to edit) ", align=Align.LEFT)
+                .width(modal_w - 6)
+                .render(preview_rendered)
+            )
+        else:
+            editor_box = (
+                Style()
+                .border(ROUNDED_BORDER)
+                .border_foreground(body_border_fg)
+                .border_background(self.theme.bg_primary)
+                .background(self.theme.bg_primary)
+                .border_title(" Message Body (Markdown supported) ", align=Align.LEFT)
+                .width(modal_w - 6)
+                .render(self.editor.view())
+            )
 
         footer = (
             Style()
             .foreground(self.theme.fg_muted)
             .render(
-                "[F5/Ctrl+X] Send   [Ctrl+S] Save Draft   [Ctrl+A] Attach   [Tab/Shift+Tab] Focus   [Esc] Close"
+                "[F5/Ctrl+X] Send  [Ctrl+S] Draft  [Ctrl+M] Markdown  [F4] Preview  [Ctrl+A] Attach  [Esc] Close"
             )
         )
 
@@ -457,7 +491,7 @@ class ComposeModal(Model):
             to_view,
             cc_view,
             self.input_subject.view(),
-            f"{sign_badge}    {enc_badge}",
+            f"{sign_badge}    {enc_badge}    {md_badge}    {preview_badge}",
             f"Files:   {att_line}",
             editor_box,
             footer,

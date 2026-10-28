@@ -73,6 +73,7 @@ from espressomail.protocols.icalendar import (
     find_calendar_event,
 )
 from espressomail.protocols.imap_client import IMAPClient
+from espressomail.protocols.markdown_renderer import markdown_to_html_email
 from espressomail.protocols.sieve import ManageSieveClient
 from espressomail.protocols.smtp_client import (
     SMTPClient,
@@ -2520,6 +2521,10 @@ class EspressoMailApp(Model):
                 pgp_status = PGPStatus.SIGNED_VERIFIED
                 pgp_fp = sig_res.fingerprint
 
+        body_html = ""
+        if getattr(msg, "render_markdown", True) and not msg.pgp_encrypt:
+            body_html = markdown_to_html_email(msg.body_text, title=msg.subject)
+
         mime_msg, domain_msg = build_mime_message(
             account=msg.account,
             recipients_to=msg.to_addrs,
@@ -2529,6 +2534,7 @@ class EspressoMailApp(Model):
             in_reply_to=msg.in_reply_to,
             references=msg.references,
             attachment_paths=msg.attachments,
+            body_html=body_html,
         )
 
         if msg.is_draft:

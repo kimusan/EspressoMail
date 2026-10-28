@@ -2728,6 +2728,85 @@ class TestUIAndApp(unittest.TestCase):
         self.assertTrue(ok)
         client._conn.uid.assert_called_with("STORE", "103", "+FLAGS", r"(\Deleted)")
 
+    def test_markdown_to_email_rendering_and_preview(self) -> None:
+        from espressomail.protocols.markdown_renderer import (
+            markdown_to_html_email,
+            is_markdown_content,
+            _pure_python_markdown_to_html,
+        )
+
+        # 1. Pure python markdown parser & is_markdown_content
+        md_text = "# Project Update\n\nHere is **bold** and *italic* text.\n\n- Task 1\n- Task 2\n\n`inline_code`\n\n```python\nprint('hello')\n```"
+        self.assertTrue(is_markdown_content(md_text))
+        self.assertFalse(is_markdown_content("Just a plain single line message."))
+
+        html_body = _pure_python_markdown_to_html(md_text)
+        self.assertIn("<h1>Project Update</h1>", html_body)
+        self.assertIn("<strong>bold</strong>", html_body)
+        self.assertIn("<em>italic</em>", html_body)
+        self.assertIn("<li>Task 1</li>", html_body)
+        self.assertIn("<pre><code>print(&#x27;hello&#x27;)</code></pre>", html_body)
+
+        # Full email HTML generation with inline styles
+        full_email_html = markdown_to_html_email(md_text, title="Project Update")
+        self.assertIn("<!DOCTYPE html>", full_email_html)
+        self.assertIn("font-family:", full_email_html)
+        self.assertIn("border-radius:", full_email_html)
+
+        # 2. ComposeModal toggle Markdown and Preview mode
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app, _ = app.update(KeyMsg("c"))
+        self.assertIsInstance(app.active_modal, ComposeModal)
+        compose = app.active_modal
+        assert isinstance(compose, ComposeModal)
+
+        # Toggle markdown
+        self.assertTrue(compose.render_markdown)
+        compose, _ = compose.update(KeyMsg("ctrl+m"))
+        self.assertFalse(compose.render_markdown)
+        compose, _ = compose.update(KeyMsg("ctrl+m"))
+        self.assertTrue(compose.render_markdown)
+
+        # Fill in fields
+        compose.input_to.value = "dev@example.org"
+        compose.input_subject.value = "Sprint Planning"
+        compose.editor.value = "# Sprint 42\n\n- Plan A\n- Plan B"
+
+        # Toggle preview mode with F4
+        self.assertFalse(compose.preview_mode)
+        compose, _ = compose.update(KeyMsg("f4"))
+        self.assertTrue(compose.preview_mode)
+        preview_view = compose.view(width=90, height=30)
+        self.assertIn("Markdown Live Preview", preview_view)
+        self.assertIn("[F4] Preview: ON", preview_view)
+
+        # Toggle preview off
+        compose, _ = compose.update(KeyMsg("f4"))
+        self.assertFalse(compose.preview_mode)
+
+        # 3. Submit compose modal and verify HTML email in store and MIME
+        app.active_modal = compose
+        with mock.patch("espressomail.ui.app.SMTPClient") as mock_smtp_cls:
+            mock_client = mock.MagicMock()
+            mock_smtp_cls.return_value = mock_client
+            app, cmd = app.update(KeyMsg("ctrl+enter"))
+            if cmd is not None and callable(cmd):
+                msg_out = cmd()
+                if msg_out is not None:
+                    app, _ = app.update(msg_out)
+
+        self.assertIsNone(app.active_modal)
+        # Check sent message in store
+        sent_msgs = self.store.list_messages(folder="Sent")
+        self.assertTrue(len(sent_msgs) >= 1)
+        latest_sent = sent_msgs[-1]
+        self.assertEqual(latest_sent.subject, "Sprint Planning")
+        self.assertIn("<h1", latest_sent.body_html)
+        self.assertIn("Sprint 42", latest_sent.body_html)
+        self.assertIn(">Plan A</li>", latest_sent.body_html)
+        self.assertIn(">Plan B</li>", latest_sent.body_html)
+
 
 if __name__ == "__main__":
     unittest.main()
