@@ -258,60 +258,11 @@ jobs:
       - name: Extract release notes (Git tag message and CHANGELOG)
         id: extract_notes
         run: |
-          python3 -c "
-          import re, subprocess, sys
-          from pathlib import Path
-
-          tag = '${{ github.ref_name || github.event.inputs.tag_name }}'
-          version = tag.lstrip('v') if tag else ''
-
-          manual_notes = """${{ github.event.inputs.release_notes }}""".strip()
-          if manual_notes:
-              Path('RELEASE_NOTES.md').write_text(manual_notes + '\n', encoding='utf-8')
-              print('--- MANUAL RELEASE NOTES BODY ---')
-              print(manual_notes)
-              print('---------------------------------')
-              sys.exit(0)
-
-          # Extract git tag annotation message if present
-          tag_msg = ''
-          try:
-              res = subprocess.run(['git', 'tag', '-l', '--format=%(contents)', tag], capture_output=True, text=True)
-              tag_msg = res.stdout.strip()
-          except Exception:
-              pass
-
-          # Extract matching section from CHANGELOG.md
-          changelog_path = Path('CHANGELOG.md')
-          changelog_notes = ''
-          if changelog_path.is_file() and version:
-              content = changelog_path.read_text(encoding='utf-8')
-              pattern = rf'##\s*\[{re.escape(version)}\][^\n]*\n(.*?)(?=\n##\s*\[|\Z)'
-              match = re.search(pattern, content, re.DOTALL)
-              if match:
-                  changelog_notes = match.group(1).strip()
-
-          body_parts = []
-          # If tag_msg has custom content (not just 'Release vX.Y.Z'), include it at top
-          default_tag_msg = f'Release {tag}'
-          if tag_msg and tag_msg != default_tag_msg and tag_msg not in changelog_notes:
-              first_line = tag_msg.split('\n')[0].strip()
-              if first_line not in changelog_notes:
-                  body_parts.append(f'### {tag_msg}\n')
-
-          if changelog_notes:
-              body_parts.append(changelog_notes)
-          elif tag_msg:
-              body_parts.append(tag_msg)
-          else:
-              body_parts.append(f'### EspressoMail {tag}\n\nAutomated release with multi-platform binary executables, native Linux packages, and PyPI distribution.')
-
-          release_body = '\n\n'.join(body_parts).strip()
-          Path('RELEASE_NOTES.md').write_text(release_body + '\n', encoding='utf-8')
-          print('--- RELEASE NOTES BODY ---')
-          print(release_body)
-          print('--------------------------')
-          "
+          python3 scripts/extract_release_notes.py \
+            --tag "${{ github.ref_name || github.event.inputs.tag_name }}" \
+            --output RELEASE_NOTES.md
+        env:
+          RELEASE_NOTES_INPUT: ${{ github.event.inputs.release_notes }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
