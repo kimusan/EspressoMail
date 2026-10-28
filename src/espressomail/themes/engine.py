@@ -47,6 +47,11 @@ class Theme:
     gradient_start: str
     gradient_end: str
 
+    @property
+    def is_light(self) -> bool:
+        """Return True if this theme uses a light background color scheme."""
+        return self.id in ("solarized_light", "light") or "light" in self.id.lower()
+
     def pane_style(
         self,
         focused: bool,
@@ -54,38 +59,70 @@ class Theme:
         height: int,
         title: str = "",
         border: Border = ROUNDED_BORDER,
+        bg: str | None = None,
     ) -> Style:
         """Build a bordered Crema Style for one of the 3 layout panes."""
         b_color = self.border_focused if focused else self.border_unfocused
+        pane_bg = bg or self.bg_secondary
         s = (
             Style()
             .border(border)
             .border_foreground(b_color)
+            .border_background(pane_bg)
+            .background(pane_bg)
+            .foreground(self.fg_primary)
             .width(max(10, width - 2))
             .height(max(3, height))
         )
         if title:
             title_style = (
-                Style().bold(True).foreground(self.accent_primary)
+                Style().bold(True).foreground(self.accent_primary).background(pane_bg)
                 if focused
-                else Style().foreground(self.fg_secondary)
+                else Style().foreground(self.fg_secondary).background(pane_bg)
             )
             s = s.border_title(title_style.render(f" {title} "))
         return s
 
-    def modal_style(self, width: int, title: str = "") -> Style:
+    def modal_style(self, width: int, title: str = "", bg: str | None = None) -> Style:
         """Build a bordered Crema Style for floating modal dialogs."""
+        modal_bg = bg or self.bg_secondary
         s = (
             Style()
             .border(DOUBLE_BORDER)
             .border_foreground(self.accent_primary)
+            .border_background(modal_bg)
+            .background(modal_bg)
+            .foreground(self.fg_primary)
             .padding(1, 2)
             .width(max(24, width))
         )
         if title:
-            header = Style().bold(True).foreground(self.accent_secondary).render(f" {title} ")
+            header = (
+                Style()
+                .bold(True)
+                .foreground(self.accent_secondary)
+                .background(modal_bg)
+                .render(f" {title} ")
+            )
             s = s.border_title(header)
         return s
+
+    def text_input_styles(self) -> dict[str, Style]:
+        """Return styled configurations for Espresso TextInput components."""
+        return {
+            "style": Style().foreground(self.fg_primary),
+            "placeholder_style": Style().foreground(self.fg_muted),
+            "prompt_style": Style().bold(True).foreground(self.accent_primary),
+        }
+
+    def text_area_styles(self) -> dict[str, Style]:
+        """Return styled configurations for Espresso TextArea components."""
+        return {
+            "style": Style().foreground(self.fg_primary),
+            "line_number_style": Style().foreground(self.fg_muted),
+            "cursor_line_number_style": Style().bold(True).foreground(self.accent_primary),
+            "placeholder_style": Style().foreground(self.fg_muted),
+        }
 
     def menu_bar_style(self, width: int) -> Style:
         """Style for top application menu bar."""
@@ -97,6 +134,7 @@ class Theme:
             Style()
             .border(NORMAL_BORDER)
             .border_foreground(self.accent_primary)
+            .border_background(self.bg_secondary)
             .background(self.bg_secondary)
             .foreground(self.fg_primary)
             .width(width)
@@ -246,35 +284,36 @@ THEMES: dict[str, Theme] = {
     ),
     "solarized_light": Theme(
         id="solarized_light",
-        name="Solarized Light",
-        description="Precision daylight theme with warm ivory background and crisp contrast",
-        bg_primary="#FDF6E3",
-        bg_secondary="#EEE8D5",
-        bg_highlight="#E0DAC7",
-        bg_menubar="#EEE8D5",
-        bg_statusbar="#E5DFC9",
-        fg_primary="#073642",
-        fg_secondary="#586E75",
-        fg_muted="#93A1A1",
-        accent_primary="#268BD2",
-        accent_secondary="#CB4B16",
-        border_focused="#268BD2",
-        border_unfocused="#93A1A1",
-        unread_fg="#D33682",
-        starred_fg="#B58900",
-        attachment_fg="#2AA198",
-        pgp_verified_fg="#859900",
-        pgp_warning_fg="#B58900",
-        pgp_error_fg="#DC322F",
-        quote_level_1="#268BD2",
-        quote_level_2="#2AA198",
-        quote_level_3="#6C71C4",
-        gradient_start="#268BD2",
-        gradient_end="#2AA198",
+        name="Light",
+        description="Clean, modern daylight theme with crisp white canvas, soft light surfaces, and vibrant contrast",
+        bg_primary="#FFFFFF",
+        bg_secondary="#F4F6F8",
+        bg_highlight="#E2E8F0",
+        bg_menubar="#F4F6F8",
+        bg_statusbar="#E9ECEF",
+        fg_primary="#18181B",
+        fg_secondary="#495057",
+        fg_muted="#6C757D",
+        accent_primary="#2563EB",
+        accent_secondary="#EA580C",
+        border_focused="#2563EB",
+        border_unfocused="#CBD5E1",
+        unread_fg="#DC2626",
+        starred_fg="#D97706",
+        attachment_fg="#0D9488",
+        pgp_verified_fg="#16A34A",
+        pgp_warning_fg="#D97706",
+        pgp_error_fg="#DC2626",
+        quote_level_1="#2563EB",
+        quote_level_2="#0D9488",
+        quote_level_3="#7C3AED",
+        gradient_start="#2563EB",
+        gradient_end="#0D9488",
     ),
 }
 
 THEME_ORDER: list[str] = list(THEMES.keys())
+THEMES["light"] = THEMES["solarized_light"]
 
 
 class ThemeEngine:

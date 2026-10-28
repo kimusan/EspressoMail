@@ -137,7 +137,10 @@ class LocalStore:
                 pgp_key_id TEXT NOT NULL DEFAULT '',
                 signature TEXT NOT NULL DEFAULT '',
                 color_badge TEXT NOT NULL DEFAULT '#D4A373',
-                enabled INTEGER NOT NULL DEFAULT 1
+                enabled INTEGER NOT NULL DEFAULT 1,
+                carddav_url TEXT NOT NULL DEFAULT '',
+                carddav_username TEXT NOT NULL DEFAULT '',
+                carddav_password TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS folders (
@@ -278,6 +281,16 @@ class LocalStore:
         except sqlite3.OperationalError:
             pass
 
+        for col_def in (
+            "carddav_url TEXT NOT NULL DEFAULT ''",
+            "carddav_username TEXT NOT NULL DEFAULT ''",
+            "carddav_password TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                cur.execute(f"ALTER TABLE accounts ADD COLUMN {col_def}")
+            except sqlite3.OperationalError:
+                pass
+
         # Purge any legacy unauthenticated demo accounts if present from an earlier session
         cur.execute(
             "DELETE FROM accounts WHERE id IN ('acc_work', 'acc_oss') AND imap_password = ''"
@@ -373,8 +386,9 @@ class LocalStore:
                     id, name, email, full_name,
                     imap_host, imap_port, imap_security, imap_username, imap_password,
                     smtp_host, smtp_port, smtp_security, smtp_username, smtp_password,
-                    sieve_host, sieve_port, pgp_key_id, signature, color_badge, enabled
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sieve_host, sieve_port, pgp_key_id, signature, color_badge, enabled,
+                    carddav_url, carddav_username, carddav_password
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     email = excluded.email,
@@ -394,7 +408,10 @@ class LocalStore:
                     pgp_key_id = excluded.pgp_key_id,
                     signature = excluded.signature,
                     color_badge = excluded.color_badge,
-                    enabled = excluded.enabled
+                    enabled = excluded.enabled,
+                    carddav_url = excluded.carddav_url,
+                    carddav_username = excluded.carddav_username,
+                    carddav_password = excluded.carddav_password
                 """,
                 (
                     account.id,
@@ -417,6 +434,9 @@ class LocalStore:
                     account.signature,
                     account.color_badge,
                     int(account.enabled),
+                    account.carddav_url,
+                    account.carddav_username,
+                    account.carddav_password,
                 ),
             )
             self._ensure_default_folders(account.id)
@@ -547,6 +567,9 @@ class LocalStore:
             signature=row["signature"],
             color_badge=row["color_badge"],
             enabled=bool(row["enabled"]),
+            carddav_url=str(row["carddav_url"] if "carddav_url" in row.keys() else ""),
+            carddav_username=str(row["carddav_username"] if "carddav_username" in row.keys() else ""),
+            carddav_password=str(row["carddav_password"] if "carddav_password" in row.keys() else ""),
         )
 
     def list_folders(self, account_id: str | None = None) -> list[Folder]:
@@ -998,6 +1021,7 @@ class LocalStore:
         with self._lock:
             self._conn.execute("UPDATE messages SET is_read = ? WHERE id = ?", (int(is_read), msg_id))
             self._conn.commit()
+            self.refresh_folder_counts()
 
     def toggle_star(self, msg_id: str) -> bool:
         """Toggle the starred flag on a message and return the new state."""
@@ -1008,6 +1032,7 @@ class LocalStore:
             new_val = 0 if row["is_starred"] else 1
             self._conn.execute("UPDATE messages SET is_starred = ? WHERE id = ?", (new_val, msg_id))
             self._conn.commit()
+            self.refresh_folder_counts()
             return bool(new_val)
 
     def move_to_folder(self, msg_id: str, target_folder: str) -> None:
@@ -1336,45 +1361,84 @@ class LocalStore:
 
     def save_sieve_script(self, script: SieveScript) -> None:
         """Save a compiled or custom Sieve script."""
-        self._conn.execute(
-            """
-            INSERT INTO sieve_scripts (id, account_id, name, content, active, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                content = excluded.content,
-                active = excluded.active,
-                updated_at = excluded.updated_at
-            """,
-            (
-                script.id,
-                script.account_id,
-                script.name,
-                script.content,
-                int(script.active),
-                script.updated_at,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            if script.active:
+                self._conn.execute(
+                    "UPDATE sieve_scripts SET active = 0 WHERE account_id = ?",
+                    (script.account_id,),
+                )
+            self._conn.execute(
+                """
+                INSERT INTO sieve_scripts (id, account_id, name, content, active, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    content = excluded.content,
+                    active = excluded.active,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    script.id,
+                    script.account_id,
+                    script.name,
+                    script.content,
+                    int(script.active),
+                    script.updated_at,
+                ),
+            )
+            self._conn.commit()
 
     def list_sieve_scripts(self, account_id: str | None = None) -> list[SieveScript]:
         """Return stored Sieve scripts."""
-        if account_id and account_id != "*":
-            rows = self._conn.execute(
-                "SELECT * FROM sieve_scripts WHERE account_id = ? ORDER BY rowid ASC",
-                (account_id,),
-            ).fetchall()
-        else:
-            rows = self._conn.execute("SELECT * FROM sieve_scripts ORDER BY rowid ASC").fetchall()
-        return [
-            SieveScript(
-                id=r["id"],
-                account_id=r["account_id"],
-                name=r["name"],
-                content=r["content"],
-                active=bool(r["active"]),
-                updated_at=r["updated_at"],
+        with self._lock:
+            if account_id and account_id != "*":
+                rows = self._conn.execute(
+                    "SELECT * FROM sieve_scripts WHERE account_id = ? ORDER BY rowid ASC",
+                    (account_id,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute("SELECT * FROM sieve_scripts ORDER BY rowid ASC").fetchall()
+            return [
+                SieveScript(
+                    id=r["id"],
+                    account_id=r["account_id"],
+                    name=r["name"],
+                    content=r["content"],
+                    active=bool(r["active"]),
+                    updated_at=r["updated_at"],
+                )
+                for r in rows
+            ]
+
+    def get_active_sieve_script(self, account_id: str | None = None) -> SieveScript | None:
+        """Return the active Sieve script for an account, or the first available script."""
+        with self._lock:
+            if account_id and account_id != "*":
+                row = self._conn.execute(
+                    "SELECT * FROM sieve_scripts WHERE account_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1",
+                    (account_id,),
+                ).fetchone()
+                if not row:
+                    row = self._conn.execute(
+                        "SELECT * FROM sieve_scripts WHERE account_id = ? ORDER BY rowid DESC LIMIT 1",
+                        (account_id,),
+                    ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT * FROM sieve_scripts WHERE active = 1 ORDER BY rowid DESC LIMIT 1"
+                ).fetchone()
+                if not row:
+                    row = self._conn.execute(
+                        "SELECT * FROM sieve_scripts ORDER BY rowid DESC LIMIT 1"
+                    ).fetchone()
+            if not row:
+                return None
+            return SieveScript(
+                id=row["id"],
+                account_id=row["account_id"],
+                name=row["name"],
+                content=row["content"],
+                active=bool(row["active"]),
+                updated_at=row["updated_at"],
             )
-            for r in rows
-        ]
 

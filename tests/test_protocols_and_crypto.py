@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from espressomail.crypto import PGPManager
 from espressomail.models import AccountConfig, EmailMessage, PGPStatus, SieveFilterRule
@@ -423,6 +424,106 @@ class TestProtocolsAndCrypto(unittest.TestCase):
             # Verify saved scripts in store
             saved_scripts = store.list_sieve_scripts(account.id)
             self.assertTrue(any(s.name == "default" for s in saved_scripts))
+        finally:
+            store.close()
+
+    def test_carddav_vcard_parsing_formatting_and_sync(self) -> None:
+        """Verify CardDAV vCard 3.0/4.0 parsing, vCard generation, and address book sync."""
+        from espressomail.models.entities import Contact
+        from espressomail.protocols.carddav import CardDAVClient, format_vcard, parse_vcards
+        from espressomail.storage.database import LocalStore
+
+        raw_vcards = (
+            "BEGIN:VCARD\r\n"
+            "VERSION:3.0\r\n"
+            "FN:Alice Baker\r\n"
+            "EMAIL;TYPE=INTERNET;TYPE=WORK:\r\n"
+            " alice.baker@example.com\r\n"
+            "NOTE:Engineering Lead\r\n"
+            "UID:card-1001\r\n"
+            "END:VCARD\r\n"
+            "BEGIN:VCARD\r\n"
+            "VERSION:3.0\r\n"
+            "FN:Bob Martin\r\n"
+            "EMAIL:bob@corp.org\r\n"
+            "UID:card-1002\r\n"
+            "END:VCARD\r\n"
+        )
+        contacts = parse_vcards(raw_vcards)
+        self.assertEqual(len(contacts), 2)
+        self.assertEqual(contacts[0].name, "Alice Baker")
+        self.assertEqual(contacts[0].email, "alice.baker@example.com")
+        self.assertEqual(contacts[0].notes, "Engineering Lead")
+        self.assertEqual(contacts[1].name, "Bob Martin")
+        self.assertEqual(contacts[1].email, "bob@corp.org")
+
+        # Test format_vcard
+        single_contact = Contact(
+            id="c_test",
+            name="Carol Danvers",
+            email="carol@starforce.mil",
+            notes="Pilot",
+        )
+        vcard_out = format_vcard(single_contact)
+        self.assertIn("BEGIN:VCARD", vcard_out)
+        self.assertIn("VERSION:3.0", vcard_out)
+        self.assertIn("FN:Carol Danvers", vcard_out)
+        self.assertIn("EMAIL;TYPE=INTERNET:carol@starforce.mil", vcard_out)
+        self.assertIn("NOTE:Pilot", vcard_out)
+        self.assertIn("END:VCARD", vcard_out)
+
+        # Test CardDAVClient sync_contacts with mocked HTTP response
+        store = LocalStore(":memory:")
+        try:
+            account = AccountConfig(
+                id="acc_carddav",
+                name="Work CardDAV",
+                email="user@example.com",
+                full_name="Test User",
+                imap_host="imap.example.com",
+                carddav_url="https://dav.example.com/addressbooks/user/contacts/",
+                carddav_username="user",
+                carddav_password="secretpassword",
+            )
+            store.save_account(account)
+
+            multistatus_xml = f"""<?xml version="1.0" encoding="utf-8" ?>
+            <d:multistatus xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+                <d:response>
+                    <d:href>/addressbooks/user/contacts/1.vcf</d:href>
+                    <d:propstat>
+                        <d:prop>
+                            <card:address-data>{raw_vcards}</card:address-data>
+                        </d:prop>
+                        <d:status>HTTP/1.1 200 OK</d:status>
+                    </d:propstat>
+                </d:response>
+            </d:multistatus>"""
+
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = multistatus_xml.encode("utf-8")
+            mock_resp.status = 207
+            mock_resp.__enter__.return_value = mock_resp
+
+            client = CardDAVClient(
+                url=account.carddav_url,
+                username=account.carddav_username,
+                password=account.carddav_password,
+            )
+
+            with mock.patch("urllib.request.urlopen", return_value=mock_resp):
+                down_cnt, up_cnt, summary = client.sync_contacts(store)
+                self.assertEqual(down_cnt, 2)
+                self.assertIn("imported", summary)
+
+                # Verify contacts were stored in LocalStore
+                saved_alice = store.get_contact_by_email("alice.baker@example.com")
+                self.assertIsNotNone(saved_alice)
+                self.assertEqual(saved_alice.name, "Alice Baker")
+
+                saved_bob = store.get_contact_by_email("bob@corp.org")
+                self.assertIsNotNone(saved_bob)
+                self.assertEqual(saved_bob.name, "Bob Martin")
         finally:
             store.close()
 

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2D1B16" />
+      <stop offset="100%" stop-color="#18110E" />
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D97706" />
+      <stop offset="100%" stop-color="#B45309" />
+    </linearGradient>
+    <linearGradient id="creamGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FEF3C7" />
+      <stop offset="100%" stop-color="#FDE68A" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background rounded squircle -->
+  <rect x="16" y="16" width="224" height="224" rx="48" fill="url(#bgGrad)" stroke="#78350F" stroke-width="4" />
+
+  <!-- Steam curves -->
+  <path d="M 88 56 Q 80 44 88 32 Q 96 20 88 12" fill="none" stroke="#D97706" stroke-width="5" stroke-linecap="round" opacity="0.6" />
+  <path d="M 128 52 Q 120 40 128 28 Q 136 16 128 8" fill="none" stroke="#D97706" stroke-width="6" stroke-linecap="round" opacity="0.8" />
+  <path d="M 168 56 Q 160 44 168 32 Q 176 20 168 12" fill="none" stroke="#D97706" stroke-width="5" stroke-linecap="round" opacity="0.6" />
+
+  <!-- Cup body -->
+  <path d="M 52 88 L 68 180 C 72 204 100 216 128 216 C 156 216 184 204 188 180 L 204 88 Z" fill="url(#accentGrad)" stroke="#F59E0B" stroke-width="4" />
+
+  <!-- Cup handle -->
+  <path d="M 196 104 C 224 104 236 124 236 144 C 236 168 216 176 188 176" fill="none" stroke="#D97706" stroke-width="12" stroke-linecap="round" />
+
+  <!-- Saucer plate -->
+  <ellipse cx="128" cy="226" rx="92" ry="12" fill="#78350F" stroke="#B45309" stroke-width="3" />
+
+  <!-- Mail envelope in center of cup -->
+  <rect x="80" y="112" width="96" height="64" rx="8" fill="url(#creamGrad)" stroke="#78350F" stroke-width="3" />
+  <!-- Envelope flap / folds -->
+  <path d="M 80 114 L 128 148 L 176 114" fill="none" stroke="#78350F" stroke-width="4" stroke-linejoin="round" />
+  <path d="M 80 176 L 114 144" fill="none" stroke="#B45309" stroke-width="3" stroke-linecap="round" />
+  <path d="M 176 176 L 142 144" fill="none" stroke="#B45309" stroke-width="3" stroke-linecap="round" />
+</svg>

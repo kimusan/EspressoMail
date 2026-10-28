@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=EspressoMail
+GenericName=Mail Client
+Comment=A modern, multi-account terminal email client built on Espresso TUI
+Exec=espressomail %u
+Icon=espressomail
+Terminal=true
+Type=Application
+Categories=Office;Email;Network;ConsoleOnly;
+MimeType=x-scheme-handler/mailto;
+Keywords=email;imap;smtp;sieve;tui;pgp;gpg;terminal;
+StartupNotify=false

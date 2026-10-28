@@ -72,7 +72,6 @@ DEFAULT_MENUS: tuple[MenuCategory, ...] = (
         items=(
             MenuItem("unified_inbox", "Unified Inbox (All Accounts)", "U"),
             MenuItem("toggle_threading", "Toggle Message Threading", "t"),
-            MenuItem("cycle_theme", "Switch Color Scheme / Theme", "T"),
             MenuItem("cycle_image_mode", "Cycle Image Renderer (Chafa/Sixel)", "i"),
             MenuItem("toggle_headers", "Toggle Raw RFC 5322 Headers", "H"),
             MenuItem("expand_reader", "Widen Reading Pane", "["),

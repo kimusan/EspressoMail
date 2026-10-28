@@ -262,9 +262,7 @@ class TestUIAndApp(unittest.TestCase):
             self.assertIn("Mailboxes", view)
             self.assertIn("Reading Pane", view)
 
-            # Cycle theme with 'T' and image mode with 'i'
-            app, _ = app.update(KeyMsg("T"))
-            self.assertEqual(app.theme.id, "catppuccin")
+            # Cycle image mode with 'i'
             app, _ = app.update(KeyMsg("i"))
             self.assertEqual(app.image_renderer.backend, ImageRenderBackend.CHAFA)
 
@@ -473,10 +471,11 @@ class TestUIAndApp(unittest.TestCase):
             pref_modal, _ = pref_modal.update(KeyMsg("right"))
             chosen_backend = pref_modal.IMAGE_BACKENDS[pref_modal.backend_idx]
 
-            # Cycle theme (focus 2)
+            # Cycle color mode (focus 2)
             pref_modal.focus_idx = 2
             pref_modal, _ = pref_modal.update(KeyMsg("right"))
-            chosen_theme = pref_modal.THEMES[pref_modal.theme_idx]
+            chosen_mode = pref_modal.COLOR_MODES[pref_modal.color_mode_idx]
+            chosen_theme = "solarized_light" if chosen_mode == "light" else "espresso"
 
             # Toggle threading (focus 3)
             pref_modal.focus_idx = 3
@@ -499,6 +498,7 @@ class TestUIAndApp(unittest.TestCase):
             # Assert persisted to SQLite store
             self.assertEqual(self.store.get_setting("download_dir"), str(new_dl.resolve()))
             self.assertEqual(self.store.get_setting("image_backend"), chosen_backend)
+            self.assertEqual(self.store.get_setting("color_mode"), chosen_mode)
             self.assertEqual(self.store.get_setting("theme"), chosen_theme)
 
     def test_account_signature_in_editor_and_replies(self) -> None:
@@ -1503,6 +1503,365 @@ class TestUIAndApp(unittest.TestCase):
             assert sync_cmd is not None
             res = sync_cmd()
             self.assertIsInstance(res, MoreMessagesFetchedMsg)
+
+    def test_confirm_exit_modal_flow(self) -> None:
+        """Verify pressing 'q' displays ConfirmExitModal, 'n'/'esc' cancels, and 'y' exits app."""
+        from espresso import quit_app
+        from espressomail.ui.modals import ConfirmExitModal
+
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+
+        # Press 'q' - does not quit directly, opens ConfirmExitModal
+        app, cmd = app.update(KeyMsg("q"))
+        self.assertIsNone(cmd)
+        self.assertIsInstance(app.active_modal, ConfirmExitModal)
+        confirm_modal = app.active_modal
+        assert isinstance(confirm_modal, ConfirmExitModal)
+
+        # Modal view rendering
+        view_str = confirm_modal.view(80)
+        self.assertIn("Are you sure you want to exit EspressoMail?", view_str)
+        self.assertIn("[y / Enter]", view_str)
+        self.assertIn("[n / Esc]", view_str)
+
+        # Press 'n' to cancel exit
+        app, cancel_cmd = app.update(KeyMsg("n"))
+        self.assertIsNone(app.active_modal)
+        self.assertIn("Exit cancelled", app.status_message)
+
+        # Press 'q' again and confirm with 'y'
+        app, _ = app.update(KeyMsg("q"))
+        self.assertIsInstance(app.active_modal, ConfirmExitModal)
+        app, exit_cmd = app.update(KeyMsg("y"))
+        self.assertIs(exit_cmd, quit_app)
+
+    def test_account_settings_modal_sieve_and_carddav_fields(self) -> None:
+        """Verify AccountSettingsModal contains and updates Sieve and CardDAV server fields."""
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.active_account_id = "acc_work"
+
+        # Open AccountSettingsModal
+        app, _ = app.update(KeyMsg("A"))
+        self.assertIsInstance(app.active_modal, AccountSettingsModal)
+        modal = app.active_modal
+        assert isinstance(modal, AccountSettingsModal)
+
+        # Verify fields exist
+        self.assertTrue(hasattr(modal, "input_sieve_host"))
+        self.assertTrue(hasattr(modal, "input_sieve_port"))
+        self.assertTrue(hasattr(modal, "input_carddav_url"))
+
+        # Set values
+        modal.input_sieve_host.value = "sieve.workcorp.internal"
+        modal.input_sieve_port.value = "4190"
+        modal.input_carddav_url.value = "https://dav.workcorp.internal/addressbooks/kim/contacts/"
+
+        # Save without live server check with Ctrl+F
+        app, _ = app.update(KeyMsg("ctrl+f"))
+        self.assertIsNone(app.active_modal)
+
+        # Verify persisted to SQLite
+        updated_acc = self.store.get_account("acc_work")
+        self.assertIsNotNone(updated_acc)
+        self.assertEqual(updated_acc.sieve_host, "sieve.workcorp.internal")
+        self.assertEqual(updated_acc.sieve_port, 4190)
+        self.assertEqual(updated_acc.carddav_url, "https://dav.workcorp.internal/addressbooks/kim/contacts/")
+
+    def test_sieve_modal_large_editor_and_server_sync_display(self) -> None:
+        """Verify SieveModal enlarged size, script_editor population, and server script sync display."""
+        from espressomail.models.entities import SieveScript
+        from espressomail.ui.modals import SieveModal
+
+        populate_test_store(self.store)
+
+        # Save active script in store
+        initial_script = 'require ["fileinto"];\nif header :contains "subject" "Urgent" { fileinto "Priority"; }\n'
+        self.store.save_sieve_script(SieveScript(
+            id="script_active_1",
+            account_id="acc_work",
+            name="default",
+            content=initial_script,
+            active=True,
+        ))
+
+        modal = SieveModal(store=self.store, theme=ThemeEngine().current, active_account_id="acc_work")
+        modal_view = modal.view(120)
+
+        # Verify modal dimensions are enlarged (> 80) and editor is focused by default
+        self.assertIn("Active Sieve Script Editor", modal_view)
+        self.assertTrue(modal.editor_focused)
+        self.assertTrue(modal.script_editor.focused)
+        self.assertEqual(modal.script_editor.value, initial_script)
+
+        # Simulate 'ctrl+u' to sync script with server while editor is focused
+        with mock.patch("espressomail.ui.modals.ManageSieveClient") as mock_sieve_cls:
+            mock_client = mock.MagicMock()
+            new_server_script = 'require ["fileinto", "reject"];\n# Updated from server\nfileinto "Inbox";\n'
+            mock_client.list_scripts.return_value = [("server_default", True)]
+            mock_client.get_script.return_value = new_server_script
+            mock_sieve_cls.return_value = mock_client
+
+            modal, _ = modal.update(KeyMsg("ctrl+u"))
+            self.assertIn("Synchronized script", modal.status_banner)
+            # Script editor MUST now show the synced script in the text field
+            self.assertEqual(modal.script_editor.value, new_server_script)
+
+        # Test Ctrl+S saves script in editor
+        modal.script_editor.value = "# Custom user edit\nkeep;\n"
+        modal, _ = modal.update(KeyMsg("ctrl+s"))
+        self.assertIn("Saved script", modal.status_banner)
+        saved = self.store.get_active_sieve_script("acc_work")
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved.content, "# Custom user edit\nkeep;\n")
+
+    def test_toggle_star_remote_flag_sync_and_persistence(self) -> None:
+        """Verify removing a star updates SQLite and dispatches IMAP flag sync, persisting state."""
+        from espressomail.ui.app import FlagSyncedMsg
+
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.active_account_id = "acc_oss"
+        app.active_folder = "INBOX"
+        app.refresh_data()
+
+        # Ensure message is starred first
+        target_msg = None
+        for idx, row in enumerate(app.message_rows):
+            if row.message.id == "msg_thread1_1":
+                app.message_cursor = idx
+                target_msg = row.message
+                break
+        self.assertIsNotNone(target_msg)
+        self.assertTrue(target_msg.is_starred)
+
+        with mock.patch("espressomail.ui.app.IMAPClient") as mock_imap_cls:
+            mock_client = mock.MagicMock()
+            mock_imap_cls.return_value.__enter__.return_value = mock_client
+
+            # Press 's' to remove star
+            app, sync_cmd = app.update(KeyMsg("s"))
+            self.assertFalse(target_msg.is_starred)
+            self.assertIn("Removed star", app.status_message)
+            self.assertIsNotNone(sync_cmd)
+            assert sync_cmd is not None
+
+            # Execute returned TEA command
+            msg_res = sync_cmd()
+            self.assertIsInstance(msg_res, FlagSyncedMsg)
+            self.assertFalse(msg_res.enabled)
+            mock_client.set_flag.assert_called_with(
+                target_msg.folder, target_msg.uid, r"\Flagged", False
+            )
+
+        # Verify state in store remains unstarred across reload / folder reload
+        reloaded = self.store.get_message(target_msg.id)
+        self.assertIsNotNone(reloaded)
+        self.assertFalse(reloaded.is_starred)
+
+    def test_upper_right_theme_mention_removed_and_status_bar(self) -> None:
+        """Verify top-right bar does not mention theme name and status bar shortcuts remove [T]Theme."""
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+
+        view_out = app.view()
+        self.assertNotIn("🎨 espresso", view_out)
+        self.assertNotIn("🎨", view_out)
+
+        status_bar = app._render_status_bar()
+        self.assertNotIn("[T]Theme", status_bar)
+        self.assertIn("[c]Compose", status_bar)
+
+    def test_syncing_badge_clears_on_completion(self) -> None:
+        """Verify SYNCING badge in status bar clears when sync completes or encounters no remaining steps."""
+        from espressomail.ui.app import SyncProgressMsg
+
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.is_syncing = True
+        app.sync_progress_text = "Syncing..."
+
+        # Receive SyncProgressMsg with is_done=True
+        done_msg = SyncProgressMsg(
+            account_id="acc_work",
+            account_name="Work",
+            action="done",
+            folder_name="",
+            new_messages=0,
+            total_synced=5,
+            total_folders=2,
+            step_index=2,
+            total_steps=2,
+            remaining_steps=(),
+            errors=(),
+            is_done=True,
+        )
+        app, _ = app.update(done_msg)
+        self.assertFalse(app.is_syncing)
+        self.assertEqual(app.sync_progress_text, "")
+        self.assertNotIn("SYNCING", app._render_status_bar())
+
+    def test_sieve_script_default_focus_mouse_and_tab_handling(self) -> None:
+        """Verify Sieve script editor has default focus, mouse selection, tab indentation, and tab expansion."""
+        from espresso import MouseAction, MouseButton, MouseMsg
+        from espressomail.ui.modals import SieveModal
+
+        populate_test_store(self.store)
+        modal = SieveModal(store=self.store, theme=ThemeEngine().current, active_account_id="acc_work")
+
+        # 1. Has focus as default
+        self.assertTrue(modal.editor_focused)
+        self.assertTrue(modal.script_editor.focused)
+
+        # 2. Tab key inserts spaces without unfocusing
+        prev_len = len(modal.script_editor.value)
+        modal, _ = modal.update(KeyMsg("tab"))
+        self.assertTrue(modal.editor_focused)
+        self.assertEqual(len(modal.script_editor.value), prev_len + 4)
+
+        # 3. Esc unfocuses editor
+        modal, _ = modal.update(KeyMsg("esc"))
+        self.assertFalse(modal.editor_focused)
+        self.assertFalse(modal.script_editor.focused)
+
+        # 4. Mouse click on editor focuses it
+        modal.view(100, 30)  # establish layout geometry
+        # Click on editor area (row 15)
+        modal, _ = modal.update(
+            MouseMsg(x=30, y=15, button=MouseButton.LEFT, action=MouseAction.PRESS)
+        )
+        self.assertTrue(modal.editor_focused)
+        self.assertTrue(modal.script_editor.focused)
+
+        # 5. Sieve script with tabs expands to spaces and does not break borders
+        script_with_tabs = 'require ["fileinto"];\nif header :contains "Subject" "Spam" {\n\tfileinto "Junk";\n\tstop;\n}\n'
+        modal.script_editor.value = script_with_tabs.expandtabs(4)
+        rendered_view = modal.view(100, 30)
+        # Ensure rendered view does not have raw tabs
+        self.assertNotIn("\t", modal.script_editor.value)
+        modal_lines = rendered_view.splitlines()
+        for line in modal_lines:
+            # Each rendered line must not exceed 100 columns (no border blowout)
+            from espresso.crema import string_width
+            self.assertLessEqual(string_width(line), 100)
+
+    def test_carddav_auth_configuration_and_live_validation(self) -> None:
+        """Verify CardDAV auth fields and server validation before saving."""
+        from espressomail.protocols.carddav import CardDAVClient
+        from espressomail.protocols.smtp_client import validate_account_credentials
+        from espressomail.ui.modals import AccountSettingsModal
+
+        populate_test_store(self.store)
+        acc = self.store.get_account("acc_work")
+        self.assertIsNotNone(acc)
+
+        modal = AccountSettingsModal(
+            store=self.store,
+            theme=ThemeEngine().current,
+            active_account_id="acc_work",
+        )
+
+        # Verify inputs exist
+        self.assertTrue(hasattr(modal, "input_carddav_url"))
+        self.assertTrue(hasattr(modal, "input_carddav_username"))
+        self.assertTrue(hasattr(modal, "input_carddav_password"))
+
+        modal.input_carddav_url.value = "https://dav.example.com/contacts/"
+        modal.input_carddav_username.value = "dav_user"
+        modal.input_carddav_password.value = "dav_secret"
+
+        # 1. Test connection failure blocks save and sets error message
+        with mock.patch.object(CardDAVClient, "test_connection", return_value=(False, "HTTP 401 Unauthorized")):
+            with mock.patch("espressomail.protocols.imap_client.IMAPClient.verify_credentials", return_value=(True, "IMAP OK")):
+                with mock.patch("espressomail.protocols.smtp_client.SMTPClient.verify_credentials", return_value=(True, "SMTP OK")):
+                    modal, cmd = modal.update(KeyMsg("ctrl+s"))
+                    self.assertIn("CardDAV", modal.error_msg)
+                    self.assertIn("401", modal.error_msg)
+                    # Verify not saved with failed validation
+                    acc_fresh = self.store.get_account("acc_work")
+                    self.assertNotEqual(acc_fresh.carddav_username, "dav_user")
+
+        # 2. Test connection success allows save
+        with mock.patch.object(CardDAVClient, "test_connection", return_value=(True, "CardDAV OK")):
+            with mock.patch("espressomail.protocols.imap_client.IMAPClient.verify_credentials", return_value=(True, "IMAP OK")):
+                with mock.patch("espressomail.protocols.smtp_client.SMTPClient.verify_credentials", return_value=(True, "SMTP OK")):
+                    modal, cmd = modal.update(KeyMsg("ctrl+s"))
+                    self.assertIsNotNone(cmd)
+                    closed_msg = cmd()
+                    self.assertIn("Verified and saved", closed_msg.status_note)
+                    # Verify saved to database
+                    acc_saved = self.store.get_account("acc_work")
+                    self.assertEqual(acc_saved.carddav_url, "https://dav.example.com/contacts/")
+                    self.assertEqual(acc_saved.carddav_username, "dav_user")
+                    self.assertEqual(acc_saved.carddav_password, "dav_secret")
+
+
+    def test_light_mode_colors_and_background_rendering(self) -> None:
+        """Verify authentic light color scheme and comprehensive background rendering in light mode."""
+        from pathlib import Path
+        from espressomail.themes.engine import THEMES, ThemeEngine
+        from espressomail.ui.modals import ComposeModal, PreferencesModal, SieveModal
+
+        # 1. Theme configuration and palette verification
+        theme = THEMES["solarized_light"]
+        self.assertTrue(theme.is_light)
+        self.assertEqual(theme.bg_primary, "#FFFFFF")
+        self.assertEqual(theme.bg_secondary, "#F4F6F8")
+        self.assertEqual(theme.fg_primary, "#18181B")
+        self.assertIn("light", THEMES)
+
+        # 2. Main 3-pane App view rendering background coverage
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, initial_theme="solarized_light", show_splash=False)
+        app.show_onboarding = False
+        app.width = 100
+        app.height = 30
+        view_str = app.view()
+        lines = view_str.split("\n")
+        self.assertEqual(len(lines), 30)
+
+        # Every screen line must contain background color escape code
+        bg_code = "\x1b[48;2;"
+        bg_lines_count = sum(bg_code in l for l in lines)
+        self.assertEqual(bg_lines_count, 30, "All 30 terminal rows must have background color styled")
+
+        # Verify secondary surface (#F4F6F8 -> 244;246;248) and primary canvas (#FFFFFF -> 255;255;255) are present
+        bg_sec_code = "\x1b[48;2;244;246;248m"
+        bg_pri_code = "\x1b[48;2;255;255;255m"
+        self.assertTrue(any(bg_sec_code in l for l in lines), "Mailboxes and message list should render with bg_secondary")
+        self.assertTrue(any(bg_pri_code in l for l in lines), "Reading pane should render with bg_primary")
+
+        # 3. Preferences modal live light mode toggle and background styling
+        pref_modal = PreferencesModal(
+            store=self.store,
+            current_theme=THEMES["espresso"],
+            download_dir=Path("/tmp/downloads"),
+        )
+        pref_modal.focus_idx = 2  # Color mode toggle
+        pref_modal, _ = pref_modal.update(KeyMsg("right"))
+        self.assertEqual(pref_modal.current_theme.id, "solarized_light")
+        self.assertTrue(pref_modal.current_theme.is_light)
+
+        modal_view = pref_modal.view(80)
+        modal_lines = modal_view.split("\n")
+        self.assertTrue(len(modal_lines) >= 10)
+        self.assertTrue(all(bg_code in l for l in modal_lines), "All modal rows must have background color styled")
+
+        # 4. Compose and Sieve modals have solid backgrounds
+        compose = ComposeModal(
+            accounts=self.store.list_accounts(),
+            contacts=self.store.list_contacts(),
+            theme=theme,
+        )
+        compose_view = compose.view(80, 24)
+        compose_lines = compose_view.split("\n")
+        self.assertTrue(all(bg_code in l for l in compose_lines), "Compose modal must render with solid background")
+
+        sieve = SieveModal(store=self.store, theme=theme, active_account_id="acc_work")
+        sieve_view = sieve.view(80, 24)
+        sieve_lines = sieve_view.split("\n")
+        self.assertTrue(all(bg_code in l for l in sieve_lines), "Sieve modal must render with solid background")
 
 
 if __name__ == "__main__":

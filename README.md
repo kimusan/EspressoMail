@@ -49,6 +49,24 @@
 
 ## 🚀 Installation
 
+### Standalone Binaries (Linux & Windows)
+Pre-built standalone single-binary executables with zero external dependencies are attached to every [GitHub Release](https://github.com/kimusan/EspressoMail/releases):
+- **Linux x86_64**: `espressomail-linux-x86_64`
+- **Windows x86_64**: `espressomail-windows-x86_64.exe`
+
+### Native Linux Packages (.deb, .rpm, Arch Linux)
+Pre-built native packages are available on the [Releases page](https://github.com/kimusan/EspressoMail/releases):
+```bash
+# Debian / Ubuntu / Mint (.deb)
+sudo dpkg -i espressomail_<version>_amd64.deb
+
+# Fedora / RHEL / openSUSE (.rpm)
+sudo rpm -i espressomail-<version>-1.x86_64.rpm
+
+# Arch Linux (.pkg.tar.zst)
+sudo pacman -U espressomail-<version>-1-x86_64.pkg.tar.zst
+```
+
 ### From PyPI
 ```bash
 pip install espressomail
@@ -140,10 +158,36 @@ espressomail --db ~/mail/custom_store.db
 ---
 
 ## 🧪 Running Tests
-
+ 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+---
+
+## 📦 Release Automation
+
+EspressoMail includes an automated release script:
+
+```bash
+# Dry run preflight checks and version calculation
+python3 scripts/release.py patch --dry-run
+
+# Release with title summary and full markdown release notes
+python3 scripts/release.py minor \
+    -m "Release v0.2.0: Contacts & Filter Enhancements" \
+    -n "### Highlights\n- CardDAV address book sync\n- ManageSieve live filter editor"
+
+# Release using an external notes markdown file (or stdin pipe)
+python3 scripts/release.py 0.2.0 --notes-file release_notes.md
+cat release_notes.md | python3 scripts/release.py patch --notes-file -
+```
+
+Pushing a tag `vX.Y.Z` triggers the GitHub Actions release workflow:
+1. Builds sdist and wheel and publishes to **PyPI**.
+2. Compiles standalone PyInstaller single-binary executables for **Linux** (`x86_64`) and **Windows** (`x86_64.exe`).
+3. Generates native Linux packages: **Debian** (`.deb`), **Red Hat / Fedora** (`.rpm`), and **Arch Linux** (`.pkg.tar.zst`).
+4. Generates SHA256 checksums and publishes the GitHub Release with all artifacts attached.
 
 ---
 

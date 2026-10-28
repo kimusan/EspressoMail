@@ -238,6 +238,23 @@ def validate_account_credentials(
     if not smtp_ok:
         return False, smtp_msg
 
+    card_note = ""
+    if account.carddav_url.strip():
+        from espressomail.protocols.carddav import CardDAVClient
+
+        card_user = account.carddav_username or account.imap_username or account.email
+        card_pass = account.carddav_password or account.imap_password
+        card_client = CardDAVClient(
+            url=account.carddav_url.strip(),
+            username=card_user,
+            password=card_pass,
+            timeout=min(timeout, 5.0),
+        )
+        card_ok, card_msg = card_client.test_connection()
+        if not card_ok:
+            return False, f"CardDAV validation error: {card_msg}"
+        card_note = " & CardDAV"
+
     # Discover and persist remote folders immediately upon successful credential verification
     if store is not None:
         try:
@@ -254,6 +271,6 @@ def validate_account_credentials(
         except Exception:
             pass
 
-    return True, f"Verified IMAP ({account.imap_host}:{account.imap_port}) & SMTP ({account.smtp_host}:{account.smtp_port})"
+    return True, f"Verified IMAP ({account.imap_host}:{account.imap_port}) & SMTP ({account.smtp_host}:{account.smtp_port}){card_note}"
 
 

@@ -136,30 +136,33 @@ class OnboardingWizard(Model):
             default_index=0,
         )
 
+        styles = self.theme.text_input_styles()
         # Step 2 inputs
-        self.input_account_name = TextInput(placeholder="Work / Personal", prompt="Account Name:  ")
-        self.input_full_name = TextInput(placeholder="Jane Doe", prompt="Full Name:     ")
-        self.input_email = TextInput(placeholder="jane@example.com", prompt="Email Address: ")
+        self.input_account_name = TextInput(placeholder="Work / Personal", prompt="Account Name:  ", **styles)
+        self.input_full_name = TextInput(placeholder="Jane Doe", prompt="Full Name:     ", **styles)
+        self.input_email = TextInput(placeholder="jane@example.com", prompt="Email Address: ", **styles)
         self.input_username = TextInput(
             placeholder="(Optional — defaults to Email Address)",
             prompt="Login User:    ",
+            **styles,
         )
         self.input_password = TextInput(
             placeholder="IMAP / SMTP Password or App Password",
             prompt="Password:      ",
             echo_mode=EchoMode.PASSWORD,
+            **styles,
         )
         self.step2_focus = 0
 
         # Step 3 inputs & security selectors
-        self.input_imap_host = TextInput(placeholder="imap.example.com", prompt="IMAP Host:     ")
-        self.input_imap_port = TextInput(placeholder="993", prompt="IMAP Port:     ")
+        self.input_imap_host = TextInput(placeholder="imap.example.com", prompt="IMAP Host:     ", **styles)
+        self.input_imap_port = TextInput(placeholder="993", prompt="IMAP Port:     ", **styles)
         self.imap_security: SecurityType = SecurityType.SSL_TLS
-        self.input_smtp_host = TextInput(placeholder="smtp.example.com", prompt="SMTP Host:     ")
-        self.input_smtp_port = TextInput(placeholder="587", prompt="SMTP Port:     ")
+        self.input_smtp_host = TextInput(placeholder="smtp.example.com", prompt="SMTP Host:     ", **styles)
+        self.input_smtp_port = TextInput(placeholder="587", prompt="SMTP Port:     ", **styles)
         self.smtp_security: SecurityType = SecurityType.STARTTLS
-        self.input_sieve_host = TextInput(placeholder="sieve.example.com", prompt="Sieve Host:    ")
-        self.input_sieve_port = TextInput(placeholder="4190", prompt="Sieve Port:    ")
+        self.input_sieve_host = TextInput(placeholder="sieve.example.com", prompt="Sieve Host:    ", **styles)
+        self.input_sieve_port = TextInput(placeholder="4190", prompt="Sieve Port:    ", **styles)
         # Focus indices on Step 3:
         # 0=IMAP Host, 1=IMAP Port, 2=IMAP Security, 3=SMTP Host, 4=SMTP Port, 5=SMTP Security, 6=Sieve Host, 7=Sieve Port
         self.step3_focus = 0
@@ -550,10 +553,14 @@ class OnboardingWizard(Model):
             Style()
             .border(DOUBLE_BORDER)
             .border_foreground(self.theme.accent_primary)
+            .border_background(self.theme.bg_secondary)
+            .background(self.theme.bg_secondary)
+            .foreground(self.theme.fg_primary)
             .border_title(
                 Style()
                 .bold(True)
                 .foreground(self.theme.accent_secondary)
+                .background(self.theme.bg_secondary)
                 .render(" [ ☕ EspressoMail Account Onboarding ] "),
                 align=Align.CENTER,
             )

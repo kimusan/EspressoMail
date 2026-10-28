@@ -161,6 +161,9 @@ class AccountConfig:
     signature: str = ""
     color_badge: str = "#D4A373"
     enabled: bool = True
+    carddav_url: str = ""
+    carddav_username: str = ""
+    carddav_password: str = ""
 
     def __post_init__(self) -> None:
         if not self.imap_username:
@@ -169,6 +172,8 @@ class AccountConfig:
             self.smtp_username = self.email
         if not self.sieve_host and self.imap_host:
             self.sieve_host = self.imap_host
+        if not self.carddav_username:
+            self.carddav_username = self.email
         if isinstance(self.imap_security, str):
             self.imap_security = SecurityType(self.imap_security)
         if isinstance(self.smtp_security, str):
@@ -197,6 +202,9 @@ class AccountConfig:
             "signature": self.signature,
             "color_badge": self.color_badge,
             "enabled": self.enabled,
+            "carddav_url": self.carddav_url,
+            "carddav_username": self.carddav_username,
+            "carddav_password": self.carddav_password,
         }
 
     @classmethod
@@ -223,6 +231,9 @@ class AccountConfig:
             signature=str(data.get("signature", "")),
             color_badge=str(data.get("color_badge", "#D4A373")),
             enabled=bool(data.get("enabled", True)),
+            carddav_url=str(data.get("carddav_url", "")),
+            carddav_username=str(data.get("carddav_username", "")),
+            carddav_password=str(data.get("carddav_password", "")),
         )
 
 

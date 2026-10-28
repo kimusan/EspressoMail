@@ -1,5 +1,10 @@
 """Email protocol implementations (IMAP, SMTP, Sieve, Threading)."""
 
+from espressomail.protocols.carddav import (
+    CardDAVClient,
+    format_vcard,
+    parse_vcards,
+)
 from espressomail.protocols.imap_client import (
     IMAPClient,
     decode_mime_header,
@@ -33,4 +38,7 @@ __all__ = [
     "compile_sieve_script",
     "validate_sieve_script",
     "apply_sieve_rules_locally",
+    "CardDAVClient",
+    "parse_vcards",
+    "format_vcard",
 ]

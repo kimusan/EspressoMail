@@ -35,7 +35,9 @@ from espressomail.models.entities import (
     PGPStatus,
     SecurityType,
     SieveFilterRule,
+    SieveScript,
 )
+from espressomail.protocols.carddav import CardDAVClient
 from espressomail.protocols.sieve import (
     ManageSieveClient,
     apply_sieve_rules_locally,
@@ -45,7 +47,7 @@ from espressomail.protocols.sieve import (
 from espressomail.protocols.smtp_client import validate_account_credentials
 from espressomail.search.fuzzy import FuzzySearchEngine, SearchResult
 from espressomail.storage.database import LocalStore
-from espressomail.themes.engine import Theme
+from espressomail.themes.engine import THEMES, Theme
 
 
 # ---------------------------------------------------------------------------
@@ -143,11 +145,12 @@ class ComposeModal(Model):
         self.references = list(references)
         self.draft_id = draft_id
 
-        self.input_to = TextInput(placeholder="recipient@example.com", prompt="To:      ")
+        styles = self.theme.text_input_styles()
+        self.input_to = TextInput(placeholder="recipient@example.com", prompt="To:      ", **styles)
         self.input_to.value = to_initial
-        self.input_cc = TextInput(placeholder="cc@example.com (optional)", prompt="Cc:      ")
+        self.input_cc = TextInput(placeholder="cc@example.com (optional)", prompt="Cc:      ", **styles)
         self.input_cc.value = cc_initial
-        self.input_subject = TextInput(placeholder="Subject line...", prompt="Subject: ")
+        self.input_subject = TextInput(placeholder="Subject line...", prompt="Subject: ", **styles)
         self.input_subject.value = subject_initial
 
         self.editor = TextArea(
@@ -155,6 +158,7 @@ class ComposeModal(Model):
             width=68,
             height=10,
             show_line_numbers=False,
+            **self.theme.text_area_styles(),
         )
         if body_initial:
             self.editor.value = body_initial
@@ -412,6 +416,8 @@ class ComposeModal(Model):
             Style()
             .border(ROUNDED_BORDER)
             .border_foreground(body_border_fg)
+            .border_background(self.theme.bg_primary)
+            .background(self.theme.bg_primary)
             .border_title(" Message Body ", align=Align.LEFT)
             .width(modal_w - 6)
             .render(self.editor.view())
@@ -454,6 +460,7 @@ class SearchModal(Model):
         self.query_input = TextInput(
             placeholder="Type fuzzy query or operators (from:elena has:attachment is:unread)...",
             prompt="🔍 Search: ",
+            **self.theme.text_input_styles(),
         )
         self.query_input.value = initial_query
         self.query_input.focus()
@@ -566,9 +573,11 @@ class AddressBookModal(Model):
         self.scroll = 0
         self.page_size = 10
         self.adding_mode = False
-        self.input_name = TextInput(placeholder="Ada Lovelace", prompt="Name:  ")
-        self.input_email = TextInput(placeholder="ada@analytical.org", prompt="Email: ")
-        self.input_org = TextInput(placeholder="Organization", prompt="Org:   ")
+        self.status_msg = ""
+        styles = self.theme.text_input_styles()
+        self.input_name = TextInput(placeholder="Ada Lovelace", prompt="Name:  ", **styles)
+        self.input_email = TextInput(placeholder="ada@analytical.org", prompt="Email: ", **styles)
+        self.input_org = TextInput(placeholder="Organization", prompt="Org:   ", **styles)
         self.add_focus = 0
         self._adjust_scroll()
 
@@ -666,6 +675,25 @@ class AddressBookModal(Model):
                 target = self.contacts[self.cursor]
                 self.store.delete_contact(target.id)
                 self._refresh()
+                self.status_msg = f"Deleted contact {target.name}."
+                return self, None
+            if k == "s":
+                accounts = self.store.list_accounts()
+                carddav_acc = next((a for a in accounts if a.carddav_url), None)
+                if carddav_acc and carddav_acc.carddav_url:
+                    try:
+                        client = CardDAVClient(
+                            url=carddav_acc.carddav_url,
+                            username=carddav_acc.carddav_username or carddav_acc.email,
+                            password=carddav_acc.carddav_password or carddav_acc.imap_password,
+                        )
+                        down, up, summary = client.sync_contacts(self.store)
+                        self._refresh()
+                        self.status_msg = summary
+                    except Exception as exc:
+                        self.status_msg = f"CardDAV sync failed: {exc}"
+                else:
+                    self.status_msg = "CardDAV server not configured. Set CardDAV URL in Account Settings."
                 return self, None
             if k in ("enter", "c") and self.contacts:
                 target = self.contacts[self.cursor]
@@ -731,11 +759,13 @@ class AddressBookModal(Model):
             )
 
         footer_text = (
-            "[↑/↓/PgUp/PgDn] Scroll   [Enter/c] Compose   [a] Add   [d] Delete   [Esc] Close"
+            "[↑/↓/PgUp/PgDn] Scroll   [s] Sync CardDAV   [Enter/c] Compose   [a] Add   [d] Delete   [Esc] Close"
         )
         footer_elements = [
             Style().foreground(self.theme.fg_muted).render(footer_text)
         ]
+        if self.status_msg:
+            footer_elements.insert(0, Style().bold(True).foreground(self.theme.pgp_verified_fg).render(self.status_msg))
         if scroll_indicator:
             footer_elements.insert(0, Style().foreground(self.theme.accent_secondary).render(scroll_indicator))
 
@@ -750,7 +780,7 @@ class AddressBookModal(Model):
 
 
 class SieveModal(Model):
-    """Interactive Sieve filter configurator, RFC 5228 compiler, and local rule runner."""
+    """Interactive Sieve filter configurator, RFC 5228 compiler, editor, and local rule runner."""
 
     def __init__(self, store: LocalStore, theme: Theme, active_account_id: str = "acc_work") -> None:
         self.store = store
@@ -759,14 +789,39 @@ class SieveModal(Model):
         self.rules: list[SieveFilterRule] = self.store.list_sieve_rules()
         self.cursor = 0
         self.scroll = 0
-        self.page_size = 6
+        self.page_size = 5
         self.adding_rule = False
+        self.editor_focused = True
         self.status_banner = "RFC 5228 Sieve Script valid and ready."
-        self.input_name = TextInput(placeholder="Filter Name", prompt="Rule Name:   ")
-        self.input_field = TextInput(placeholder="From / Subject / X-Spam-Flag", prompt="Header/Field:")
-        self.input_pattern = TextInput(placeholder="Match substring", prompt="Pattern:     ")
-        self.input_folder = TextInput(placeholder="Archive / Trash / INBOX", prompt="Target Folder:")
+        styles = self.theme.text_input_styles()
+        self.input_name = TextInput(placeholder="Filter Name", prompt="Rule Name:   ", **styles)
+        self.input_field = TextInput(placeholder="From / Subject / X-Spam-Flag", prompt="Header/Field:", **styles)
+        self.input_pattern = TextInput(placeholder="Match substring", prompt="Pattern:     ", **styles)
+        self.input_folder = TextInput(placeholder="Archive / Trash / INBOX", prompt="Target Folder:", **styles)
         self.add_focus = 0
+
+        self.script_editor = TextArea(
+            placeholder="Write RFC 5228 Sieve script here...",
+            width=100,
+            height=12,
+            show_line_numbers=True,
+            **self.theme.text_area_styles(),
+        )
+        self.script_editor.focus()
+        active_s = self.store.get_active_sieve_script(self.active_account_id)
+        if active_s and active_s.content:
+            self.script_editor.value = active_s.content.expandtabs(4)
+        elif self.rules:
+            self.script_editor.value = compile_sieve_script(self.rules).expandtabs(4)
+        else:
+            self.script_editor.value = (
+                'require ["fileinto", "imap4flags"];\n\n'
+                '# Sieve filter rules for EspressoMail\n'
+                'if header :contains "Subject" "Alert" {\n'
+                '    fileinto "Archive";\n'
+                '    stop;\n'
+                '}\n'
+            )
         self._adjust_scroll()
 
     def _adjust_scroll(self) -> None:
@@ -786,9 +841,90 @@ class SieveModal(Model):
         self.rules = self.store.list_sieve_rules()
         self.cursor = min(self.cursor, max(0, len(self.rules) - 1))
         self._adjust_scroll()
+        active_s = self.store.get_active_sieve_script(self.active_account_id)
+        if active_s and active_s.content:
+            self.script_editor.value = active_s.content.expandtabs(4)
 
     def init(self) -> Cmd | None:
         return None
+
+    def _save_active_script(self) -> None:
+        expanded_content = self.script_editor.value.expandtabs(4)
+        ok, errs = validate_sieve_script(expanded_content)
+        if not ok:
+            self.status_banner = f"✖ Sieve syntax error: {'; '.join(errs)}"
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        script_id = f"sieve:{self.active_account_id}:active"
+        self.store.save_sieve_script(
+            SieveScript(
+                id=script_id,
+                account_id=self.active_account_id,
+                name="active.sieve",
+                content=expanded_content,
+                active=True,
+                updated_at=now_iso,
+            )
+        )
+        accounts = self.store.list_accounts()
+        target_acc = next((a for a in accounts if a.id == self.active_account_id), None)
+        if target_acc and target_acc.sieve_host:
+            try:
+                client = ManageSieveClient(target_acc)
+                client.connect()
+                client.put_script("active.sieve", expanded_content, activate=True)
+                client.close()
+                self.status_banner = "✔ Saved and uploaded active Sieve script to server."
+            except Exception as ex:
+                self.status_banner = f"Saved script locally (upload notice: {ex})"
+        else:
+            self.status_banner = "✔ Saved script locally."
+
+    def _sync_from_server(self) -> None:
+        accounts = self.store.list_accounts()
+        target_acc = next((a for a in accounts if a.id == self.active_account_id), None)
+        if not target_acc and accounts:
+            target_acc = accounts[0]
+        if target_acc and target_acc.sieve_host:
+            try:
+                client = ManageSieveClient(target_acc)
+                client.connect()
+                remote_scripts = client.list_scripts()
+                active_name = ""
+                for s_name, is_act in remote_scripts:
+                    if is_act:
+                        active_name = s_name
+                        break
+                if not active_name and remote_scripts:
+                    active_name = remote_scripts[0][0]
+
+                if active_name:
+                    fetched_script = client.get_script(active_name)
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    self.store.save_sieve_script(
+                        SieveScript(
+                            id=f"sieve:{target_acc.id}:{active_name}",
+                            account_id=target_acc.id,
+                            name=active_name,
+                            content=fetched_script,
+                            active=True,
+                            updated_at=now_iso,
+                        )
+                    )
+                    self._refresh()
+                    self.script_editor.value = fetched_script.expandtabs(4)
+                    self.status_banner = (
+                        f"✔ Synchronized script '{active_name}' ({len(fetched_script.splitlines())} lines) from server."
+                    )
+                else:
+                    ok, msg_text = client.sync_script_with_server(self.store)
+                    self._refresh()
+                    self.status_banner = msg_text
+                client.close()
+            except Exception as ex:
+                self.status_banner = f"ManageSieve sync failed: {ex}"
+        else:
+            self.status_banner = "No ManageSieve host configured for this account."
 
     def update(self, msg: Msg) -> tuple[SieveModal, Cmd | None]:
         if self.adding_rule:
@@ -821,16 +957,91 @@ class SieveModal(Model):
                         self.store.save_sieve_rule(new_rule)
                         self.adding_rule = False
                         self._refresh()
+                        # Also update editor preview if rules compiled
+                        self.script_editor.value = compile_sieve_script(self.rules)
                         self.status_banner = f"Added Sieve rule '{new_rule.name}'."
                     return self, None
 
             fields[self.add_focus], cmd = fields[self.add_focus].update(msg)
             return self, cmd
 
+        if self.editor_focused:
+            if isinstance(msg, KeyMsg):
+                k = str(msg.key)
+                if k in ("esc", "shift+tab"):
+                    self.editor_focused = False
+                    self.script_editor.blur()
+                    return self, None
+                if k == "ctrl+s":
+                    self._save_active_script()
+                    return self, None
+                if k in ("ctrl+u", "f5"):
+                    self._sync_from_server()
+                    return self, None
+
+            if isinstance(msg, MouseMsg):
+                if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
+                    self.script_editor, cmd = self.script_editor.update(msg)
+                    return self, cmd
+                if msg.action in (MouseAction.PRESS, MouseAction.DOUBLE_CLICK):
+                    rules_y0, rules_y1 = getattr(self, "_layout_rules_y", (2, 8))
+                    if rules_y0 <= msg.y < rules_y1 and self.rules:
+                        clicked_rel = msg.y - rules_y0
+                        clicked_abs = self.scroll + clicked_rel
+                        if 0 <= clicked_abs < len(self.rules):
+                            self.cursor = clicked_abs
+                            self.editor_focused = False
+                            self.script_editor.blur()
+                            return self, None
+
+            self.script_editor, cmd = self.script_editor.update(msg)
+            return self, cmd
+
+        if isinstance(msg, MouseMsg):
+            if msg.button == MouseButton.WHEEL_UP and self.rules:
+                self.cursor = max(0, self.cursor - 1)
+                self._adjust_scroll()
+                return self, None
+            if msg.button == MouseButton.WHEEL_DOWN and self.rules:
+                self.cursor = min(len(self.rules) - 1, self.cursor + 1)
+                self._adjust_scroll()
+                return self, None
+            if msg.action in (MouseAction.PRESS, MouseAction.DOUBLE_CLICK):
+                rules_y0, rules_y1 = getattr(self, "_layout_rules_y", (2, 8))
+                if rules_y0 <= msg.y < rules_y1 and self.rules:
+                    clicked_rel = msg.y - rules_y0
+                    clicked_abs = self.scroll + clicked_rel
+                    if 0 <= clicked_abs < len(self.rules):
+                        self.cursor = clicked_abs
+                        self._adjust_scroll()
+                        return self, None
+                else:
+                    self.editor_focused = True
+                    self.script_editor.focus()
+                    inner_x, inner_y = getattr(self, "_layout_editor_inner", (0, 0))
+                    rel_msg = MouseMsg(
+                        x=max(0, msg.x - inner_x),
+                        y=max(0, msg.y - inner_y),
+                        button=msg.button,
+                        action=msg.action,
+                        ctrl=msg.ctrl,
+                        alt=msg.alt,
+                        shift=msg.shift,
+                    )
+                    self.script_editor, cmd = self.script_editor.update(rel_msg)
+                    return self, cmd
+
         if isinstance(msg, KeyMsg):
             k = str(msg.key)
             if k in ("esc", "q"):
                 return self, lambda: ModalClosedMsg(self.status_banner)
+            if k == "ctrl+s":
+                self._save_active_script()
+                return self, None
+            if k in ("tab", "e", "i", "enter"):
+                self.editor_focused = True
+                self.script_editor.focus()
+                return self, None
             if k in ("down", "j") and self.rules:
                 self.cursor = (self.cursor + 1) % len(self.rules)
                 self._adjust_scroll()
@@ -880,30 +1091,16 @@ class SieveModal(Model):
                 self.input_folder.blur()
                 return self, None
             if k == "v":
-                compiled = compile_sieve_script(self.rules)
-                ok, errs = validate_sieve_script(compiled)
+                script_to_val = self.script_editor.value or compile_sieve_script(self.rules)
+                ok, errs = validate_sieve_script(script_to_val)
                 self.status_banner = (
                     "✔ Sieve RFC 5228 syntax verified with 0 errors."
                     if ok
                     else f"✖ Validation error: {'; '.join(errs)}"
                 )
                 return self, None
-            if k == "u":
-                accounts = self.store.list_accounts()
-                target_acc = next((a for a in accounts if a.id == self.active_account_id), None)
-                if not target_acc and accounts:
-                    target_acc = accounts[0]
-                if target_acc and target_acc.sieve_host:
-                    try:
-                        client = ManageSieveClient(target_acc)
-                        client.connect()
-                        ok, msg_text = client.sync_script_with_server(self.store)
-                        client.close()
-                        self.status_banner = msg_text
-                    except Exception as ex:
-                        self.status_banner = f"ManageSieve sync failed: {ex}"
-                else:
-                    self.status_banner = "No ManageSieve host configured for this account."
+            if k in ("u", "ctrl+u", "f5"):
+                self._sync_from_server()
                 return self, None
             if k == "r":
                 # Run active Sieve rules against local INBOX messages
@@ -918,22 +1115,23 @@ class SieveModal(Model):
                 self.status_banner = f"Executed Sieve rules across Inbox: {len(matched)} message(s) processed."
                 return self, None
 
-        if isinstance(msg, MouseMsg) and self.rules:
-            if msg.button == MouseButton.WHEEL_UP:
-                self.cursor = max(0, self.cursor - 1)
-                self._adjust_scroll()
-                return self, None
-            if msg.button == MouseButton.WHEEL_DOWN:
-                self.cursor = min(len(self.rules) - 1, self.cursor + 1)
-                self._adjust_scroll()
-                return self, None
-
         return self, None
 
-    def view(self, width: int = 80) -> str:
+    def view(self, width: int = 80, height: int = 24) -> str:
         self._adjust_scroll()
-        modal_w = min(82, max(58, width - 6))
-        inner_w = modal_w - 6
+        target_outer_w = min(114, max(68, width - 4))
+        modal_w = target_outer_w - 6
+        inner_w = modal_w
+        content_editor_w = max(20, inner_w - 4)
+        self.script_editor.width = content_editor_w
+
+        rule_count = max(1, min(len(self.rules), self.page_size))
+        total_h = rule_count + 21
+        modal_top = max(0, (height - total_h) // 2)
+        modal_left = max(0, (width - target_outer_w) // 2)
+        self._layout_rules_y = (modal_top + 2, modal_top + 2 + rule_count)
+        self._layout_editor_y = (modal_top + 3 + rule_count, modal_top + 3 + rule_count + 14)
+        self._layout_editor_inner = (modal_left + 4, modal_top + 4 + rule_count)
 
         if self.adding_rule:
             form_view = join_vertical(
@@ -956,7 +1154,7 @@ class SieveModal(Model):
             chk = "[x]" if r.enabled else "[ ]"
             desc = f"{chk} {r.name:<24} │ if {r.field} {r.comparator} \"{r.pattern}\" → {r.action} \"{r.action_arg}\""
             truncated = truncate_ansi(desc, inner_w)
-            if abs_idx == self.cursor:
+            if abs_idx == self.cursor and not self.editor_focused:
                 rule_rows.append(
                     Style()
                     .bold(True)
@@ -971,29 +1169,37 @@ class SieveModal(Model):
         if not rule_rows:
             rule_rows.append(Style().italic(True).foreground(self.theme.fg_muted).render("  No Sieve filter rules configured."))
 
-        compiled_preview = "\n".join(compile_sieve_script(self.rules).splitlines()[:10])
-        preview_box = (
+        editor_border_color = self.theme.border_focused if self.editor_focused else self.theme.border_unfocused
+        editor_title_str = (
+            Style().bold(True).foreground(self.theme.accent_primary).render(" Active Sieve Script Editor [Editing - Esc to unfocus] ")
+            if self.editor_focused
+            else Style().foreground(self.theme.fg_secondary).render(" Active Sieve Script Editor [Click or Tab to edit] ")
+        )
+        editor_box = (
             Style()
             .border(ROUNDED_BORDER)
-            .border_foreground(self.theme.border_unfocused)
-            .border_title(" Compiled RFC 5228 Sieve Script Preview ", align=Align.LEFT)
-            .width(inner_w)
-            .foreground(self.theme.fg_secondary)
-            .render(compiled_preview)
+            .border_foreground(editor_border_color)
+            .border_background(self.theme.bg_primary)
+            .background(self.theme.bg_primary)
+            .border_title(editor_title_str, align=Align.LEFT)
+            .width(inner_w - 2)
+            .render(self.script_editor.view())
         )
 
-        status_line = Style().bold(True).foreground(self.theme.pgp_verified_fg).render(self.status_banner)
-        footer = (
-            Style()
-            .foreground(self.theme.fg_muted)
-            .render("[Space] Toggle   [a] Add Rule   [d] Delete   [v] Validate   [u] Sync Server   [r] Run Filters   [Esc] Close")
+        status_line = Style().bold(True).foreground(self.theme.pgp_verified_fg).render(
+            truncate_ansi(self.status_banner, inner_w)
         )
+        if inner_w >= 110:
+            footer_text = "[Tab/Click] Edit Script  [Esc] Unfocus/Close  [Space] Toggle  [a] Add  [d] Delete  [v] Validate  [u] Sync  [Ctrl+S] Save"
+        else:
+            footer_text = "[Tab/Click] Edit  [Esc] Back  [Space] Toggle  [a] Add  [d] Del  [u] Sync  [Ctrl+S] Save"
+        footer = Style().foreground(self.theme.fg_muted).render(truncate_ansi(footer_text, inner_w))
 
         content = join_vertical(
             Align.LEFT,
             "\n".join(rule_rows),
             "",
-            preview_box,
+            editor_box,
             status_line,
             footer,
         )
@@ -1151,26 +1357,39 @@ class AccountSettingsModal(Model):
         self.status_msg = ""
 
         # Form inputs
-        self.input_account_name = TextInput(placeholder="Work / Personal", prompt="Account Name:  ")
-        self.input_full_name = TextInput(placeholder="Jane Doe", prompt="Full Name:     ")
-        self.input_email = TextInput(placeholder="jane@example.com", prompt="Email Address: ")
-        self.input_username = TextInput(placeholder="Login username", prompt="Login User:    ")
+        styles = self.theme.text_input_styles()
+        self.input_account_name = TextInput(placeholder="Work / Personal", prompt="Account Name:  ", **styles)
+        self.input_full_name = TextInput(placeholder="Jane Doe", prompt="Full Name:     ", **styles)
+        self.input_email = TextInput(placeholder="jane@example.com", prompt="Email Address: ", **styles)
+        self.input_username = TextInput(placeholder="Login username", prompt="Login User:    ", **styles)
         self.input_password = TextInput(
             placeholder="IMAP / SMTP Password",
             prompt="Password:      ",
             echo_mode=EchoMode.PASSWORD,
+            **styles,
         )
-        self.input_imap_host = TextInput(placeholder="imap.example.com", prompt="IMAP Host:     ")
-        self.input_imap_port = TextInput(placeholder="993", prompt="IMAP Port:     ")
+        self.input_imap_host = TextInput(placeholder="imap.example.com", prompt="IMAP Host:     ", **styles)
+        self.input_imap_port = TextInput(placeholder="993", prompt="IMAP Port:     ", **styles)
         self.imap_security: SecurityType = SecurityType.SSL_TLS
-        self.input_smtp_host = TextInput(placeholder="smtp.example.com", prompt="SMTP Host:     ")
-        self.input_smtp_port = TextInput(placeholder="587", prompt="SMTP Port:     ")
+        self.input_smtp_host = TextInput(placeholder="smtp.example.com", prompt="SMTP Host:     ", **styles)
+        self.input_smtp_port = TextInput(placeholder="587", prompt="SMTP Port:     ", **styles)
         self.smtp_security: SecurityType = SecurityType.STARTTLS
+        self.input_sieve_host = TextInput(placeholder="sieve.example.com", prompt="Sieve Host:    ", **styles)
+        self.input_sieve_port = TextInput(placeholder="4190", prompt="Sieve Port:    ", **styles)
+        self.input_carddav_url = TextInput(placeholder="https://dav.example.com/addressbooks/...", prompt="CardDAV URL:   ", **styles)
+        self.input_carddav_username = TextInput(placeholder="(Defaults to IMAP User)", prompt="CardDAV User:  ", **styles)
+        self.input_carddav_password = TextInput(
+            placeholder="(Defaults to IMAP Pass)",
+            prompt="CardDAV Pass:  ",
+            echo_mode=EchoMode.PASSWORD,
+            **styles,
+        )
         self.input_signature = TextArea(
             placeholder="Optional email signature...",
             height=3,
             width=54,
             show_line_numbers=False,
+            **self.theme.text_area_styles(),
         )
 
         # Focus indices:
@@ -1178,7 +1397,8 @@ class AccountSettingsModal(Model):
         # 1: Account Name, 2: Full Name, 3: Email, 4: Username, 5: Password
         # 6: IMAP Host, 7: IMAP Port, 8: IMAP Security
         # 9: SMTP Host, 10: SMTP Port, 11: SMTP Security
-        # 12: Signature
+        # 12: Sieve Host, 13: Sieve Port, 14: CardDAV URL, 15: CardDAV User, 16: CardDAV Password
+        # 17: Signature
         self.focus_idx = 5 if self.accounts else 0  # Default focus on Password field for quick password updates
         self._load_selected_account()
         self._sync_focus()
@@ -1204,6 +1424,11 @@ class AccountSettingsModal(Model):
         self.input_smtp_host.value = acc.smtp_host
         self.input_smtp_port.value = str(acc.smtp_port)
         self.smtp_security = acc.smtp_security
+        self.input_sieve_host.value = acc.sieve_host or acc.imap_host
+        self.input_sieve_port.value = str(acc.sieve_port or 4190)
+        self.input_carddav_url.value = acc.carddav_url
+        self.input_carddav_username.value = acc.carddav_username or ""
+        self.input_carddav_password.value = acc.carddav_password or ""
         self.input_signature.value = acc.signature
 
     def _sync_focus(self) -> None:
@@ -1217,7 +1442,12 @@ class AccountSettingsModal(Model):
             7: self.input_imap_port,
             9: self.input_smtp_host,
             10: self.input_smtp_port,
-            12: self.input_signature,
+            12: self.input_sieve_host,
+            13: self.input_sieve_port,
+            14: self.input_carddav_url,
+            15: self.input_carddav_username,
+            16: self.input_carddav_password,
+            17: self.input_signature,
         }
         for idx, inp in input_map.items():
             if idx == self.focus_idx:
@@ -1242,15 +1472,22 @@ class AccountSettingsModal(Model):
         try:
             imap_port = int(self.input_imap_port.value.strip() or "993")
             smtp_port = int(self.input_smtp_port.value.strip() or "587")
-            if not (1 <= imap_port <= 65535 and 1 <= smtp_port <= 65535):
+            sieve_port = int(self.input_sieve_port.value.strip() or "4190")
+            if not (1 <= imap_port <= 65535 and 1 <= smtp_port <= 65535 and 1 <= sieve_port <= 65535):
                 raise ValueError
         except ValueError:
-            return None, "IMAP and SMTP ports must be valid port numbers (1–65535)."
+            return None, "IMAP, SMTP, and Sieve ports must be valid port numbers (1–65535)."
 
         username = self.input_username.value.strip() or email_val
         password = self.input_password.value
         if not password:
             return None, "Password cannot be empty."
+
+        carddav_url = self.input_carddav_url.value.strip()
+        if carddav_url and not carddav_url.startswith(("http://", "https://")):
+            return None, "CardDAV URL must start with http:// or https://"
+        carddav_username = self.input_carddav_username.value.strip() or acc.carddav_username or username
+        carddav_password = self.input_carddav_password.value or acc.carddav_password or password
 
         updated = AccountConfig(
             id=acc.id,
@@ -1267,12 +1504,15 @@ class AccountSettingsModal(Model):
             smtp_security=self.smtp_security,
             smtp_username=username,
             smtp_password=password,
-            sieve_host=acc.sieve_host or imap_host,
-            sieve_port=acc.sieve_port,
+            sieve_host=self.input_sieve_host.value.strip() or imap_host,
+            sieve_port=sieve_port,
             pgp_key_id=acc.pgp_key_id,
             signature=self.input_signature.value,
             color_badge=acc.color_badge,
             enabled=acc.enabled,
+            carddav_url=carddav_url,
+            carddav_username=carddav_username,
+            carddav_password=carddav_password,
         )
         return updated, ""
 
@@ -1286,9 +1526,9 @@ class AccountSettingsModal(Model):
 
             if k == "ctrl+r":
                 self.show_password = not self.show_password
-                self.input_password.echo_mode = (
-                    EchoMode.NORMAL if self.show_password else EchoMode.PASSWORD
-                )
+                mode = EchoMode.NORMAL if self.show_password else EchoMode.PASSWORD
+                self.input_password.echo_mode = mode
+                self.input_carddav_password.echo_mode = mode
                 return self, None
 
             if k == "ctrl+d":
@@ -1332,7 +1572,7 @@ class AccountSettingsModal(Model):
                     trigger_sync=True,
                 )
 
-            if k in ("ctrl+s", "ctrl+enter") or (k == "enter" and self.focus_idx != 12):
+            if k in ("ctrl+s", "ctrl+enter") or (k == "enter" and self.focus_idx != 17):
                 updated, err = self._build_updated_account()
                 if updated is None:
                     self.error_msg = err
@@ -1351,11 +1591,11 @@ class AccountSettingsModal(Model):
                 )
 
             if k in ("tab", "down"):
-                self.focus_idx = (self.focus_idx + 1) % 13
+                self.focus_idx = (self.focus_idx + 1) % 18
                 self._sync_focus()
                 return self, None
             if k in ("shift+tab", "up"):
-                self.focus_idx = (self.focus_idx - 1) % 13
+                self.focus_idx = (self.focus_idx - 1) % 18
                 self._sync_focus()
                 return self, None
 
@@ -1387,7 +1627,12 @@ class AccountSettingsModal(Model):
             7: self.input_imap_port,
             9: self.input_smtp_host,
             10: self.input_smtp_port,
-            12: self.input_signature,
+            12: self.input_sieve_host,
+            13: self.input_sieve_port,
+            14: self.input_carddav_url,
+            15: self.input_carddav_username,
+            16: self.input_carddav_password,
+            17: self.input_signature,
         }
         if self.focus_idx in input_map:
             target = input_map[self.focus_idx]
@@ -1440,9 +1685,14 @@ class AccountSettingsModal(Model):
             self.input_smtp_host.view(),
             self.input_smtp_port.view(),
             f"SMTP Security: ◀ {smtp_sec_style.render(self.smtp_security.value.upper())} ▶",
+            self.input_sieve_host.view(),
+            self.input_sieve_port.view(),
+            self.input_carddav_url.view(),
+            self.input_carddav_username.view(),
+            f"{self.input_carddav_password.view()}   {Style().foreground(self.theme.fg_muted).render(f'[{pwd_mode}]')}",
             "",
             Style().bold(True).foreground(
-                self.theme.accent_primary if self.focus_idx == 12 else self.theme.accent_secondary
+                self.theme.accent_primary if self.focus_idx == 17 else self.theme.accent_secondary
             ).render("Email Signature (appended to messages):"),
             self.input_signature.view(),
         ]
@@ -1507,13 +1757,12 @@ class HelpModal(Model):
             f"  {k_style.render('w')}  Save attachments      {k_style.render('M')}      Fetch older messages",
             f"  {k_style.render('S')}  Sync all accounts     {k_style.render('X')}      Empty Trash",
             "",
-            h_style.render("Accounts, Search, Security, Filters & Themes"),
+            h_style.render("Accounts, Search, Security, Filters & Settings"),
             f"  {k_style.render('A')}      Edit Account Settings (Password, IMAP/SMTP hosts, ports, TLS)",
             f"  {k_style.render('O')}      Add New Account (Onboarding Wizard)",
-            f"  {k_style.render('p')}      General Preferences (Downloads folder, image renderer, theme)",
+            f"  {k_style.render('p')}      General Preferences (Downloads folder, image renderer, light/dark mode)",
             f"  {k_style.render('/')}      Instant Fuzzy Search across local SQLite store",
             f"  {k_style.render('t')}      Toggle Conversation Threading view",
-            f"  {k_style.render('T')}      Cycle Color Scheme / Theme ({self.theme.name})",
             f"  {k_style.render('i')}      Cycle Terminal Image Renderer (Chafa / Sixel / Kitty / Half-Block)",
             f"  {k_style.render('B')}      Local Address Book    {k_style.render('F')}  ManageSieve Filters",
             f"  {k_style.render('G')}      GPG/PGP Keyring       {k_style.render('Ctrl+P')} Command Palette",
@@ -1522,6 +1771,48 @@ class HelpModal(Model):
         return self.theme.modal_style(modal_w, "⌨️ EspressoMail Keyboard & Mouse Shortcuts").render(
             "\n".join(lines)
         )
+
+
+# ---------------------------------------------------------------------------
+# 7b. Confirm Exit Modal Dialog
+# ---------------------------------------------------------------------------
+
+
+class ConfirmExitModal(Model):
+    """Interactive modal asking for confirmation before exiting EspressoMail."""
+
+    def __init__(self, theme: Theme) -> None:
+        self.theme = theme
+
+    def init(self) -> Cmd | None:
+        return None
+
+    def update(self, msg: Msg) -> tuple[ConfirmExitModal, Cmd | None]:
+        if isinstance(msg, KeyMsg):
+            k = str(msg.key).lower()
+            if k in ("y", "enter"):
+                from espresso import quit_app
+                return self, quit_app
+            if k in ("n", "esc", "q"):
+                return self, lambda: ModalClosedMsg("Exit cancelled.")
+        return self, None
+
+    def view(self, width: int = 80) -> str:
+        modal_w = min(56, max(42, width - 10))
+        msg_line = (
+            Style()
+            .bold(True)
+            .foreground(self.theme.fg_primary)
+            .render("Are you sure you want to exit EspressoMail?")
+        )
+        actions_line = (
+            Style().bold(True).foreground(self.theme.accent_primary).render("[y / Enter]")
+            + Style().foreground(self.theme.fg_secondary).render(" Exit    ")
+            + Style().bold(True).foreground(self.theme.accent_secondary).render("[n / Esc]")
+            + Style().foreground(self.theme.fg_secondary).render(" Stay in App")
+        )
+        content = join_vertical(Align.CENTER, msg_line, "", actions_line)
+        return self.theme.modal_style(modal_w, "🚪 Confirm Exit").render(content)
 
 
 # ---------------------------------------------------------------------------
@@ -1546,7 +1837,11 @@ class DownloadAttachmentsModal(Model):
         self.selected_indices: set[int] = set(range(len(attachments)))
         self.cursor_idx: int = 0
         self.focus_target: str = "list"  # "list" or "dir"
-        self.input_dir = TextInput(placeholder="Download directory path...", prompt="Target Folder: ")
+        self.input_dir = TextInput(
+            placeholder="Download directory path...",
+            prompt="Target Folder: ",
+            **self.theme.text_input_styles(),
+        )
         self.input_dir.value = str(self.download_dir_path)
         self.error_msg = ""
 
@@ -1699,16 +1994,7 @@ class PreferencesModal(Model):
     """General application settings & preferences dialog for configuring downloads, image renderer, theme, and behavior."""
 
     IMAGE_BACKENDS: tuple[str, ...] = ("auto", "chafa", "half_block", "braille", "sixel", "kitty", "off")
-    THEMES: tuple[str, ...] = (
-        "espresso",
-        "dracula",
-        "gruvbox",
-        "nord",
-        "tokyonight",
-        "monokai",
-        "solarized-dark",
-        "solarized-light",
-    )
+    COLOR_MODES: tuple[str, ...] = ("dark", "light")
     FOLDER_COUNT_MODES: tuple[str, ...] = ("unread_only", "unread_and_total")
     FETCH_BATCH_SIZES: tuple[int, ...] = (25, 50, 100, 200)
 
@@ -1723,12 +2009,16 @@ class PreferencesModal(Model):
     ) -> None:
         self.store = store
         self.current_theme = current_theme
-        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=threading, 4=raw_headers, 5=sync_startup, 6=remote_imgs, 7=count_mode, 8=batch_size
+        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=color_mode, 3=threading, 4=raw_headers, 5=sync_startup, 6=remote_imgs, 7=count_mode, 8=batch_size
         self.status_msg = ""
         self.error_msg = ""
 
         # Settings
-        self.input_download_dir = TextInput(placeholder="Download folder path...", prompt="Download Folder:     ")
+        self.input_download_dir = TextInput(
+            placeholder="Download folder path...",
+            prompt="Download Folder:     ",
+            **self.current_theme.text_input_styles(),
+        )
         self.input_download_dir.value = str(download_dir)
 
         backend_clean = current_image_backend.lower()
@@ -1738,12 +2028,10 @@ class PreferencesModal(Model):
             else 0
         )
 
-        theme_clean = current_theme.id.lower()
-        self.theme_idx = (
-            self.THEMES.index(theme_clean)
-            if theme_clean in self.THEMES
-            else 0
-        )
+        cur_mode = self.store.get_setting("color_mode", "")
+        if not cur_mode:
+            cur_mode = "light" if "light" in current_theme.id.lower() else "dark"
+        self.color_mode_idx = 1 if cur_mode.lower() == "light" else 0
 
         self.threading_enabled = threading_enabled
         self.show_raw_headers = show_raw_headers
@@ -1768,6 +2056,12 @@ class PreferencesModal(Model):
         )
 
         self._sync_focus()
+
+    def _apply_theme_to_inputs(self) -> None:
+        styles = self.current_theme.text_input_styles()
+        self.input_download_dir.style = styles["style"]
+        self.input_download_dir.placeholder_style = styles["placeholder_style"]
+        self.input_download_dir.prompt_style = styles["prompt_style"]
 
     def _sync_focus(self) -> None:
         if self.focus_idx == 0:
@@ -1804,7 +2098,11 @@ class PreferencesModal(Model):
 
             if self.focus_idx == 2 and k in ("left", "right", "h", "l", " ", "space"):
                 delta = 1 if k in ("right", "l", " ", "space") else -1
-                self.theme_idx = (self.theme_idx + delta) % len(self.THEMES)
+                self.color_mode_idx = (self.color_mode_idx + delta) % len(self.COLOR_MODES)
+                mode_val = self.COLOR_MODES[self.color_mode_idx]
+                theme_val = "solarized_light" if mode_val == "light" else "espresso"
+                self.current_theme = THEMES.get(theme_val, self.current_theme)
+                self._apply_theme_to_inputs()
                 return self, None
 
             if self.focus_idx == 3 and k in (" ", "space", "left", "right"):
@@ -1853,12 +2151,14 @@ class PreferencesModal(Model):
             return self, None
 
         backend_val = self.IMAGE_BACKENDS[self.backend_idx]
-        theme_val = self.THEMES[self.theme_idx]
+        mode_val = self.COLOR_MODES[self.color_mode_idx]
+        theme_val = "solarized_light" if mode_val == "light" else "espresso"
         count_mode_val = self.FOLDER_COUNT_MODES[self.count_mode_idx]
         batch_val = self.FETCH_BATCH_SIZES[self.batch_idx]
 
         self.store.set_setting("download_dir", str(p))
         self.store.set_setting("image_backend", backend_val)
+        self.store.set_setting("color_mode", mode_val)
         self.store.set_setting("theme", theme_val)
         self.store.set_setting("threading", "1" if self.threading_enabled else "0")
         self.store.set_setting("show_raw_headers", "1" if self.show_raw_headers else "0")
@@ -1895,9 +2195,9 @@ class PreferencesModal(Model):
             f"Image Rendering Mode: ◀ {_opt_style(1, cur_b)} ▶"
         )
 
-        cur_t = self.THEMES[self.theme_idx].capitalize()
+        cur_mode_str = "Dark" if self.COLOR_MODES[self.color_mode_idx] == "dark" else "Light"
         rows.append(
-            f"Terminal Theme:       ◀ {_opt_style(2, cur_t)} ▶"
+            f"Color Mode:           ◀ {_opt_style(2, cur_mode_str)} ▶"
         )
 
         th_val = "[x] Enabled" if self.threading_enabled else "[ ] Disabled"
