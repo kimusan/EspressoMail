@@ -1,6 +1,6 @@
 # Maintainer: Kim Schulz <kim@schulz.dk>
 pkgname=espressomail
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="A modern, multi-account terminal email client built on the Espresso TUI framework"
 arch=('x86_64')

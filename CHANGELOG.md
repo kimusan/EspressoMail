@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-28
+
+
+> Fix IMAP flag synchronization and add debug logging
+
+### Bug Fixes and Enhancements in v0.1.1
+
+- IMAP Client Context Manager: Fixed a runtime error where flag synchronization failed due to IMAPClient lacking the context manager protocol.
+- Debug Logging: Added a --debug (-d) CLI flag and persistent rotating file logging (defaults to ~/.local/share/espressomail/espressomail.log).
+- Folder Subscription Sync: Ensured startup and 'sync all' only synchronize subscribed folders, while unsubscribed folders are fetched on-demand when selected and entered.
+- Folder Tree Controls: Remote IMAP SUBSCRIBE and UNSUBSCRIBE commands are now automatically dispatched when toggling folder subscription (s).
 ## [0.1.0] - 2026-10-28
 
 > EspressoMail 0.1.0: First release - fresh terminal email brewed with the Espresso framework.
@@ -33,5 +44,6 @@ A massive shoutout to the Espresso TUI framework (espressoTUI) and The Elm Archi
 - Modals and Dialogs: Full-screen and modal overlays for Compose, Preferences, Account Setup & Editing, Attachment Downloader, and Exit Confirmation.
 - Packaging and CI/CD: Standalone single-binary executables (Linux x86_64 and Windows x86_64.exe), native Linux packages (Debian .deb, RPM, Arch Linux), PyPI publication, and automated release management.
 
-[Unreleased]: https://github.com/kimusan/EspressoMail/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kimusan/EspressoMail/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/kimusan/EspressoMail/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kimusan/EspressoMail/releases/tag/v0.1.0
