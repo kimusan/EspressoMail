@@ -124,6 +124,7 @@ class PreferencesSavedMsg(Msg):
     fetch_batch_size: int = 50
     desktop_notifications: bool = True
     notification_sound: bool = False
+    auto_sync_interval: int = 300
 
 
 
@@ -2017,6 +2018,18 @@ class PreferencesModal(Model):
     COLOR_MODES: tuple[str, ...] = ("dark", "light")
     FOLDER_COUNT_MODES: tuple[str, ...] = ("unread_only", "unread_and_total")
     FETCH_BATCH_SIZES: tuple[int, ...] = (25, 50, 100, 200)
+    AUTO_SYNC_INTERVALS: tuple[int, ...] = (0, 60, 120, 180, 300, 600, 900, 1800, 3600)
+    AUTO_SYNC_LABELS: dict[int, str] = {
+        0: "Manual Only (Off)",
+        60: "1 minute",
+        120: "2 minutes",
+        180: "3 minutes",
+        300: "5 minutes",
+        600: "10 minutes",
+        900: "15 minutes",
+        1800: "30 minutes",
+        3600: "60 minutes",
+    }
 
     def __init__(
         self,
@@ -2029,7 +2042,7 @@ class PreferencesModal(Model):
     ) -> None:
         self.store = store
         self.current_theme = current_theme
-        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=color_mode, 4=threading, 5=raw_headers, 6=sync_startup, 7=remote_imgs, 8=count_mode, 9=batch_size, 10=notifications, 11=sound, 12=buttons
+        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=color_mode, 4=threading, 5=raw_headers, 6=sync_startup, 7=remote_imgs, 8=count_mode, 9=batch_size, 10=notifications, 11=sound, 12=auto_sync, 13=buttons
         self.status_msg = ""
         self.error_msg = ""
 
@@ -2037,10 +2050,10 @@ class PreferencesModal(Model):
         self.last_app_w = 80
         self.last_app_h = 24
         self.last_modal_w = 68
-        self.last_modal_h = 20
+        self.last_modal_h = 21
         self.last_pos_x = 6
         self.last_pos_y = 3
-        self.buttons_row_offset = 13
+        self.buttons_row_offset = 14
 
         # Settings
         self.input_download_dir = TextInput(
@@ -2093,6 +2106,16 @@ class PreferencesModal(Model):
             else 1
         )
 
+        try:
+            cur_interval = int(self.store.get_setting("auto_sync_interval", "300"))
+        except Exception:
+            cur_interval = 300
+        self.sync_interval_idx = (
+            self.AUTO_SYNC_INTERVALS.index(cur_interval)
+            if cur_interval in self.AUTO_SYNC_INTERVALS
+            else 4
+        )
+
         self._sync_focus()
 
     def _get_active_theme_key(self) -> str:
@@ -2143,6 +2166,8 @@ class PreferencesModal(Model):
             self.desktop_notifications = not self.desktop_notifications
         elif row_idx == 11:
             self.notification_sound = not self.notification_sound
+        elif row_idx == 12:
+            self.sync_interval_idx = (self.sync_interval_idx + delta) % len(self.AUTO_SYNC_INTERVALS)
 
     def init(self) -> Cmd | None:
         return None
@@ -2153,7 +2178,7 @@ class PreferencesModal(Model):
             app_w = getattr(self, "last_app_w", 80)
             app_h = getattr(self, "last_app_h", 24)
             modal_w = getattr(self, "last_modal_w", min(74, max(56, app_w - 8)))
-            modal_h = getattr(self, "last_modal_h", 18)
+            modal_h = getattr(self, "last_modal_h", 21)
             pos_x = getattr(self, "last_pos_x", max(0, (app_w - modal_w) // 2))
             pos_y = getattr(self, "last_pos_y", max(0, (app_h - modal_h) // 2))
 
@@ -2167,14 +2192,14 @@ class PreferencesModal(Model):
                 # Mouse Wheel cycling
                 if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
                     delta = -1 if msg.button == MouseButton.WHEEL_UP else 1
-                    target_row = row_idx if 0 <= row_idx <= 11 else self.focus_idx
+                    target_row = row_idx if 0 <= row_idx <= 12 else self.focus_idx
                     self._cycle_row(target_row, delta)
                     return self, None
 
                 # Mouse Left Click
                 if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
                     # Check button row
-                    btn_row = getattr(self, "buttons_row_offset", 13)
+                    btn_row = getattr(self, "buttons_row_offset", 14)
                     if row_idx == btn_row:
                         # Save button is on left half, Cancel on right half
                         if rel_x < modal_w // 2:
@@ -2182,8 +2207,8 @@ class PreferencesModal(Model):
                         else:
                             return self, lambda: ModalClosedMsg("Closed preferences.")
 
-                    # Check setting rows (0 to 11)
-                    if 0 <= row_idx <= 11:
+                    # Check setting rows (0 to 12)
+                    if 0 <= row_idx <= 12:
                         self.focus_idx = row_idx
                         self._sync_focus()
                         # If clicked on left arrow or left side of option value, cycle backwards; else forwards
@@ -2200,21 +2225,21 @@ class PreferencesModal(Model):
                 return self, lambda: ModalClosedMsg("Closed preferences.")
 
             if k in ("enter", "ctrl+s"):
-                if self.focus_idx == 12:
+                if self.focus_idx == 13:
                     return self._save_preferences()
                 return self._save_preferences()
 
             if k in ("tab", "down"):
-                self.focus_idx = (self.focus_idx + 1) % 13
+                self.focus_idx = (self.focus_idx + 1) % 14
                 self._sync_focus()
                 return self, None
             if k in ("shift+tab", "up"):
-                self.focus_idx = (self.focus_idx - 1) % 13
+                self.focus_idx = (self.focus_idx - 1) % 14
                 self._sync_focus()
                 return self, None
 
             # Cycling / toggling options via arrows / space / h / l
-            if 1 <= self.focus_idx <= 11 and k in ("left", "right", "h", "l", " ", "space"):
+            if 1 <= self.focus_idx <= 12 and k in ("left", "right", "h", "l", " ", "space"):
                 delta = 1 if k in ("right", "l", " ", "space") else -1
                 self._cycle_row(self.focus_idx, delta)
                 return self, None
@@ -2257,6 +2282,8 @@ class PreferencesModal(Model):
         self.store.set_setting("fetch_batch_size", str(batch_val))
         self.store.set_setting("desktop_notifications", "1" if self.desktop_notifications else "0")
         self.store.set_setting("notification_sound", "1" if self.notification_sound else "0")
+        sync_interval_val = self.AUTO_SYNC_INTERVALS[self.sync_interval_idx]
+        self.store.set_setting("auto_sync_interval", str(sync_interval_val))
 
         return self, lambda: PreferencesSavedMsg(
             download_dir=str(p),
@@ -2270,6 +2297,7 @@ class PreferencesModal(Model):
             fetch_batch_size=batch_val,
             desktop_notifications=self.desktop_notifications,
             notification_sound=self.notification_sound,
+            auto_sync_interval=sync_interval_val,
         )
 
     def view(self, width: int = 80, height: int = 24) -> str:
@@ -2332,6 +2360,11 @@ class PreferencesModal(Model):
         sound_val = "[x] Enabled" if self.notification_sound else "[ ] Disabled"
         rows.append(f"Notification Sound:    {_opt_style(11, sound_val)}")
 
+        # Row 12: Auto-Sync Interval
+        cur_asi = self.AUTO_SYNC_INTERVALS[self.sync_interval_idx]
+        cur_asi_label = self.AUTO_SYNC_LABELS.get(cur_asi, f"{cur_asi}s")
+        rows.append(f"Auto-Sync Interval:    ◀ {_opt_style(12, cur_asi_label)} ▶")
+
         if self.error_msg:
             rows.append("")
             rows.append(
@@ -2341,8 +2374,8 @@ class PreferencesModal(Model):
         rows.append("")
         self.buttons_row_offset = len(rows)
 
-        # Row 12 (or buttons row)
-        save_focused = (self.focus_idx == 12)
+        # Row 13 (or buttons row)
+        save_focused = (self.focus_idx == 13)
         save_btn = (
             Style().bold(True).background(self.current_theme.accent_primary).foreground(self.current_theme.bg_primary).render(" [ Save Preferences (Enter) ] ")
             if save_focused

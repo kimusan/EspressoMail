@@ -294,6 +294,8 @@ class EspressoMailApp(Model):
         self.fetch_batch_size: int = int(cur_batch) if cur_batch.isdigit() else 50
         self.desktop_notifications: bool = self.store.get_setting("desktop_notifications", "1") == "1"
         self.notification_sound: bool = self.store.get_setting("notification_sound", "0") == "1"
+        cur_sync_int = self.store.get_setting("auto_sync_interval", "300")
+        self.auto_sync_interval: int = int(cur_sync_int) if cur_sync_int.isdigit() else 300
 
         # Active modal overlay
         self.active_modal: Model | None = None
@@ -455,6 +457,7 @@ class EspressoMailApp(Model):
             PaletteItem("preferences", "Settings: General Preferences", "Configure download folder, image renderer, theme, threading", "p", "Settings"),
             PaletteItem("new_account", "Accounts: Add New Account", "Launch onboarding wizard for a new account", "O", "Accounts"),
             PaletteItem("sync_all", "Accounts: Sync IMAP Mailboxes", "Synchronize all enabled accounts", "S", "Accounts"),
+            PaletteItem("toggle_auto_sync", "Accounts: Toggle Auto-Sync Timer", "Toggle periodic background email sync on or off", "", "Accounts"),
             PaletteItem("empty_trash", "Mail: Empty Trash", "Permanently delete trashed messages", "X", "Mail"),
             PaletteItem("show_shortcuts", "Help: Keyboard & Mouse Shortcuts", "Display full hotkey guide", "?", "Help"),
             PaletteItem("quit_app", "Application: Quit EspressoMail", "Exit cleanly", "q", "Application"),
@@ -474,6 +477,8 @@ class EspressoMailApp(Model):
         if any(acc.imap_password for acc in self.store.list_accounts(enabled_only=True)):
             self.status_message = "Synchronizing IMAP accounts..."
             return self._sync_accounts_cmd
+        if self.auto_sync_interval > 0:
+            return tick(float(self.auto_sync_interval), AutoSyncTickMsg())
         return None
 
     # ------------------------------------------------------------------
@@ -1008,11 +1013,15 @@ class EspressoMailApp(Model):
             self.fetch_batch_size = msg.fetch_batch_size
             self.desktop_notifications = msg.desktop_notifications
             self.notification_sound = msg.notification_sound
+            old_sync_interval = self.auto_sync_interval
+            self.auto_sync_interval = msg.auto_sync_interval
             self.refresh_data()
             self.status_message = (
                 f"✔ Saved preferences: theme={msg.theme}, renderer={msg.image_backend}, "
-                f"batch={msg.fetch_batch_size}, counts={msg.folder_count_mode}"
+                f"batch={msg.fetch_batch_size}, auto-sync={msg.auto_sync_interval}s"
             )
+            if self.auto_sync_interval > 0 and (old_sync_interval != self.auto_sync_interval or not self.is_syncing):
+                return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
             return self, None
 
         # 6. Active Modal Dialogs
@@ -1090,7 +1099,9 @@ class EspressoMailApp(Model):
                 )
                 self.status_message = summary
                 self.refresh_data()
-                return self, tick(180.0, AutoSyncTickMsg())
+                if self.auto_sync_interval > 0:
+                    return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
+                return self, None
 
             self.is_syncing = True
 
@@ -1158,10 +1169,14 @@ class EspressoMailApp(Model):
             self.sync_progress_text = ""
             self.status_message = msg.summary
             self.refresh_data()
-            return self, tick(180.0, AutoSyncTickMsg())
+            if self.auto_sync_interval > 0:
+                return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
+            return self, None
 
         # 7c. Auto-sync periodic tick
         if isinstance(msg, AutoSyncTickMsg):
+            if self.auto_sync_interval <= 0:
+                return self, None
             if (
                 not self.is_syncing
                 and not self.show_splash
@@ -1172,7 +1187,7 @@ class EspressoMailApp(Model):
                 self.sync_progress_text = "Background auto-sync..."
                 self.status_message = "⟳ Background auto-sync started..."
                 return self, self._sync_accounts_cmd
-            return self, tick(180.0, AutoSyncTickMsg())
+            return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
 
         # 7b. More messages fetched
         if isinstance(msg, MoreMessagesFetchedMsg):
@@ -2175,6 +2190,18 @@ class EspressoMailApp(Model):
             self.sync_progress_text = "Starting sync..."
             self.status_message = "⟳ Synchronizing IMAP accounts in background..."
             return self, self._sync_accounts_cmd
+
+        if action_id == "toggle_auto_sync":
+            if self.auto_sync_interval > 0:
+                self.auto_sync_interval = 0
+                self.store.set_setting("auto_sync_interval", "0")
+                self.status_message = "Auto-sync disabled (manual sync only via 'S')."
+                return self, None
+            else:
+                self.auto_sync_interval = 300
+                self.store.set_setting("auto_sync_interval", "300")
+                self.status_message = "Auto-sync enabled (interval: 5 minutes)."
+                return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
 
         return self, None
 

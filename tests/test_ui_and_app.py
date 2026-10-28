@@ -1972,8 +1972,8 @@ class TestUIAndApp(unittest.TestCase):
         # Render view to establish exact modal geometry
         modal.view(80, 24)
         pos_y = modal.last_pos_y
-        self.assertEqual(modal.last_modal_h, 20)
-        self.assertEqual(pos_y, 2)
+        self.assertEqual(modal.last_modal_h, 21)
+        self.assertEqual(pos_y, 1)
 
         # Mouse click row 2 (Theme name) to cycle theme family
         # Row 2 is y = pos_y + 2 (border/padding) + 2 (row 2) = 7
@@ -2457,6 +2457,71 @@ class TestUIAndApp(unittest.TestCase):
             app, _ = app._execute_action("test_notification")
             mock_send.assert_called_once()
             self.assertIn("Test desktop notification dispatched", app.status_message)
+
+    def test_auto_sync_configurable_interval_and_toggle(self) -> None:
+        """Verify configurable auto-sync interval in preferences and toggle action."""
+        from espressomail.ui.app import AutoSyncTickMsg, SyncProgressMsg
+
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.desktop_notifications = False
+
+        # 1. Default interval is 300 seconds
+        self.assertEqual(app.auto_sync_interval, 300)
+
+        # 2. Open preferences and change auto-sync interval (focus row 12)
+        app, _ = app.update(KeyMsg("p"))
+        modal = app.active_modal
+        self.assertIsInstance(modal, PreferencesModal)
+        modal.focus_idx = 12
+        # Initial is index 4 (300s)
+        self.assertEqual(modal.AUTO_SYNC_INTERVALS[modal.sync_interval_idx], 300)
+
+        # Cycle right -> index 5 (600s / 10 min)
+        modal, _ = modal.update(KeyMsg("right"))
+        self.assertEqual(modal.AUTO_SYNC_INTERVALS[modal.sync_interval_idx], 600)
+
+        # Save preferences
+        app, cmd = app.update(KeyMsg("enter"))
+        self.assertIsNone(app.active_modal)
+        self.assertEqual(app.auto_sync_interval, 600)
+        self.assertEqual(self.store.get_setting("auto_sync_interval"), "600")
+        self.assertIsNotNone(cmd)  # Tick rescheduled for 600s
+
+        # 3. Test sync completion reschedules tick with 600s
+        done_step = SyncProgressMsg(
+            account_id="acc_work",
+            account_name="Work",
+            action="done",
+            total_synced=5,
+            total_folders=2,
+            remaining_steps=(),
+            is_done=True,
+        )
+        app, cmd = app.update(done_step)
+        self.assertIsNotNone(cmd)
+
+        # 4. Toggle auto-sync via command palette item
+        app, cmd = app._execute_action("toggle_auto_sync")
+        self.assertEqual(app.auto_sync_interval, 0)
+        self.assertEqual(self.store.get_setting("auto_sync_interval"), "0")
+        self.assertIn("Auto-sync disabled", app.status_message)
+        self.assertIsNone(cmd)
+
+        # When auto_sync_interval == 0, sync completion does NOT schedule a tick
+        app, cmd = app.update(done_step)
+        self.assertIsNone(cmd)
+
+        # When auto_sync_interval == 0, AutoSyncTickMsg does nothing
+        app, cmd = app.update(AutoSyncTickMsg())
+        self.assertIsNone(cmd)
+
+        # Toggle back on
+        app, cmd = app._execute_action("toggle_auto_sync")
+        self.assertEqual(app.auto_sync_interval, 300)
+        self.assertEqual(self.store.get_setting("auto_sync_interval"), "300")
+        self.assertIn("Auto-sync enabled", app.status_message)
+        self.assertIsNotNone(cmd)
 
 
 if __name__ == "__main__":
