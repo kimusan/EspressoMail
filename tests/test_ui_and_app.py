@@ -1972,7 +1972,7 @@ class TestUIAndApp(unittest.TestCase):
         # Render view to establish exact modal geometry
         modal.view(80, 24)
         pos_y = modal.last_pos_y
-        self.assertEqual(modal.last_modal_h, 21)
+        self.assertEqual(modal.last_modal_h, 22)
         self.assertEqual(pos_y, 1)
 
         # Mouse click row 2 (Theme name) to cycle theme family
@@ -2522,6 +2522,74 @@ class TestUIAndApp(unittest.TestCase):
         self.assertEqual(self.store.get_setting("auto_sync_interval"), "300")
         self.assertIn("Auto-sync enabled", app.status_message)
         self.assertIsNotNone(cmd)
+
+    def test_imap_push_idle_event_and_toggle(self) -> None:
+        """Verify RFC 2177 IMAP IDLE real-time push events, client idle_listen, and app update handling."""
+        from unittest.mock import MagicMock, patch
+        from espressomail.protocols.imap_client import IMAPClient
+        from espressomail.ui.app import ImapPushEventMsg
+
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.desktop_notifications = False
+
+        # 1. Test IMAPClient has_capability and idle_listen with mock
+        acc = self.store.get_account("acc_work")
+        client = IMAPClient(acc)
+        mock_conn = MagicMock()
+        mock_conn.capabilities = ("IMAP4rev1", "IDLE")
+        mock_conn.select.return_value = ("OK", [b"42"])
+        client._conn = mock_conn
+
+        self.assertTrue(client.has_capability("IDLE"))
+        self.assertFalse(client.has_capability("NONEXISTENT"))
+
+        # Test idle_listen with mock idler context manager returning EXISTS
+        class DummyIdler:
+            def __enter__(self):
+                return [(b"EXISTS", [b"43"])]
+            def __exit__(self, *args):
+                pass
+
+        mock_conn.idle.return_value = DummyIdler()
+        has_event, event_type, count = client.idle_listen("INBOX", timeout=5.0)
+        self.assertTrue(has_event)
+        self.assertEqual(event_type, "exists")
+        self.assertEqual(count, 43)
+
+        # 2. Test app handling of ImapPushEventMsg
+        push_msg = ImapPushEventMsg(
+            account_id="acc_work",
+            account_name="Work",
+            folder="INBOX",
+            event_type="exists",
+            new_messages=1,
+        )
+        with patch.object(app, "_make_idle_push_cmd") as mock_make_cmd:
+            app, cmd = app.update(push_msg)
+            self.assertIn("Instant Push", app.status_message)
+            self.assertIn("Work/INBOX", app.status_message)
+            mock_make_cmd.assert_called_once()
+
+        # 3. Preferences modal: toggle IMAP push (focus 13)
+        app, _ = app.update(KeyMsg("p"))
+        modal = app.active_modal
+        self.assertIsInstance(modal, PreferencesModal)
+        modal.focus_idx = 13
+        init_push = modal.imap_push_enabled
+        modal, _ = modal.update(KeyMsg("space"))
+        self.assertEqual(modal.imap_push_enabled, not init_push)
+
+        # Save preferences
+        app, _ = app.update(KeyMsg("enter"))
+        self.assertIsNone(app.active_modal)
+        self.assertEqual(app.imap_push_enabled, not init_push)
+        self.assertEqual(self.store.get_setting("imap_push_enabled"), "0" if init_push else "1")
+
+        # 4. Toggle via command palette action "toggle_imap_push"
+        app, _ = app._execute_action("toggle_imap_push")
+        self.assertEqual(app.imap_push_enabled, init_push)
+        self.assertEqual(self.store.get_setting("imap_push_enabled"), "1" if init_push else "0")
 
 
 if __name__ == "__main__":

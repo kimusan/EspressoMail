@@ -125,6 +125,7 @@ class PreferencesSavedMsg(Msg):
     desktop_notifications: bool = True
     notification_sound: bool = False
     auto_sync_interval: int = 300
+    imap_push_enabled: bool = True
 
 
 
@@ -2042,7 +2043,7 @@ class PreferencesModal(Model):
     ) -> None:
         self.store = store
         self.current_theme = current_theme
-        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=color_mode, 4=threading, 5=raw_headers, 6=sync_startup, 7=remote_imgs, 8=count_mode, 9=batch_size, 10=notifications, 11=sound, 12=auto_sync, 13=buttons
+        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=color_mode, 4=threading, 5=raw_headers, 6=sync_startup, 7=remote_imgs, 8=count_mode, 9=batch_size, 10=notifications, 11=sound, 12=auto_sync, 13=imap_push, 14=buttons
         self.status_msg = ""
         self.error_msg = ""
 
@@ -2050,10 +2051,10 @@ class PreferencesModal(Model):
         self.last_app_w = 80
         self.last_app_h = 24
         self.last_modal_w = 68
-        self.last_modal_h = 21
+        self.last_modal_h = 22
         self.last_pos_x = 6
         self.last_pos_y = 3
-        self.buttons_row_offset = 14
+        self.buttons_row_offset = 15
 
         # Settings
         self.input_download_dir = TextInput(
@@ -2088,6 +2089,7 @@ class PreferencesModal(Model):
         self.allow_remote_images = self.store.get_setting("allow_remote_images", "1") == "1"
         self.desktop_notifications = self.store.get_setting("desktop_notifications", "1") == "1"
         self.notification_sound = self.store.get_setting("notification_sound", "0") == "1"
+        self.imap_push_enabled = self.store.get_setting("imap_push_enabled", "1") == "1"
 
         cur_count_mode = self.store.get_setting("folder_count_mode", "unread_only")
         self.count_mode_idx = (
@@ -2168,6 +2170,8 @@ class PreferencesModal(Model):
             self.notification_sound = not self.notification_sound
         elif row_idx == 12:
             self.sync_interval_idx = (self.sync_interval_idx + delta) % len(self.AUTO_SYNC_INTERVALS)
+        elif row_idx == 13:
+            self.imap_push_enabled = not self.imap_push_enabled
 
     def init(self) -> Cmd | None:
         return None
@@ -2178,7 +2182,7 @@ class PreferencesModal(Model):
             app_w = getattr(self, "last_app_w", 80)
             app_h = getattr(self, "last_app_h", 24)
             modal_w = getattr(self, "last_modal_w", min(74, max(56, app_w - 8)))
-            modal_h = getattr(self, "last_modal_h", 21)
+            modal_h = getattr(self, "last_modal_h", 22)
             pos_x = getattr(self, "last_pos_x", max(0, (app_w - modal_w) // 2))
             pos_y = getattr(self, "last_pos_y", max(0, (app_h - modal_h) // 2))
 
@@ -2192,14 +2196,14 @@ class PreferencesModal(Model):
                 # Mouse Wheel cycling
                 if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
                     delta = -1 if msg.button == MouseButton.WHEEL_UP else 1
-                    target_row = row_idx if 0 <= row_idx <= 12 else self.focus_idx
+                    target_row = row_idx if 0 <= row_idx <= 13 else self.focus_idx
                     self._cycle_row(target_row, delta)
                     return self, None
 
                 # Mouse Left Click
                 if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
                     # Check button row
-                    btn_row = getattr(self, "buttons_row_offset", 14)
+                    btn_row = getattr(self, "buttons_row_offset", 15)
                     if row_idx == btn_row:
                         # Save button is on left half, Cancel on right half
                         if rel_x < modal_w // 2:
@@ -2207,8 +2211,8 @@ class PreferencesModal(Model):
                         else:
                             return self, lambda: ModalClosedMsg("Closed preferences.")
 
-                    # Check setting rows (0 to 12)
-                    if 0 <= row_idx <= 12:
+                    # Check setting rows (0 to 13)
+                    if 0 <= row_idx <= 13:
                         self.focus_idx = row_idx
                         self._sync_focus()
                         # If clicked on left arrow or left side of option value, cycle backwards; else forwards
@@ -2225,21 +2229,21 @@ class PreferencesModal(Model):
                 return self, lambda: ModalClosedMsg("Closed preferences.")
 
             if k in ("enter", "ctrl+s"):
-                if self.focus_idx == 13:
+                if self.focus_idx == 14:
                     return self._save_preferences()
                 return self._save_preferences()
 
             if k in ("tab", "down"):
-                self.focus_idx = (self.focus_idx + 1) % 14
+                self.focus_idx = (self.focus_idx + 1) % 15
                 self._sync_focus()
                 return self, None
             if k in ("shift+tab", "up"):
-                self.focus_idx = (self.focus_idx - 1) % 14
+                self.focus_idx = (self.focus_idx - 1) % 15
                 self._sync_focus()
                 return self, None
 
             # Cycling / toggling options via arrows / space / h / l
-            if 1 <= self.focus_idx <= 12 and k in ("left", "right", "h", "l", " ", "space"):
+            if 1 <= self.focus_idx <= 13 and k in ("left", "right", "h", "l", " ", "space"):
                 delta = 1 if k in ("right", "l", " ", "space") else -1
                 self._cycle_row(self.focus_idx, delta)
                 return self, None
@@ -2284,6 +2288,7 @@ class PreferencesModal(Model):
         self.store.set_setting("notification_sound", "1" if self.notification_sound else "0")
         sync_interval_val = self.AUTO_SYNC_INTERVALS[self.sync_interval_idx]
         self.store.set_setting("auto_sync_interval", str(sync_interval_val))
+        self.store.set_setting("imap_push_enabled", "1" if self.imap_push_enabled else "0")
 
         return self, lambda: PreferencesSavedMsg(
             download_dir=str(p),
@@ -2298,6 +2303,7 @@ class PreferencesModal(Model):
             desktop_notifications=self.desktop_notifications,
             notification_sound=self.notification_sound,
             auto_sync_interval=sync_interval_val,
+            imap_push_enabled=self.imap_push_enabled,
         )
 
     def view(self, width: int = 80, height: int = 24) -> str:
@@ -2365,6 +2371,10 @@ class PreferencesModal(Model):
         cur_asi_label = self.AUTO_SYNC_LABELS.get(cur_asi, f"{cur_asi}s")
         rows.append(f"Auto-Sync Interval:    ◀ {_opt_style(12, cur_asi_label)} ▶")
 
+        # Row 13: IMAP Push (IDLE)
+        push_val = "[x] Enabled (Real-time)" if self.imap_push_enabled else "[ ] Disabled"
+        rows.append(f"IMAP Push (IDLE):     {_opt_style(13, push_val)}")
+
         if self.error_msg:
             rows.append("")
             rows.append(
@@ -2374,8 +2384,8 @@ class PreferencesModal(Model):
         rows.append("")
         self.buttons_row_offset = len(rows)
 
-        # Row 13 (or buttons row)
-        save_focused = (self.focus_idx == 13)
+        # Row 14 (or buttons row)
+        save_focused = (self.focus_idx == 14)
         save_btn = (
             Style().bold(True).background(self.current_theme.accent_primary).foreground(self.current_theme.bg_primary).render(" [ Save Preferences (Enter) ] ")
             if save_focused

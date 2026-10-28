@@ -462,6 +462,104 @@ class IMAPClient:
                 pass
             self._conn = None
 
+    def has_capability(self, capability: str) -> bool:
+        """Check if connected server advertises a capability (e.g. 'IDLE', 'MULTISEARCH')."""
+        if self._conn is None:
+            return False
+        caps = getattr(self._conn, "capabilities", ())
+        if not caps:
+            try:
+                status, res = self._conn.capability()
+                if status == "OK" and res:
+                    raw_str = res[0].decode("ascii", errors="replace") if isinstance(res[0], bytes) else str(res[0])
+                    caps = tuple(raw_str.split())
+            except Exception:
+                caps = ()
+        return any(str(c).upper() == capability.upper() for c in caps)
+
+    def idle_listen(self, folder: str = "INBOX", timeout: float = 30.0) -> tuple[bool, str, int]:
+        """Listen for real-time IMAP PUSH notifications (RFC 2177 IDLE) on a mailbox.
+
+        Parameters:
+            folder: Mailbox to select and monitor (default 'INBOX').
+            timeout: Maximum seconds to wait for server untagged responses.
+
+        Returns:
+            Tuple of (has_event, event_type, count):
+                - (True, "exists", count) when new messages arrive.
+                - (True, "expunge", count) when messages are expunged.
+                - (False, "timeout", 0) when timeout expires without new events.
+                - (False, "not_supported", 0) if server lacks IDLE capability.
+        """
+        if self._conn is None:
+            raise RuntimeError("IMAPClient is not connected")
+        if not self.has_capability("IDLE"):
+            return False, "not_supported", 0
+
+        if not self._select_mailbox(folder, readonly=True):
+            return False, "select_failed", 0
+
+        # 1. Python 3.12+ standard imaplib.IMAP4.idle() context manager
+        if hasattr(self._conn, "idle"):
+            try:
+                with self._conn.idle(duration=timeout) as idler:
+                    for typ, data in idler:
+                        typ_str = typ.decode("ascii", errors="replace") if isinstance(typ, bytes) else str(typ)
+                        typ_upper = typ_str.upper()
+                        if typ_upper in ("EXISTS", "RECENT"):
+                            count = 1
+                            if data and data[0]:
+                                try:
+                                    raw_cnt = data[0].decode("ascii", errors="replace") if isinstance(data[0], bytes) else str(data[0])
+                                    count = int(raw_cnt)
+                                except Exception:
+                                    count = 1
+                            return True, "exists", count
+                        elif typ_upper == "EXPUNGE":
+                            return True, "expunge", 1
+                return False, "timeout", 0
+            except Exception as exc:
+                logger.debug("IDLE context error: %s", exc)
+                return False, f"error: {exc}", 0
+
+        # 2. Raw socket RFC 2177 IDLE fallback
+        try:
+            import select
+            tag = self._conn._command("IDLE")
+            while resp := self._conn._get_response():
+                if self._conn.tagged_commands.get(tag):
+                    return False, "idle_denied", 0
+
+            sock = getattr(self._conn, "sock", None)
+            if sock is None:
+                self._conn.send(b"DONE\r\n")
+                self._conn._command_complete("IDLE", tag)
+                return False, "no_socket", 0
+
+            r, _, _ = select.select([sock], [], [], timeout)
+            event_found = False
+            event_type = "timeout"
+            if r:
+                line = self._conn._get_line()
+                line_str = line.decode("ascii", errors="replace") if isinstance(line, bytes) else str(line)
+                if "EXISTS" in line_str.upper() or "RECENT" in line_str.upper():
+                    event_found = True
+                    event_type = "exists"
+                elif "EXPUNGE" in line_str.upper():
+                    event_found = True
+                    event_type = "expunge"
+
+            try:
+                self._conn.send(b"DONE\r\n")
+                self._conn._command_complete("IDLE", tag)
+            except Exception:
+                pass
+
+            return event_found, event_type, 1 if event_found else 0
+        except Exception as exc:
+            logger.debug("Raw IDLE fallback error: %s", exc)
+            return False, f"error: {exc}", 0
+
     def _select_mailbox(self, folder: str, readonly: bool = True) -> bool:
         """Select an IMAP mailbox, handling both quoted and unquoted mailbox names across server types."""
         if self._conn is None:

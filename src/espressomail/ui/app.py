@@ -23,6 +23,7 @@ from espresso import (
     MouseMsg,
     Msg,
     WindowSizeMsg,
+    batch,
     quit_app,
     tick,
 )
@@ -204,6 +205,17 @@ class AutoSyncTickMsg(Msg):
 
 
 @dataclass(frozen=True)
+class ImapPushEventMsg(Msg):
+    """Emitted when IMAP IDLE receives real-time server push events."""
+
+    account_id: str
+    account_name: str
+    folder: str
+    event_type: str  # "exists", "recent", "expunge", "timeout", "not_supported", "error"
+    new_messages: int = 0
+
+
+@dataclass(frozen=True)
 class FlagSyncedMsg(Msg):
     r"""Emitted when an IMAP flag (e.g. \Flagged or \Seen) has been synced to the server."""
 
@@ -296,6 +308,7 @@ class EspressoMailApp(Model):
         self.notification_sound: bool = self.store.get_setting("notification_sound", "0") == "1"
         cur_sync_int = self.store.get_setting("auto_sync_interval", "300")
         self.auto_sync_interval: int = int(cur_sync_int) if cur_sync_int.isdigit() else 300
+        self.imap_push_enabled: bool = self.store.get_setting("imap_push_enabled", "1") == "1"
 
         # Active modal overlay
         self.active_modal: Model | None = None
@@ -458,6 +471,7 @@ class EspressoMailApp(Model):
             PaletteItem("new_account", "Accounts: Add New Account", "Launch onboarding wizard for a new account", "O", "Accounts"),
             PaletteItem("sync_all", "Accounts: Sync IMAP Mailboxes", "Synchronize all enabled accounts", "S", "Accounts"),
             PaletteItem("toggle_auto_sync", "Accounts: Toggle Auto-Sync Timer", "Toggle periodic background email sync on or off", "", "Accounts"),
+            PaletteItem("toggle_imap_push", "Accounts: Toggle IMAP Push (IDLE)", "Enable or disable instant real-time IMAP push notifications", "", "Accounts"),
             PaletteItem("empty_trash", "Mail: Empty Trash", "Permanently delete trashed messages", "X", "Mail"),
             PaletteItem("show_shortcuts", "Help: Keyboard & Mouse Shortcuts", "Display full hotkey guide", "?", "Help"),
             PaletteItem("quit_app", "Application: Quit EspressoMail", "Exit cleanly", "q", "Application"),
@@ -474,12 +488,15 @@ class EspressoMailApp(Model):
     def init(self) -> Cmd | None:
         if self.show_splash:
             return self.splash.init()
+        cmds: list[Cmd] = []
         if any(acc.imap_password for acc in self.store.list_accounts(enabled_only=True)):
             self.status_message = "Synchronizing IMAP accounts..."
-            return self._sync_accounts_cmd
-        if self.auto_sync_interval > 0:
-            return tick(float(self.auto_sync_interval), AutoSyncTickMsg())
-        return None
+            cmds.append(self._sync_accounts_cmd)
+        elif self.auto_sync_interval > 0:
+            cmds.append(tick(float(self.auto_sync_interval), AutoSyncTickMsg()))
+        if self.imap_push_enabled and any(acc.imap_password for acc in self.store.list_accounts(enabled_only=True)):
+            cmds.append(self._make_idle_push_cmd())
+        return batch(*cmds) if cmds else None
 
     # ------------------------------------------------------------------
     # Data Refresh & Layout Calculations
@@ -1015,14 +1032,19 @@ class EspressoMailApp(Model):
             self.notification_sound = msg.notification_sound
             old_sync_interval = self.auto_sync_interval
             self.auto_sync_interval = msg.auto_sync_interval
+            old_push = self.imap_push_enabled
+            self.imap_push_enabled = msg.imap_push_enabled
             self.refresh_data()
             self.status_message = (
                 f"✔ Saved preferences: theme={msg.theme}, renderer={msg.image_backend}, "
-                f"batch={msg.fetch_batch_size}, auto-sync={msg.auto_sync_interval}s"
+                f"batch={msg.fetch_batch_size}, auto-sync={msg.auto_sync_interval}s, push={msg.imap_push_enabled}"
             )
+            cmds: list[Cmd] = []
             if self.auto_sync_interval > 0 and (old_sync_interval != self.auto_sync_interval or not self.is_syncing):
-                return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
-            return self, None
+                cmds.append(tick(float(self.auto_sync_interval), AutoSyncTickMsg()))
+            if self.imap_push_enabled and not old_push:
+                cmds.append(self._make_idle_push_cmd())
+            return self, batch(*cmds) if cmds else None
 
         # 6. Active Modal Dialogs
         if self.active_modal is not None:
@@ -1193,6 +1215,33 @@ class EspressoMailApp(Model):
         if isinstance(msg, MoreMessagesFetchedMsg):
             self.status_message = msg.message
             self.refresh_data()
+            return self, None
+
+        # 7d. Real-time IMAP PUSH event (RFC 2177 IDLE)
+        if isinstance(msg, ImapPushEventMsg):
+            if msg.new_messages > 0:
+                self.status_message = f"⚡ Instant Push: {msg.new_messages} new message(s) in {msg.account_name}/{msg.folder}"
+                if self.desktop_notifications:
+                    new_msgs = self.store.list_messages(
+                        account_id=msg.account_id,
+                        folder=msg.folder,
+                        limit=min(5, msg.new_messages),
+                    )
+                    if new_msgs:
+                        notify_new_messages(
+                            new_msgs,
+                            account_name=msg.account_name,
+                            folder_name=msg.folder,
+                            sound=self.notification_sound,
+                        )
+                self.refresh_data()
+            elif msg.event_type == "expunge":
+                self.refresh_data()
+
+            if self.imap_push_enabled:
+                if msg.event_type == "not_supported":
+                    return self, tick(120.0, AutoSyncTickMsg())
+                return self, self._make_idle_push_cmd(account_id=msg.account_id if msg.account_id else None)
             return self, None
 
         # 8. Menu Bar Action Dispatch
@@ -2203,6 +2252,16 @@ class EspressoMailApp(Model):
                 self.status_message = "Auto-sync enabled (interval: 5 minutes)."
                 return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
 
+        if action_id == "toggle_imap_push":
+            self.imap_push_enabled = not self.imap_push_enabled
+            self.store.set_setting("imap_push_enabled", "1" if self.imap_push_enabled else "0")
+            if self.imap_push_enabled:
+                self.status_message = "⚡ IMAP Push (IDLE) enabled: incoming messages arrive instantly."
+                return self, self._make_idle_push_cmd()
+            else:
+                self.status_message = "IMAP Push (IDLE) disabled: relying on periodic auto-sync timer."
+                return self, None
+
         return self, None
 
     def _open_reply_or_forward(
@@ -2597,6 +2656,65 @@ class EspressoMailApp(Model):
                 synced_count=0,
                 summary=f"Sync finished: {exc}",
             )
+
+    def _make_idle_push_cmd(self, account_id: str | None = None) -> Cmd:
+        """Create a non-blocking TEA command that listens for real-time IMAP push events (RFC 2177 IDLE)."""
+        def _push_runner() -> Msg:
+            if not self.imap_push_enabled:
+                return ImapPushEventMsg("", "", "", "disabled")
+
+            accounts = [acc for acc in self.store.list_accounts(enabled_only=True) if acc.imap_password]
+            if not accounts:
+                return ImapPushEventMsg("", "", "", "no_accounts")
+
+            target_acc: AccountConfig | None = None
+            if account_id:
+                target_acc = next((a for a in accounts if a.id == account_id), None)
+            if target_acc is None:
+                if self.active_account_id != "*":
+                    target_acc = next((a for a in accounts if a.id == self.active_account_id), accounts[0])
+                else:
+                    target_acc = accounts[0]
+
+            folder_to_watch = "INBOX"
+            client = IMAPClient(target_acc, timeout=35.0)
+            try:
+                client.connect()
+                if not client.has_capability("IDLE"):
+                    return ImapPushEventMsg(
+                        target_acc.id, target_acc.name, folder_to_watch, "not_supported"
+                    )
+
+                has_event, event_type, count = client.idle_listen(
+                    folder=folder_to_watch,
+                    timeout=25.0,
+                )
+                new_synced = 0
+                if has_event and event_type in ("exists", "recent"):
+                    new_synced = client.sync_single_folder(
+                        self.store,
+                        folder_name=folder_to_watch,
+                        limit=self.fetch_batch_size,
+                    )
+                return ImapPushEventMsg(
+                    account_id=target_acc.id,
+                    account_name=target_acc.name,
+                    folder=folder_to_watch,
+                    event_type=event_type,
+                    new_messages=new_synced,
+                )
+            except Exception as exc:
+                logger.debug("IMAP push error for %s: %s", target_acc.email, exc)
+                return ImapPushEventMsg(
+                    account_id=target_acc.id,
+                    account_name=target_acc.name,
+                    folder=folder_to_watch,
+                    event_type=f"error: {exc}",
+                )
+            finally:
+                client.disconnect()
+
+        return _push_runner
 
     # ------------------------------------------------------------------
     # Pure View Rendering
