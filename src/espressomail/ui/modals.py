@@ -39,6 +39,7 @@ from espressomail.models.entities import (
     SieveFilterRule,
     SieveScript,
 )
+from espressomail.editor import COMMON_EDITORS
 from espressomail.keymaps import KEYMAP_PRESETS, KeymapManager
 from espressomail.protocols.carddav import CardDAVClient
 from espressomail.protocols.icalendar import CalendarEvent
@@ -131,6 +132,7 @@ class PreferencesSavedMsg(Msg):
     auto_sync_interval: int = 300
     imap_push_enabled: bool = True
     keymap_preset: str = "default"
+    external_editor: str = "auto"
 
 
 
@@ -155,10 +157,13 @@ class ComposeModal(Model):
         in_reply_to: str = "",
         references: Sequence[str] = (),
         draft_id: str = "",
+        external_editor: str = "",
     ) -> None:
         self.accounts = list(accounts)
         self.contacts = list(contacts)
         self.theme = theme
+        self.external_editor = external_editor
+        self.editor_status_msg = ""
         self.account_idx = 0
         for idx, acc in enumerate(self.accounts):
             if acc.id == active_account_id:
@@ -290,6 +295,15 @@ class ComposeModal(Model):
                 return self, None
             if k in ("f4", "ctrl+v", "alt+p"):
                 self.preview_mode = not self.preview_mode
+                return self, None
+            if k in ("ctrl+o", "f6", "alt+e"):
+                from espressomail.editor import edit_text_externally
+                updated, err = edit_text_externally(self.editor.value, editor_cmd=self.external_editor)
+                if err:
+                    self.editor_status_msg = f"⚠ {err}"
+                else:
+                    self.editor.value = updated
+                    self.editor_status_msg = "✔ Updated from external editor."
                 return self, None
             if k == "ctrl+s":
                 return self._emit_submit(is_draft=True)
@@ -479,25 +493,29 @@ class ComposeModal(Model):
                 .render(self.editor.view())
             )
 
+        ext_badge = Style().bold(True).foreground(self.theme.accent_secondary).render("[Ctrl+O] Editor ($EDITOR)")
+
         footer = (
             Style()
             .foreground(self.theme.fg_muted)
             .render(
-                "[F5/Ctrl+X] Send  [Ctrl+S] Draft  [Ctrl+M] Markdown  [F4] Preview  [Ctrl+A] Attach  [Esc] Close"
+                "[F5/Ctrl+X] Send  [Ctrl+S] Draft  [Ctrl+O] $EDITOR  [Ctrl+M] MD  [F4] Preview  [Ctrl+A] Attach  [Esc] Close"
             )
         )
 
-        content = join_vertical(
-            Align.LEFT,
+        content_rows = [
             from_row,
             to_view,
             cc_view,
             self.input_subject.view(),
-            f"{sign_badge}    {enc_badge}    {md_badge}    {preview_badge}",
+            f"{sign_badge}    {enc_badge}    {md_badge}    {preview_badge}    {ext_badge}",
             f"Files:   {att_line}",
-            editor_box,
-            footer,
-        )
+        ]
+        if self.editor_status_msg:
+            content_rows.append(Style().foreground(self.theme.accent_secondary).render(self.editor_status_msg))
+        content_rows.extend([editor_box, footer])
+
+        content = join_vertical(Align.LEFT, *content_rows)
         return self.theme.modal_style(modal_w, "✉ Compose Email").render(content)
 
 
@@ -2073,6 +2091,7 @@ class PreferencesModal(Model):
     FETCH_BATCH_SIZES: tuple[int, ...] = (25, 50, 100, 200)
     AUTO_SYNC_INTERVALS: tuple[int, ...] = (0, 60, 120, 180, 300, 600, 900, 1800, 3600)
     KEYMAP_PRESETS: tuple[str, ...] = KEYMAP_PRESETS
+    EXTERNAL_EDITORS: tuple[str, ...] = COMMON_EDITORS
     AUTO_SYNC_LABELS: dict[int, str] = {
         0: "Manual Only (Off)",
         60: "1 minute",
@@ -2096,7 +2115,7 @@ class PreferencesModal(Model):
     ) -> None:
         self.store = store
         self.current_theme = current_theme
-        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=color_mode, 4=threading, 5=raw_headers, 6=sync_startup, 7=remote_imgs, 8=count_mode, 9=batch_size, 10=notifications, 11=sound, 12=auto_sync, 13=imap_push, 14=keymap_preset, 15=buttons
+        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=color_mode, 4=threading, 5=raw_headers, 6=sync_startup, 7=remote_imgs, 8=count_mode, 9=batch_size, 10=notifications, 11=sound, 12=auto_sync, 13=imap_push, 14=keymap_preset, 15=external_editor, 16=buttons
         self.status_msg = ""
         self.error_msg = ""
 
@@ -2104,10 +2123,10 @@ class PreferencesModal(Model):
         self.last_app_w = 80
         self.last_app_h = 24
         self.last_modal_w = 68
-        self.last_modal_h = 23
+        self.last_modal_h = 24
         self.last_pos_x = 6
         self.last_pos_y = 3
-        self.buttons_row_offset = 16
+        self.buttons_row_offset = 17
 
         # Settings
         self.input_download_dir = TextInput(
@@ -2178,6 +2197,13 @@ class PreferencesModal(Model):
             else 0
         )
 
+        cur_ee = self.store.get_setting("external_editor", "auto")
+        self.external_editor_idx = (
+            self.EXTERNAL_EDITORS.index(cur_ee)
+            if cur_ee in self.EXTERNAL_EDITORS
+            else 0
+        )
+
         self._sync_focus()
 
     def _get_active_theme_key(self) -> str:
@@ -2234,6 +2260,8 @@ class PreferencesModal(Model):
             self.imap_push_enabled = not self.imap_push_enabled
         elif row_idx == 14:
             self.keymap_preset_idx = (self.keymap_preset_idx + delta) % len(self.KEYMAP_PRESETS)
+        elif row_idx == 15:
+            self.external_editor_idx = (self.external_editor_idx + delta) % len(self.EXTERNAL_EDITORS)
 
     def init(self) -> Cmd | None:
         return None
@@ -2258,14 +2286,14 @@ class PreferencesModal(Model):
                 # Mouse Wheel cycling
                 if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
                     delta = -1 if msg.button == MouseButton.WHEEL_UP else 1
-                    target_row = row_idx if 0 <= row_idx <= 14 else self.focus_idx
+                    target_row = row_idx if 0 <= row_idx <= 15 else self.focus_idx
                     self._cycle_row(target_row, delta)
                     return self, None
 
                 # Mouse Left Click
                 if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
                     # Check button row
-                    btn_row = getattr(self, "buttons_row_offset", 16)
+                    btn_row = getattr(self, "buttons_row_offset", 17)
                     if row_idx == btn_row:
                         # Save button is on left half, Cancel on right half
                         if rel_x < modal_w // 2:
@@ -2273,8 +2301,8 @@ class PreferencesModal(Model):
                         else:
                             return self, lambda: ModalClosedMsg("Closed preferences.")
 
-                    # Check setting rows (0 to 14)
-                    if 0 <= row_idx <= 14:
+                    # Check setting rows (0 to 15)
+                    if 0 <= row_idx <= 15:
                         self.focus_idx = row_idx
                         self._sync_focus()
                         # If clicked on left arrow or left side of option value, cycle backwards; else forwards
@@ -2291,21 +2319,21 @@ class PreferencesModal(Model):
                 return self, lambda: ModalClosedMsg("Closed preferences.")
 
             if k in ("enter", "ctrl+s"):
-                if self.focus_idx == 15:
+                if self.focus_idx == 16:
                     return self._save_preferences()
                 return self._save_preferences()
 
             if k in ("tab", "down"):
-                self.focus_idx = (self.focus_idx + 1) % 16
+                self.focus_idx = (self.focus_idx + 1) % 17
                 self._sync_focus()
                 return self, None
             if k in ("shift+tab", "up"):
-                self.focus_idx = (self.focus_idx - 1) % 16
+                self.focus_idx = (self.focus_idx - 1) % 17
                 self._sync_focus()
                 return self, None
 
             # Cycling / toggling options via arrows / space / h / l
-            if 1 <= self.focus_idx <= 14 and k in ("left", "right", "h", "l", " ", "space"):
+            if 1 <= self.focus_idx <= 15 and k in ("left", "right", "h", "l", " ", "space"):
                 delta = 1 if k in ("right", "l", " ", "space") else -1
                 self._cycle_row(self.focus_idx, delta)
                 return self, None
@@ -2353,6 +2381,8 @@ class PreferencesModal(Model):
         self.store.set_setting("auto_sync_interval", str(sync_interval_val))
         self.store.set_setting("imap_push_enabled", "1" if self.imap_push_enabled else "0")
         self.store.set_setting("keymap_preset", keymap_val)
+        ext_ed_val = self.EXTERNAL_EDITORS[self.external_editor_idx]
+        self.store.set_setting("external_editor", ext_ed_val)
 
         return self, lambda: PreferencesSavedMsg(
             download_dir=str(p),
@@ -2369,6 +2399,7 @@ class PreferencesModal(Model):
             auto_sync_interval=sync_interval_val,
             imap_push_enabled=self.imap_push_enabled,
             keymap_preset=keymap_val,
+            external_editor=ext_ed_val,
         )
 
     def view(self, width: int = 80, height: int = 24) -> str:
@@ -2444,6 +2475,10 @@ class PreferencesModal(Model):
         cur_kp = self.KEYMAP_PRESETS[self.keymap_preset_idx].upper()
         rows.append(f"Keyboard Shortcuts:    ◀ {_opt_style(14, cur_kp)} ▶")
 
+        # Row 15: External Editor
+        cur_ee = self.EXTERNAL_EDITORS[self.external_editor_idx].upper()
+        rows.append(f"External Editor:       ◀ {_opt_style(15, cur_ee)} ▶")
+
         if self.error_msg:
             rows.append("")
             rows.append(
@@ -2453,8 +2488,8 @@ class PreferencesModal(Model):
         rows.append("")
         self.buttons_row_offset = len(rows)
 
-        # Row 15: Buttons row
-        save_focused = (self.focus_idx == 15)
+        # Row 16: Buttons row
+        save_focused = (self.focus_idx == 16)
         save_btn = (
             Style().bold(True).background(self.current_theme.accent_primary).foreground(self.current_theme.bg_primary).render(" [ Save Preferences (Enter) ] ")
             if save_focused

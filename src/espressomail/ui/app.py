@@ -315,6 +315,7 @@ class EspressoMailApp(Model):
         cur_sync_int = self.store.get_setting("auto_sync_interval", "300")
         self.auto_sync_interval: int = int(cur_sync_int) if cur_sync_int.isdigit() else 300
         self.imap_push_enabled: bool = self.store.get_setting("imap_push_enabled", "1") == "1"
+        self.external_editor: str = self.store.get_setting("external_editor", "auto")
 
         # Active modal overlay
         self.active_modal: Model | None = None
@@ -1052,6 +1053,8 @@ class EspressoMailApp(Model):
             if getattr(msg, "keymap_preset", None):
                 self.keymap.set_preset(msg.keymap_preset)
                 self.keymap.save_to_store(self.store)
+            if getattr(msg, "external_editor", None):
+                self.external_editor = msg.external_editor
             self.refresh_data()
             self.status_message = (
                 f"✔ Saved preferences: theme={msg.theme}, renderer={msg.image_backend}, "
@@ -1110,6 +1113,7 @@ class EspressoMailApp(Model):
                     theme=self.theme,
                     active_account_id=self.active_account_id,
                     to_initial=msg.recipient,
+                    external_editor=self.external_editor,
                 )
                 return self, None
 
@@ -2117,6 +2121,7 @@ class EspressoMailApp(Model):
                 contacts=self.store.list_contacts(),
                 theme=self.theme,
                 active_account_id=self.active_account_id,
+                external_editor=self.external_editor,
             )
             return self, None
 
@@ -2437,6 +2442,7 @@ class EspressoMailApp(Model):
             body_initial=body_init,
             in_reply_to=msg.message_id,
             references=refs,
+            external_editor=self.external_editor,
         )
         return self, None
 
@@ -2453,6 +2459,7 @@ class EspressoMailApp(Model):
             in_reply_to=draft.in_reply_to,
             references=draft.references,
             draft_id=draft.id,
+            external_editor=self.external_editor,
         )
         return self, None
 

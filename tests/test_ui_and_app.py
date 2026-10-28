@@ -1972,7 +1972,7 @@ class TestUIAndApp(unittest.TestCase):
         # Render view to establish exact modal geometry
         modal.view(80, 24)
         pos_y = modal.last_pos_y
-        self.assertEqual(modal.last_modal_h, 23)
+        self.assertEqual(modal.last_modal_h, 24)
         self.assertEqual(pos_y, 0)
 
         # Mouse click row 2 (Theme name) to cycle theme family
@@ -2900,6 +2900,110 @@ class TestUIAndApp(unittest.TestCase):
         self.assertIsInstance(app.active_modal, HelpModal)
         help_view = app.active_modal.view(80)
         self.assertIn("GMAIL", help_view)
+
+    def test_external_editor_launch_and_preferences(self) -> None:
+        """Verify external editor detection, resolution, execution, compose shortcut, and preferences."""
+        from unittest.mock import patch, MagicMock
+        from pathlib import Path
+        from espresso import KeyMsg
+        from espressomail.editor import (
+            get_default_editor,
+            resolve_editor_command,
+            edit_text_externally,
+            COMMON_EDITORS,
+        )
+        from espressomail.ui.modals import ComposeModal, PreferencesModal, PreferencesSavedMsg
+
+        # 1. Test get_default_editor and resolve_editor_command
+        with patch.dict("os.environ", {"VISUAL": "nvim", "EDITOR": "nano"}):
+            self.assertEqual(get_default_editor(), "nvim")
+            self.assertEqual(resolve_editor_command("auto"), "nvim")
+            self.assertEqual(resolve_editor_command("micro"), "micro")
+
+        with patch.dict("os.environ", {"VISUAL": "", "EDITOR": "vim"}):
+            self.assertEqual(get_default_editor(), "vim")
+            self.assertEqual(resolve_editor_command(), "vim")
+
+        # 2. Test edit_text_externally successful modification
+        def fake_run(cmd, **kwargs):
+            # The last argument is the path to the temp file
+            file_path = Path(cmd[-1])
+            original = file_path.read_text(encoding="utf-8")
+            file_path.write_text(original + "\nAppended by external editor.", encoding="utf-8")
+            mock_res = MagicMock()
+            mock_res.returncode = 0
+            return mock_res
+
+        with patch("subprocess.run", side_effect=fake_run):
+            new_text, err = edit_text_externally("Hello World", editor_cmd="nano")
+            self.assertIsNone(err)
+            self.assertEqual(new_text, "Hello World\nAppended by external editor.")
+
+        # 3. Test edit_text_externally error handling (non-zero exit)
+        def fake_run_error(cmd, **kwargs):
+            mock_res = MagicMock()
+            mock_res.returncode = 1
+            return mock_res
+
+        with patch("subprocess.run", side_effect=fake_run_error):
+            res_text, err = edit_text_externally("Original Text", editor_cmd="nano")
+            self.assertEqual(res_text, "Original Text")
+            self.assertIn("exited with non-zero code 1", err)
+
+        # 4. Test ComposeModal shortcut Ctrl+O invokes external editor
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        modal = ComposeModal(
+            accounts=self.store.list_accounts(),
+            contacts=self.store.list_contacts(),
+            theme=app.theme,
+            active_account_id=app.active_account_id,
+            body_initial="Draft body here.",
+            external_editor="nano",
+        )
+        # Check UI hints
+        view_str = modal.view(80, 24)
+        self.assertIn("Editor ($EDITOR)", view_str)
+        self.assertIn("[Ctrl+O]", view_str)
+
+        # Trigger Ctrl+O with mocked successful editor
+        with patch("subprocess.run", side_effect=fake_run):
+            modal, _ = modal.update(KeyMsg("ctrl+o"))
+            self.assertIn("Appended by external editor.", modal.editor.value)
+            self.assertIn("Updated from external editor", modal.editor_status_msg)
+
+        # Trigger Ctrl+O with failing editor
+        with patch("subprocess.run", side_effect=fake_run_error):
+            modal, _ = modal.update(KeyMsg("ctrl+o"))
+            self.assertIn("⚠", modal.editor_status_msg)
+
+        # 5. Test PreferencesModal external editor configuration
+        pref_modal = PreferencesModal(
+            store=self.store,
+            current_theme=app.theme,
+            download_dir=Path("/tmp/downloads"),
+        )
+        pref_view = pref_modal.view(80, 24)
+        self.assertIn("External Editor:", pref_view)
+        self.assertIn("AUTO", pref_view)
+
+        # Focus row 15 (External Editor) and cycle right
+        pref_modal.focus_idx = 15
+        pref_modal, _ = pref_modal.update(KeyMsg("right"))
+        expected_editor = COMMON_EDITORS[1]
+        self.assertEqual(COMMON_EDITORS[pref_modal.external_editor_idx], expected_editor)
+
+        # Save preferences
+        pref_modal, cmd = pref_modal.update(KeyMsg("enter"))
+        self.assertIsNotNone(cmd)
+        saved_msg = cmd()
+        self.assertIsInstance(saved_msg, PreferencesSavedMsg)
+        self.assertEqual(saved_msg.external_editor, expected_editor)
+        self.assertEqual(self.store.get_setting("external_editor"), expected_editor)
+
+        # Apply PreferencesSavedMsg to app
+        app, _ = app.update(saved_msg)
+        self.assertEqual(app.external_editor, expected_editor)
 
 
 if __name__ == "__main__":
