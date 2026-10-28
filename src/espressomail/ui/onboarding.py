@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable
 
-from espresso import Cmd, KeyMsg, Model, Msg
+from espresso import Cmd, KeyMsg, Model, MouseAction, MouseButton, MouseMsg, Msg
 from espresso.beans import EchoMode, SelectPrompt, SelectSubmitMsg, TextInput
 from espresso.crema import DOUBLE_BORDER, Align, Style, join_vertical, place
 
@@ -201,12 +201,70 @@ class OnboardingWizard(Model):
         return None
 
     def update(self, msg: Msg) -> tuple[OnboardingWizard, Cmd | None]:
-        """Handle multi-step navigation, form validation, and live IMAP/SMTP credential verification."""
+        # 1. Mouse Interaction
+        if isinstance(msg, MouseMsg):
+            card_w = min(88, max(64, getattr(self, "last_width", 90) - 8))
+            card_h = getattr(self, "last_height", 24)
+            pos_x = max(0, (getattr(self, "last_width", 100) - card_w) // 2)
+            pos_y = max(0, (getattr(self, "last_height", 30) - card_h) // 2)
+
+            if pos_y <= msg.y < pos_y + card_h and pos_x <= msg.x < pos_x + card_w:
+                rel_y = msg.y - pos_y
+
+                if self.step == 1:
+                    if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
+                        delta = -1 if msg.button == MouseButton.WHEEL_UP else 1
+                        self.provider_prompt.cursor = max(
+                            0, min(len(PROVIDER_PRESETS) - 1, self.provider_prompt.cursor + delta)
+                        )
+                        return self, None
+                    if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
+                        # options start at rel_y = 6 (header, spacing, question line)
+                        opt_idx = rel_y - 6
+                        if 0 <= opt_idx < len(PROVIDER_PRESETS):
+                            self.provider_prompt.cursor = opt_idx
+                            return self._handle_preset_selected(opt_idx)
+
+                elif self.step == 2:
+                    if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
+                        field_idx = rel_y - 5
+                        if 0 <= field_idx <= 4:
+                            self.step2_focus = field_idx
+                            self._sync_focus()
+                            return self, None
+
+                elif self.step == 3:
+                    if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
+                        row_idx = rel_y - 5
+                        if 0 <= row_idx <= 8:
+                            self.step3_focus = row_idx
+                            self._sync_focus()
+                            if row_idx == 2:
+                                cur_idx = SECURITY_CYCLE.index(self.imap_security)
+                                self.imap_security = SECURITY_CYCLE[(cur_idx + 1) % len(SECURITY_CYCLE)]
+                            elif row_idx == 5:
+                                cur_idx = SECURITY_CYCLE.index(self.smtp_security)
+                                self.smtp_security = SECURITY_CYCLE[(cur_idx + 1) % len(SECURITY_CYCLE)]
+                            return self, None
+                        elif row_idx >= 9:
+                            return self._finalize_account()
+
+            return self, None
+
+        # 2. Keyboard Interaction
         if isinstance(msg, KeyMsg) and str(msg.key) == "esc":
             if self.step > 1:
                 self.step -= 1
                 self.error_msg = ""
                 self.status_msg = ""
+                if self.step == 1:
+                    # Reset provider_prompt so all options are visible and navigable again
+                    curr_idx = self.provider_prompt.cursor
+                    self.provider_prompt = SelectPrompt(
+                        question="Select your email server type or provider preset:",
+                        options=[p.label for p in PROVIDER_PRESETS],
+                        default_index=curr_idx,
+                    )
                 self._sync_focus()
                 return self, None
             if self.allow_cancel:
@@ -439,6 +497,8 @@ class OnboardingWizard(Model):
 
     def view(self, width: int = 100, height: int = 30) -> str:
         """Render the guided onboarding wizard card."""
+        self.last_width = width
+        self.last_height = height
         step_badges = []
         for idx, title in enumerate(
             ("1. Server Type", "2. Identity & Auth", "3. Endpoints & Verify"), start=1

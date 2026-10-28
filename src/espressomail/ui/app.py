@@ -259,6 +259,7 @@ class EspressoMailApp(Model):
         self.expanded_folders: set[str] = self._load_expanded_folders()
         self.active_account_id = "*"
         self.active_folder = "INBOX"
+        self.unread_only_filter: bool = False
 
         self.message_rows: list[MessageListRow] = []
         self.message_cursor = 0
@@ -422,6 +423,7 @@ class EspressoMailApp(Model):
             PaletteItem("forward", "Mail: Forward Message", "Forward selected message", "f", "Mail"),
             PaletteItem("fuzzy_search", "Search: Fuzzy Search Local Store", "Instant search across all emails", "/", "Search"),
             PaletteItem("unified_inbox", "View: Unified Inbox", "Aggregate Inbox across all accounts", "U", "View"),
+            PaletteItem("toggle_unread_filter", "View: Toggle Unread Only Filter", "Show only unread emails in current folder", "Ctrl+U", "View"),
             PaletteItem("toggle_threading", "View: Toggle Message Threading", "Group conversations into threads", "t", "View"),
             PaletteItem("cycle_image_mode", "View: Cycle Image Renderer", "Switch Chafa / Sixel / Kitty / Half-Block", "i", "View"),
             PaletteItem("expand_reader", "View: Widen Reading Pane", "Move splitter left to widen reading pane", "[", "View"),
@@ -734,6 +736,8 @@ class EspressoMailApp(Model):
             account_id=self.active_account_id,
             folder=self.active_folder,
         )
+        if self.unread_only_filter:
+            raw_msgs = [m for m in raw_msgs if not m.is_read]
         rows: list[MessageListRow] = []
         if self.threading_enabled:
             threads = build_threads(raw_msgs)
@@ -1171,6 +1175,8 @@ class EspressoMailApp(Model):
             return self._execute_action("toggle_star")
         if k == "u":
             return self._execute_action("toggle_read")
+        if k in ("ctrl+u", "!", "V"):
+            return self._execute_action("toggle_unread_filter")
         if k in ("M", "ctrl+m"):
             return self._execute_action("fetch_more")
         if k == "e":
@@ -1559,6 +1565,7 @@ class EspressoMailApp(Model):
         if 0 <= self.folder_cursor < len(self.folder_rows):
             row = self.folder_rows[self.folder_cursor]
             if not row.is_header and row.selectable_mailbox:
+                self.unread_only_filter = False
                 self.active_account_id = row.account_id
                 self.active_folder = row.folder_name
                 self.message_cursor = 0
@@ -1664,10 +1671,10 @@ class EspressoMailApp(Model):
 
         return _runner
 
-    def _on_message_selection_changed(self) -> Cmd | None:
+    def _on_message_selection_changed(self, mark_read: bool = True) -> Cmd | None:
         m = self.selected_message
         sync_cmd = None
-        if m and not m.is_read:
+        if mark_read and m and not m.is_read:
             self.store.mark_read(m.id, True)
             m.is_read = True
             self._rebuild_folder_rows()
@@ -1759,12 +1766,26 @@ class EspressoMailApp(Model):
             return self, None
 
         if action_id == "unified_inbox":
+            self.unread_only_filter = False
             self.active_account_id = "*"
             self.active_folder = "INBOX"
             self.message_cursor = 0
             self.refresh_data()
             self.status_message = "Switched to Unified Inbox (all accounts)."
             return self, None
+
+        if action_id == "toggle_unread_filter":
+            self.unread_only_filter = not self.unread_only_filter
+            self._rebuild_message_rows()
+            self.message_cursor = 0
+            self.message_scroll = 0
+            cmd = self._on_message_selection_changed(mark_read=False)
+            folder_label = self.active_folder or "current folder"
+            if self.unread_only_filter:
+                self.status_message = f"Showing unread only in '{folder_label}' ({len(self.message_rows)} unread — Ctrl+U to clear)"
+            else:
+                self.status_message = f"Showing all messages in '{folder_label}' ({len(self.message_rows)} total)"
+            return self, cmd
 
         if action_id == "toggle_threading":
             self.threading_enabled = not self.threading_enabled
@@ -2118,6 +2139,7 @@ class EspressoMailApp(Model):
         return self, None
 
     def _jump_to_message(self, target: EmailMessage) -> tuple[EspressoMailApp, Cmd | None]:
+        self.unread_only_filter = False
         self.active_account_id = target.account_id
         self.active_folder = target.folder
         self.refresh_data()
@@ -2566,13 +2588,14 @@ class EspressoMailApp(Model):
         lines: list[str] = []
 
         if not visible:
+            no_msg_text = "  (No unread messages in folder — Ctrl+U to show all)" if self.unread_only_filter else "  (No messages in folder)"
             lines.append(
                 Style()
                 .italic(True)
                 .foreground(self.theme.fg_muted)
                 .background(self.theme.bg_secondary)
                 .width(inner_w)
-                .render("  (No messages in folder)")
+                .render(no_msg_text)
             )
         else:
             is_unified = self.active_account_id == "*"
@@ -2710,7 +2733,8 @@ class EspressoMailApp(Model):
             if self.active_account_id == "*"
             else " / ".join(split_folder_hierarchy(self.active_folder))
         )
-        pane_title = f"✉️ {folder_path} ({folder_label})"
+        filter_badge = " [UNREAD ONLY]" if self.unread_only_filter else ""
+        pane_title = f"✉️ {folder_path} ({folder_label}){filter_badge}"
 
         return self.theme.pane_style(
             focused=(self.focused_pane == "messages"),

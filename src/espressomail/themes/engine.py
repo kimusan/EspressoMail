@@ -141,7 +141,19 @@ class Theme:
         )
 
 
+THEME_FAMILIES: tuple[str, ...] = (
+    "espresso",
+    "catppuccin",
+    "nord",
+    "gruvbox",
+    "dracula",
+    "solarized",
+)
+
+COLOR_MODES: tuple[str, ...] = ("dark", "light")
+
 THEMES: dict[str, Theme] = {
+    # 1. Espresso (Dark & Light)
     "espresso": Theme(
         id="espresso",
         name="Espresso Dark",
@@ -170,6 +182,36 @@ THEMES: dict[str, Theme] = {
         gradient_start="#FF9E64",
         gradient_end="#D4A373",
     ),
+    "espresso_light": Theme(
+        id="espresso_light",
+        name="Espresso Light",
+        description="Warm café latte light theme with creamy surfaces, rich coffee brown text, and amber gold accents",
+        bg_primary="#FBF8F4",
+        bg_secondary="#F0E9DF",
+        bg_highlight="#E4D7C8",
+        bg_menubar="#EFE6DB",
+        bg_statusbar="#E5D9CC",
+        fg_primary="#2B1E16",
+        fg_secondary="#5C473A",
+        fg_muted="#8C776B",
+        accent_primary="#A05A2C",
+        accent_secondary="#C67D3E",
+        border_focused="#A05A2C",
+        border_unfocused="#D5C2B2",
+        unread_fg="#B45309",
+        starred_fg="#D97706",
+        attachment_fg="#0284C7",
+        pgp_verified_fg="#16A34A",
+        pgp_warning_fg="#D97706",
+        pgp_error_fg="#DC2626",
+        quote_level_1="#A05A2C",
+        quote_level_2="#0284C7",
+        quote_level_3="#7C3AED",
+        gradient_start="#C67D3E",
+        gradient_end="#A05A2C",
+    ),
+
+    # 2. Catppuccin (Mocha Dark & Latte Light)
     "catppuccin": Theme(
         id="catppuccin",
         name="Catppuccin Mocha",
@@ -198,34 +240,36 @@ THEMES: dict[str, Theme] = {
         gradient_start="#CBA6F7",
         gradient_end="#89B4FA",
     ),
-    "dracula": Theme(
-        id="dracula",
-        name="Dracula",
-        description="High-contrast dark vampire palette with vibrant purple, pink, and cyan",
-        bg_primary="#282A36",
-        bg_secondary="#21222C",
-        bg_highlight="#44475A",
-        bg_menubar="#191A21",
-        bg_statusbar="#191A21",
-        fg_primary="#F8F8F2",
-        fg_secondary="#E2E2DC",
-        fg_muted="#6272A4",
-        accent_primary="#BD93F9",
-        accent_secondary="#FF79C6",
-        border_focused="#FF79C6",
-        border_unfocused="#44475A",
-        unread_fg="#8BE9FD",
-        starred_fg="#F1FA8C",
-        attachment_fg="#FFB86C",
-        pgp_verified_fg="#50FA7B",
-        pgp_warning_fg="#FFB86C",
-        pgp_error_fg="#FF5555",
-        quote_level_1="#BD93F9",
-        quote_level_2="#8BE9FD",
-        quote_level_3="#FF79C6",
-        gradient_start="#FF79C6",
-        gradient_end="#BD93F9",
+    "catppuccin_light": Theme(
+        id="catppuccin_light",
+        name="Catppuccin Latte",
+        description="Soothing pastel light palette with lavender, mauve, and soft warm crusts",
+        bg_primary="#EFF1F5",
+        bg_secondary="#E6E9EF",
+        bg_highlight="#CCD0DA",
+        bg_menubar="#E6E9EF",
+        bg_statusbar="#DCE0E8",
+        fg_primary="#4C4F69",
+        fg_secondary="#5C5F77",
+        fg_muted="#8C8FA1",
+        accent_primary="#8839EF",
+        accent_secondary="#FE640B",
+        border_focused="#8839EF",
+        border_unfocused="#BCC0CC",
+        unread_fg="#1E66F5",
+        starred_fg="#DF8E1D",
+        attachment_fg="#179299",
+        pgp_verified_fg="#40A02B",
+        pgp_warning_fg="#DF8E1D",
+        pgp_error_fg="#D20F39",
+        quote_level_1="#1E66F5",
+        quote_level_2="#8839EF",
+        quote_level_3="#179299",
+        gradient_start="#8839EF",
+        gradient_end="#1E66F5",
     ),
+
+    # 3. Nord (Polar Night Dark & Snow Storm Light)
     "nord": Theme(
         id="nord",
         name="Nord Arctic",
@@ -254,6 +298,36 @@ THEMES: dict[str, Theme] = {
         gradient_start="#88C0D0",
         gradient_end="#5E81AC",
     ),
+    "nord_light": Theme(
+        id="nord_light",
+        name="Nord Snow Storm",
+        description="Clean arctic light palette inspired by Scandinavian snowfields and glacial blues",
+        bg_primary="#ECEFF4",
+        bg_secondary="#E5E9F0",
+        bg_highlight="#D8DEE9",
+        bg_menubar="#E5E9F0",
+        bg_statusbar="#D8DEE9",
+        fg_primary="#2E3440",
+        fg_secondary="#3B4252",
+        fg_muted="#616E88",
+        accent_primary="#5E81AC",
+        accent_secondary="#88C0D0",
+        border_focused="#5E81AC",
+        border_unfocused="#B8C0D0",
+        unread_fg="#0284C7",
+        starred_fg="#D08770",
+        attachment_fg="#5E81AC",
+        pgp_verified_fg="#2E7D32",
+        pgp_warning_fg="#EBCB8B",
+        pgp_error_fg="#BF616A",
+        quote_level_1="#5E81AC",
+        quote_level_2="#2E7D32",
+        quote_level_3="#B48EAD",
+        gradient_start="#5E81AC",
+        gradient_end="#88C0D0",
+    ),
+
+    # 4. Gruvbox (Dark & Light)
     "gruvbox": Theme(
         id="gruvbox",
         name="Gruvbox Dark",
@@ -282,9 +356,125 @@ THEMES: dict[str, Theme] = {
         gradient_start="#FE8019",
         gradient_end="#FABD2F",
     ),
+    "gruvbox_light": Theme(
+        id="gruvbox_light",
+        name="Gruvbox Light",
+        description="Retro groove warm light theme with parchment canvas and earthy amber tones",
+        bg_primary="#FBF1C7",
+        bg_secondary="#EBDBB2",
+        bg_highlight="#D5C4A1",
+        bg_menubar="#EBDBB2",
+        bg_statusbar="#D5C4A1",
+        fg_primary="#282828",
+        fg_secondary="#3C3836",
+        fg_muted="#7C6F64",
+        accent_primary="#AF3A03",
+        accent_secondary="#B57614",
+        border_focused="#AF3A03",
+        border_unfocused="#BDAE93",
+        unread_fg="#AF3A03",
+        starred_fg="#B57614",
+        attachment_fg="#076678",
+        pgp_verified_fg="#79740E",
+        pgp_warning_fg="#B57614",
+        pgp_error_fg="#9D0006",
+        quote_level_1="#427B58",
+        quote_level_2="#076678",
+        quote_level_3="#8F3F71",
+        gradient_start="#AF3A03",
+        gradient_end="#B57614",
+    ),
+
+    # 5. Dracula (Dark & Light)
+    "dracula": Theme(
+        id="dracula",
+        name="Dracula",
+        description="High-contrast dark vampire palette with vibrant purple, pink, and cyan",
+        bg_primary="#282A36",
+        bg_secondary="#21222C",
+        bg_highlight="#44475A",
+        bg_menubar="#191A21",
+        bg_statusbar="#191A21",
+        fg_primary="#F8F8F2",
+        fg_secondary="#E2E2DC",
+        fg_muted="#6272A4",
+        accent_primary="#BD93F9",
+        accent_secondary="#FF79C6",
+        border_focused="#FF79C6",
+        border_unfocused="#44475A",
+        unread_fg="#8BE9FD",
+        starred_fg="#F1FA8C",
+        attachment_fg="#FFB86C",
+        pgp_verified_fg="#50FA7B",
+        pgp_warning_fg="#FFB86C",
+        pgp_error_fg="#FF5555",
+        quote_level_1="#BD93F9",
+        quote_level_2="#8BE9FD",
+        quote_level_3="#FF79C6",
+        gradient_start="#FF79C6",
+        gradient_end="#BD93F9",
+    ),
+    "dracula_light": Theme(
+        id="dracula_light",
+        name="Dracula Light",
+        description="Crisp light counterpart to Dracula with gothic purple, bright magenta, and deep ink",
+        bg_primary="#F8F8F2",
+        bg_secondary="#EAEAE2",
+        bg_highlight="#DADAD0",
+        bg_menubar="#EAEAE2",
+        bg_statusbar="#DFDFD7",
+        fg_primary="#282A36",
+        fg_secondary="#44475A",
+        fg_muted="#6272A4",
+        accent_primary="#6D28D9",
+        accent_secondary="#DB2777",
+        border_focused="#6D28D9",
+        border_unfocused="#CBD5E1",
+        unread_fg="#0284C7",
+        starred_fg="#D97706",
+        attachment_fg="#D97706",
+        pgp_verified_fg="#16A34A",
+        pgp_warning_fg="#D97706",
+        pgp_error_fg="#DC2626",
+        quote_level_1="#6D28D9",
+        quote_level_2="#0284C7",
+        quote_level_3="#DB2777",
+        gradient_start="#DB2777",
+        gradient_end="#6D28D9",
+    ),
+
+    # 6. Solarized (Dark & Light)
+    "solarized": Theme(
+        id="solarized",
+        name="Solarized Dark",
+        description="Precision color theme with deep solarized cyan-black canvas and balanced accents",
+        bg_primary="#002B36",
+        bg_secondary="#073642",
+        bg_highlight="#0B4250",
+        bg_menubar="#073642",
+        bg_statusbar="#00212B",
+        fg_primary="#839496",
+        fg_secondary="#93A1A1",
+        fg_muted="#586E75",
+        accent_primary="#268BD2",
+        accent_secondary="#2AA198",
+        border_focused="#268BD2",
+        border_unfocused="#073642",
+        unread_fg="#B58900",
+        starred_fg="#CB4B16",
+        attachment_fg="#2AA198",
+        pgp_verified_fg="#859900",
+        pgp_warning_fg="#B58900",
+        pgp_error_fg="#DC322F",
+        quote_level_1="#268BD2",
+        quote_level_2="#2AA198",
+        quote_level_3="#6C71C4",
+        gradient_start="#268BD2",
+        gradient_end="#2AA198",
+    ),
     "solarized_light": Theme(
         id="solarized_light",
-        name="Light",
+        name="Solarized Light",
         description="Clean, modern daylight theme with crisp white canvas, soft light surfaces, and vibrant contrast",
         bg_primary="#FFFFFF",
         bg_secondary="#F4F6F8",
@@ -312,8 +502,29 @@ THEMES: dict[str, Theme] = {
     ),
 }
 
-THEME_ORDER: list[str] = list(THEMES.keys())
+# Compatibility aliases
+THEMES["espresso_dark"] = THEMES["espresso"]
+THEMES["catppuccin_dark"] = THEMES["catppuccin"]
+THEMES["nord_dark"] = THEMES["nord"]
+THEMES["gruvbox_dark"] = THEMES["gruvbox"]
+THEMES["dracula_dark"] = THEMES["dracula"]
+THEMES["solarized_dark"] = THEMES["solarized"]
 THEMES["light"] = THEMES["solarized_light"]
+
+THEME_ORDER: list[str] = [
+    "espresso",
+    "espresso_light",
+    "catppuccin",
+    "catppuccin_light",
+    "nord",
+    "nord_light",
+    "gruvbox",
+    "gruvbox_light",
+    "dracula",
+    "dracula_light",
+    "solarized",
+    "solarized_light",
+]
 
 
 class ThemeEngine:
@@ -331,24 +542,56 @@ class ThemeEngine:
     def active_id(self) -> str:
         return self._active_id
 
+    @property
+    def color_mode(self) -> str:
+        """Return 'light' or 'dark' for the active theme."""
+        return "light" if ("_light" in self._active_id or self._active_id == "light") else "dark"
+
+    @property
+    def theme_family(self) -> str:
+        """Return the theme family without mode suffix."""
+        fam = self._active_id.replace("_light", "").replace("_dark", "")
+        if fam in THEME_FAMILIES:
+            return fam
+        if fam == "light":
+            return "solarized"
+        return "espresso"
+
     def set_theme(self, theme_id: str) -> Theme:
         """Activate a theme by ID (falling back to 'espresso' if unknown)."""
         if theme_id in THEMES:
             self._active_id = theme_id
         return self.current
 
+    def set_family_and_mode(self, family: str, mode: str) -> Theme:
+        """Activate a theme given a family (e.g. 'espresso') and mode ('dark' or 'light')."""
+        fam = family.lower() if family.lower() in THEME_FAMILIES else "espresso"
+        mod = mode.lower() if mode.lower() in COLOR_MODES else "dark"
+        target_id = f"{fam}_{mod}" if mod == "light" else fam
+        if target_id in THEMES:
+            self._active_id = target_id
+        elif fam in THEMES:
+            self._active_id = fam
+        return self.current
+
+    def toggle_color_mode(self) -> Theme:
+        """Toggle between dark and light mode for the current theme family."""
+        new_mode = "dark" if self.color_mode == "light" else "light"
+        return self.set_family_and_mode(self.theme_family, new_mode)
+
     def next_theme(self) -> Theme:
         """Cycle to the next available color scheme and return it."""
-        idx = THEME_ORDER.index(self._active_id)
+        idx = THEME_ORDER.index(self._active_id) if self._active_id in THEME_ORDER else 0
         self._active_id = THEME_ORDER[(idx + 1) % len(THEME_ORDER)]
         return self.current
 
     def prev_theme(self) -> Theme:
         """Cycle to the previous available color scheme and return it."""
-        idx = THEME_ORDER.index(self._active_id)
+        idx = THEME_ORDER.index(self._active_id) if self._active_id in THEME_ORDER else 0
         self._active_id = THEME_ORDER[(idx - 1) % len(THEME_ORDER)]
         return self.current
 
     def list_themes(self) -> list[Theme]:
         """Return all registered themes in display order."""
         return [THEMES[k] for k in THEME_ORDER]
+

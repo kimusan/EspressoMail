@@ -47,7 +47,7 @@ from espressomail.protocols.sieve import (
 from espressomail.protocols.smtp_client import validate_account_credentials
 from espressomail.search.fuzzy import FuzzySearchEngine, SearchResult
 from espressomail.storage.database import LocalStore
-from espressomail.themes.engine import THEMES, Theme
+from espressomail.themes.engine import COLOR_MODES, THEME_FAMILIES, THEMES, Theme
 
 
 # ---------------------------------------------------------------------------
@@ -1994,6 +1994,8 @@ class PreferencesModal(Model):
     """General application settings & preferences dialog for configuring downloads, image renderer, theme, and behavior."""
 
     IMAGE_BACKENDS: tuple[str, ...] = ("auto", "chafa", "half_block", "braille", "sixel", "kitty", "off")
+    THEME_FAMILIES: tuple[str, ...] = ("espresso", "catppuccin", "nord", "gruvbox", "dracula", "solarized")
+    THEMES: tuple[str, ...] = ("espresso", "catppuccin", "nord", "gruvbox", "dracula", "solarized")
     COLOR_MODES: tuple[str, ...] = ("dark", "light")
     FOLDER_COUNT_MODES: tuple[str, ...] = ("unread_only", "unread_and_total")
     FETCH_BATCH_SIZES: tuple[int, ...] = (25, 50, 100, 200)
@@ -2009,9 +2011,16 @@ class PreferencesModal(Model):
     ) -> None:
         self.store = store
         self.current_theme = current_theme
-        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=color_mode, 3=threading, 4=raw_headers, 5=sync_startup, 6=remote_imgs, 7=count_mode, 8=batch_size
+        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=color_mode, 4=threading, 5=raw_headers, 6=sync_startup, 7=remote_imgs, 8=count_mode, 9=batch_size, 10=buttons
         self.status_msg = ""
         self.error_msg = ""
+
+        # Layout dimensions for mouse hit-testing
+        self.last_app_w = 80
+        self.last_app_h = 24
+        self.last_modal_w = 68
+        self.last_modal_h = 20
+        self.buttons_row_offset = 12
 
         # Settings
         self.input_download_dir = TextInput(
@@ -2021,17 +2030,24 @@ class PreferencesModal(Model):
         )
         self.input_download_dir.value = str(download_dir)
 
+        # Detect initial theme family and color mode
+        cur_theme_id = current_theme.id.lower()
+        cur_mode = self.store.get_setting("color_mode", "")
+        if not cur_mode:
+            cur_mode = "light" if "_light" in cur_theme_id or cur_theme_id == "light" else "dark"
+        self.color_mode_idx = 1 if cur_mode.lower() == "light" else 0
+
+        fam = cur_theme_id.replace("_light", "").replace("_dark", "")
+        if fam not in THEME_FAMILIES:
+            fam = "solarized" if fam == "light" else "espresso"
+        self.theme_idx = THEME_FAMILIES.index(fam)
+
         backend_clean = current_image_backend.lower()
         self.backend_idx = (
             self.IMAGE_BACKENDS.index(backend_clean)
             if backend_clean in self.IMAGE_BACKENDS
             else 0
         )
-
-        cur_mode = self.store.get_setting("color_mode", "")
-        if not cur_mode:
-            cur_mode = "light" if "light" in current_theme.id.lower() else "dark"
-        self.color_mode_idx = 1 if cur_mode.lower() == "light" else 0
 
         self.threading_enabled = threading_enabled
         self.show_raw_headers = show_raw_headers
@@ -2057,7 +2073,14 @@ class PreferencesModal(Model):
 
         self._sync_focus()
 
+    def _get_active_theme_key(self) -> str:
+        fam = THEME_FAMILIES[self.theme_idx]
+        mode = COLOR_MODES[self.color_mode_idx]
+        return f"{fam}_{mode}" if mode == "light" else fam
+
     def _apply_theme_to_inputs(self) -> None:
+        target_key = self._get_active_theme_key()
+        self.current_theme = THEMES.get(target_key, THEMES.get(THEME_FAMILIES[self.theme_idx], self.current_theme))
         styles = self.current_theme.text_input_styles()
         self.input_download_dir.style = styles["style"]
         self.input_download_dir.placeholder_style = styles["placeholder_style"]
@@ -2069,66 +2092,105 @@ class PreferencesModal(Model):
         else:
             self.input_download_dir.blur()
 
+    def _cycle_row(self, row_idx: int, delta: int = 1) -> None:
+        """Cycle or toggle the setting on a specific row."""
+        if row_idx == 0:
+            self.focus_idx = 0
+            self._sync_focus()
+        elif row_idx == 1:
+            self.backend_idx = (self.backend_idx + delta) % len(self.IMAGE_BACKENDS)
+        elif row_idx == 2:
+            self.theme_idx = (self.theme_idx + delta) % len(self.THEME_FAMILIES)
+            self._apply_theme_to_inputs()
+        elif row_idx == 3:
+            self.color_mode_idx = (self.color_mode_idx + delta) % len(self.COLOR_MODES)
+            self._apply_theme_to_inputs()
+        elif row_idx == 4:
+            self.threading_enabled = not self.threading_enabled
+        elif row_idx == 5:
+            self.show_raw_headers = not self.show_raw_headers
+        elif row_idx == 6:
+            self.sync_on_startup = not self.sync_on_startup
+        elif row_idx == 7:
+            self.allow_remote_images = not self.allow_remote_images
+        elif row_idx == 8:
+            self.count_mode_idx = (self.count_mode_idx + delta) % len(self.FOLDER_COUNT_MODES)
+        elif row_idx == 9:
+            self.batch_idx = (self.batch_idx + delta) % len(self.FETCH_BATCH_SIZES)
+
     def init(self) -> Cmd | None:
         return None
 
     def update(self, msg: Msg) -> tuple[PreferencesModal, Cmd | None]:
+        # 1. Mouse Interaction
+        if isinstance(msg, MouseMsg):
+            app_w = getattr(self, "last_app_w", 80)
+            app_h = getattr(self, "last_app_h", 24)
+            modal_w = getattr(self, "last_modal_w", min(74, max(56, app_w - 8)))
+            modal_h = getattr(self, "last_modal_h", 20)
+            pos_x = max(0, (app_w - modal_w) // 2)
+            pos_y = max(0, (app_h - modal_h) // 2)
+
+            # Check if mouse event is within modal bounds
+            if pos_y <= msg.y < pos_y + modal_h and pos_x <= msg.x < pos_x + modal_w:
+                rel_y = msg.y - pos_y
+                rel_x = msg.x - pos_x
+                # Content lines start at rel_y = 2 (border + padding)
+                row_idx = rel_y - 2
+
+                # Mouse Wheel cycling
+                if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
+                    delta = -1 if msg.button == MouseButton.WHEEL_UP else 1
+                    target_row = row_idx if 0 <= row_idx <= 9 else self.focus_idx
+                    self._cycle_row(target_row, delta)
+                    return self, None
+
+                # Mouse Left Click
+                if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
+                    # Check button row
+                    btn_row = getattr(self, "buttons_row_offset", 12)
+                    if row_idx == btn_row:
+                        # Save button is on left half, Cancel on right half
+                        if rel_x < modal_w // 2:
+                            return self._save_preferences()
+                        else:
+                            return self, lambda: ModalClosedMsg("Closed preferences.")
+
+                    # Check setting rows (0 to 9)
+                    if 0 <= row_idx <= 9:
+                        self.focus_idx = row_idx
+                        self._sync_focus()
+                        # If clicked on left arrow or left side of option value, cycle backwards; else forwards
+                        delta = -1 if rel_x < 28 else 1
+                        self._cycle_row(row_idx, delta)
+                        return self, None
+
+            return self, None
+
+        # 2. Keyboard Interaction
         if isinstance(msg, KeyMsg):
             k = str(msg.key)
             if k == "esc":
                 return self, lambda: ModalClosedMsg("Closed preferences.")
 
             if k in ("enter", "ctrl+s"):
+                if self.focus_idx == 10:
+                    return self._save_preferences()
                 return self._save_preferences()
 
             if k in ("tab", "down"):
-                self.focus_idx = (self.focus_idx + 1) % 9
+                self.focus_idx = (self.focus_idx + 1) % 11
                 self._sync_focus()
                 return self, None
             if k in ("shift+tab", "up"):
-                self.focus_idx = (self.focus_idx - 1) % 9
+                self.focus_idx = (self.focus_idx - 1) % 11
                 self._sync_focus()
                 return self, None
 
-            # Cycling / toggling options
-            if self.focus_idx == 1 and k in ("left", "right", "h", "l", " ", "space"):
+            # Cycling / toggling options via arrows / space / h / l
+            if 1 <= self.focus_idx <= 9 and k in ("left", "right", "h", "l", " ", "space"):
                 delta = 1 if k in ("right", "l", " ", "space") else -1
-                self.backend_idx = (self.backend_idx + delta) % len(self.IMAGE_BACKENDS)
-                return self, None
-
-            if self.focus_idx == 2 and k in ("left", "right", "h", "l", " ", "space"):
-                delta = 1 if k in ("right", "l", " ", "space") else -1
-                self.color_mode_idx = (self.color_mode_idx + delta) % len(self.COLOR_MODES)
-                mode_val = self.COLOR_MODES[self.color_mode_idx]
-                theme_val = "solarized_light" if mode_val == "light" else "espresso"
-                self.current_theme = THEMES.get(theme_val, self.current_theme)
-                self._apply_theme_to_inputs()
-                return self, None
-
-            if self.focus_idx == 3 and k in (" ", "space", "left", "right"):
-                self.threading_enabled = not self.threading_enabled
-                return self, None
-
-            if self.focus_idx == 4 and k in (" ", "space", "left", "right"):
-                self.show_raw_headers = not self.show_raw_headers
-                return self, None
-
-            if self.focus_idx == 5 and k in (" ", "space", "left", "right"):
-                self.sync_on_startup = not self.sync_on_startup
-                return self, None
-
-            if self.focus_idx == 6 and k in (" ", "space", "left", "right"):
-                self.allow_remote_images = not self.allow_remote_images
-                return self, None
-
-            if self.focus_idx == 7 and k in ("left", "right", "h", "l", " ", "space"):
-                delta = 1 if k in ("right", "l", " ", "space") else -1
-                self.count_mode_idx = (self.count_mode_idx + delta) % len(self.FOLDER_COUNT_MODES)
-                return self, None
-
-            if self.focus_idx == 8 and k in ("left", "right", "h", "l", " ", "space"):
-                delta = 1 if k in ("right", "l", " ", "space") else -1
-                self.batch_idx = (self.batch_idx + delta) % len(self.FETCH_BATCH_SIZES)
+                self._cycle_row(self.focus_idx, delta)
                 return self, None
 
         if self.focus_idx == 0:
@@ -2150,16 +2212,17 @@ class PreferencesModal(Model):
             self.error_msg = f"Invalid download directory: {e}"
             return self, None
 
+        fam = THEME_FAMILIES[self.theme_idx]
+        mode = COLOR_MODES[self.color_mode_idx]
+        theme_val = f"{fam}_{mode}" if mode == "light" else fam
         backend_val = self.IMAGE_BACKENDS[self.backend_idx]
-        mode_val = self.COLOR_MODES[self.color_mode_idx]
-        theme_val = "solarized_light" if mode_val == "light" else "espresso"
         count_mode_val = self.FOLDER_COUNT_MODES[self.count_mode_idx]
         batch_val = self.FETCH_BATCH_SIZES[self.batch_idx]
 
         self.store.set_setting("download_dir", str(p))
         self.store.set_setting("image_backend", backend_val)
-        self.store.set_setting("color_mode", mode_val)
         self.store.set_setting("theme", theme_val)
+        self.store.set_setting("color_mode", mode)
         self.store.set_setting("threading", "1" if self.threading_enabled else "0")
         self.store.set_setting("show_raw_headers", "1" if self.show_raw_headers else "0")
         self.store.set_setting("sync_on_startup", "1" if self.sync_on_startup else "0")
@@ -2179,8 +2242,12 @@ class PreferencesModal(Model):
             fetch_batch_size=batch_val,
         )
 
-    def view(self, width: int = 80) -> str:
+    def view(self, width: int = 80, height: int = 24) -> str:
         modal_w = min(74, max(56, width - 8))
+        self.last_app_w = width
+        self.last_app_h = height
+        self.last_modal_w = modal_w
+
         rows: list[str] = []
 
         def _opt_style(idx: int, text: str) -> str:
@@ -2188,47 +2255,44 @@ class PreferencesModal(Model):
                 return Style().bold(True).foreground(self.current_theme.accent_primary).render(text)
             return Style().foreground(self.current_theme.fg_primary).render(text)
 
+        # Row 0: Download folder
         rows.append(self.input_download_dir.view())
 
+        # Row 1: Image Rendering Backend
         cur_b = self.IMAGE_BACKENDS[self.backend_idx].upper()
-        rows.append(
-            f"Image Rendering Mode: ◀ {_opt_style(1, cur_b)} ▶"
-        )
+        rows.append(f"Image Rendering Mode: ◀ {_opt_style(1, cur_b)} ▶")
 
+        # Row 2: Theme family
+        cur_fam_label = self.THEME_FAMILIES[self.theme_idx].title()
+        rows.append(f"Color Theme:          ◀ {_opt_style(2, cur_fam_label)} ▶")
+
+        # Row 3: Color Mode
         cur_mode_str = "Dark" if self.COLOR_MODES[self.color_mode_idx] == "dark" else "Light"
-        rows.append(
-            f"Color Mode:           ◀ {_opt_style(2, cur_mode_str)} ▶"
-        )
+        rows.append(f"Color Mode:           ◀ {_opt_style(3, cur_mode_str)} ▶")
 
+        # Row 4: Message Threading
         th_val = "[x] Enabled" if self.threading_enabled else "[ ] Disabled"
-        rows.append(
-            f"Message Threading:    {_opt_style(3, th_val)}"
-        )
+        rows.append(f"Message Threading:    {_opt_style(4, th_val)}")
 
+        # Row 5: Show Raw RFC Headers
         rh_val = "[x] Enabled" if self.show_raw_headers else "[ ] Disabled"
-        rows.append(
-            f"Show Raw RFC Headers: {_opt_style(4, rh_val)}"
-        )
+        rows.append(f"Show Raw RFC Headers: {_opt_style(5, rh_val)}")
 
+        # Row 6: Sync On Startup
         su_val = "[x] Enabled" if self.sync_on_startup else "[ ] Disabled"
-        rows.append(
-            f"Sync On Startup:      {_opt_style(5, su_val)}"
-        )
+        rows.append(f"Sync On Startup:      {_opt_style(6, su_val)}")
 
+        # Row 7: Remote Image Fetch
         ri_val = "[x] Allowed" if self.allow_remote_images else "[ ] Blocked"
-        rows.append(
-            f"Remote Image Fetch:   {_opt_style(6, ri_val)}"
-        )
+        rows.append(f"Remote Image Fetch:   {_opt_style(7, ri_val)}")
 
+        # Row 8: Folder Email Counts Mode
         cur_cm = "Unread Only" if self.FOLDER_COUNT_MODES[self.count_mode_idx] == "unread_only" else "Unread & Total"
-        rows.append(
-            f"Folder Email Counts:  ◀ {_opt_style(7, cur_cm)} ▶"
-        )
+        rows.append(f"Folder Email Counts:  ◀ {_opt_style(8, cur_cm)} ▶")
 
+        # Row 9: Fetch Batch Size
         cur_bs = f"{self.FETCH_BATCH_SIZES[self.batch_idx]} emails"
-        rows.append(
-            f"Fetch Batch Size:     ◀ {_opt_style(8, cur_bs)} ▶"
-        )
+        rows.append(f"Fetch Batch Size:     ◀ {_opt_style(9, cur_bs)} ▶")
 
         if self.error_msg:
             rows.append("")
@@ -2237,15 +2301,30 @@ class PreferencesModal(Model):
             )
 
         rows.append("")
+        self.buttons_row_offset = len(rows)
+
+        # Row 10 (or buttons row)
+        save_focused = (self.focus_idx == 10)
+        save_btn = (
+            Style().bold(True).background(self.current_theme.accent_primary).foreground(self.current_theme.bg_primary).render(" [ Save Preferences (Enter) ] ")
+            if save_focused
+            else Style().background(self.current_theme.bg_highlight).foreground(self.current_theme.accent_primary).render(" [ Save Preferences (Enter) ] ")
+        )
+        cancel_btn = Style().background(self.current_theme.bg_highlight).foreground(self.current_theme.fg_muted).render(" [ Cancel (Esc) ] ")
+        rows.append(f"{save_btn}   {cancel_btn}")
+
+        rows.append("")
         rows.append(
             Style()
             .foreground(self.current_theme.fg_muted)
             .render(
-                "[Tab/Arrows] Navigate  [Space/Left/Right] Change/Toggle  [Enter/Ctrl+S] Save  [Esc] Cancel"
+                "[Tab/Arrows] Navigate  [Space/Click] Toggle/Cycle  [Enter] Save  [Esc] Cancel"
             )
         )
 
+        self.last_modal_h = len(rows) + 4
         return self.current_theme.modal_style(modal_w, "⚙️ General Preferences").render(
             join_vertical(Align.LEFT, *rows)
         )
+
 

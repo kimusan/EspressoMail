@@ -56,7 +56,7 @@ class TestUIAndApp(unittest.TestCase):
         seen = {engine.current.id}
         for _ in range(len(engine.list_themes())):
             seen.add(engine.next_theme().id)
-        self.assertEqual(len(seen), 6)
+        self.assertEqual(len(seen), 12)
 
     def test_splash_screen_progression(self) -> None:
         theme = ThemeEngine("espresso").current
@@ -478,14 +478,15 @@ class TestUIAndApp(unittest.TestCase):
             pref_modal, _ = pref_modal.update(KeyMsg("right"))
             chosen_backend = pref_modal.IMAGE_BACKENDS[pref_modal.backend_idx]
 
-            # Cycle color mode (focus 2)
-            pref_modal.focus_idx = 2
+            # Cycle color mode (focus 3)
+            pref_modal.focus_idx = 3
             pref_modal, _ = pref_modal.update(KeyMsg("right"))
             chosen_mode = pref_modal.COLOR_MODES[pref_modal.color_mode_idx]
-            chosen_theme = "solarized_light" if chosen_mode == "light" else "espresso"
+            chosen_family = pref_modal.THEME_FAMILIES[pref_modal.theme_idx]
+            chosen_theme = f"{chosen_family}_{chosen_mode}" if chosen_mode == "light" else chosen_family
 
-            # Toggle threading (focus 3)
-            pref_modal.focus_idx = 3
+            # Toggle threading (focus 4)
+            pref_modal.focus_idx = 4
             initial_th = pref_modal.threading_enabled
             pref_modal, _ = pref_modal.update(KeyMsg("space"))
             self.assertNotEqual(pref_modal.threading_enabled, initial_th)
@@ -982,12 +983,12 @@ class TestUIAndApp(unittest.TestCase):
         )
         self.assertEqual(modal.FOLDER_COUNT_MODES[modal.count_mode_idx], "unread_only")
         # Toggle folder count mode to 'unread_and_total'
-        modal.focus_idx = 7
+        modal.focus_idx = 8
         modal, _ = modal.update(KeyMsg(key="right"))
         self.assertEqual(modal.FOLDER_COUNT_MODES[modal.count_mode_idx], "unread_and_total")
 
         # Cycle fetch batch size to 100
-        modal.focus_idx = 8
+        modal.focus_idx = 9
         modal, _ = modal.update(KeyMsg(key="right"))
         self.assertEqual(modal.FETCH_BATCH_SIZES[modal.batch_idx], 100)
 
@@ -1845,9 +1846,9 @@ class TestUIAndApp(unittest.TestCase):
             current_theme=THEMES["espresso"],
             download_dir=Path("/tmp/downloads"),
         )
-        pref_modal.focus_idx = 2  # Color mode toggle
+        pref_modal.focus_idx = 3  # Color mode toggle
         pref_modal, _ = pref_modal.update(KeyMsg("right"))
-        self.assertEqual(pref_modal.current_theme.id, "solarized_light")
+        self.assertEqual(pref_modal.current_theme.id, "espresso_light")
         self.assertTrue(pref_modal.current_theme.is_light)
 
         modal_view = pref_modal.view(80)
@@ -1869,6 +1870,165 @@ class TestUIAndApp(unittest.TestCase):
         sieve_view = sieve.view(80, 24)
         sieve_lines = sieve_view.split("\n")
         self.assertTrue(all(bg_code in l for l in sieve_lines), "Sieve modal must render with solid background")
+
+
+    def test_temporary_unread_only_folder_filter(self) -> None:
+        """Verify temporary unread-only message filter toggled via Ctrl+U and reset on folder change."""
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        self.assertFalse(app.unread_only_filter)
+
+        total_msgs = len(app.message_rows)
+        unread_count = sum(1 for r in app.message_rows if not r.message.is_read)
+        self.assertGreater(total_msgs, unread_count)
+        self.assertGreater(unread_count, 0)
+
+        # Toggle unread only via Ctrl+U
+        app, cmd = app.update(KeyMsg("ctrl+u"))
+        self.assertTrue(app.unread_only_filter)
+        self.assertEqual(len(app.message_rows), unread_count)
+        self.assertTrue(all(not r.message.is_read for r in app.message_rows))
+        self.assertIn("unread only", app.status_message.lower())
+
+        # Render message list pane has [UNREAD ONLY] badge
+        rendered = app._render_message_list_pane(40, 20)
+        self.assertIn("[UNREAD ONLY]", rendered)
+
+        # Toggle unread filter off with '!'
+        app, cmd = app.update(KeyMsg("!"))
+        self.assertFalse(app.unread_only_filter)
+        self.assertEqual(len(app.message_rows), total_msgs)
+
+        # Toggle back on and test reset on folder change
+        app, _ = app.update(KeyMsg("ctrl+u"))
+        self.assertTrue(app.unread_only_filter)
+
+        # Switching to Unified Inbox resets filter
+        app, _ = app.update(KeyMsg("U"))
+        self.assertFalse(app.unread_only_filter)
+
+        # Toggle on and test reset on activating another folder
+        app, _ = app.update(KeyMsg("ctrl+u"))
+        self.assertTrue(app.unread_only_filter)
+        app.folder_cursor = 1
+        app._activate_selected_folder()
+        self.assertFalse(app.unread_only_filter)
+
+    def test_onboarding_wizard_step_back_preserves_providers_and_mouse(self) -> None:
+        """Verify selecting a provider in OnboardingWizard and pressing Esc to step back keeps all providers."""
+        from espressomail.themes.engine import THEMES
+        from espressomail.ui.onboarding import OnboardingWizard, PROVIDER_PRESETS
+        from espresso import MouseAction, MouseButton, MouseMsg
+
+        wizard = OnboardingWizard(theme=THEMES["espresso"], allow_cancel=True)
+        self.assertEqual(wizard.step, 1)
+
+        # Step 1 view shows all provider presets
+        view1 = wizard.view(80, 24)
+        self.assertIn("Fastmail", view1)
+        self.assertIn("Gmail", view1)
+        self.assertIn("Custom IMAP", view1)
+
+        # Navigate to Fastmail (index 1) and press enter to go to Step 2
+        wizard, _ = wizard.update(KeyMsg("down"))
+        wizard, _ = wizard.update(KeyMsg("enter"))
+        self.assertEqual(wizard.step, 2)
+        self.assertIn("Fastmail", wizard.selected_preset.label)
+
+        # Now press Esc to go back to Step 1
+        wizard, _ = wizard.update(KeyMsg("esc"))
+        self.assertEqual(wizard.step, 1)
+
+        # CRITICAL FIX VERIFICATION: Provider prompt must be reset and view must show all providers, not just Fastmail
+        view_after_esc = wizard.view(80, 24)
+        self.assertIn("Fastmail", view_after_esc)
+        self.assertIn("Gmail", view_after_esc)
+        self.assertIn("ProtonMail", view_after_esc)
+        self.assertIn("Custom IMAP", view_after_esc)
+        self.assertEqual(len(wizard.provider_prompt.options), len(PROVIDER_PRESETS))
+
+        # Mouse interaction in Onboarding: clicking Step 1 provider
+        # Clicking provider option row selects it
+        mouse_click = MouseMsg(x=35, y=10, action=MouseAction.PRESS, button=MouseButton.LEFT)
+        wizard, _ = wizard.update(mouse_click)
+        self.assertIn(wizard.step, (1, 2))
+
+    def test_preferences_modal_mouse_interaction_and_dark_light_themes(self) -> None:
+        """Verify PreferencesModal mouse click cycling, wheel cycling, and buttons."""
+        from pathlib import Path
+        from espressomail.themes.engine import THEMES
+        from espressomail.ui.modals import ModalClosedMsg, PreferencesModal
+        from espresso import MouseAction, MouseButton, MouseMsg
+
+        modal = PreferencesModal(
+            store=self.store,
+            current_theme=THEMES["espresso"],
+            download_dir=Path("/tmp/downloads"),
+        )
+        # Check initial state
+        self.assertEqual(modal.color_mode_idx, 0)  # dark
+        self.assertEqual(modal.THEME_FAMILIES[modal.theme_idx], "espresso")
+
+        # Mouse click row 3 (Color Mode) to toggle dark -> light
+        # Modal bounds roughly center of 80x24: pos_x=5, pos_y=2. Row 3 is y = pos_y + 2 + 3 = 7
+        click_mode = MouseMsg(x=40, y=7, action=MouseAction.PRESS, button=MouseButton.LEFT)
+        modal, _ = modal.update(click_mode)
+        self.assertEqual(modal.color_mode_idx, 1)  # light
+        self.assertTrue(modal.current_theme.is_light)
+        self.assertEqual(modal.current_theme.id, "espresso_light")
+
+        # Mouse wheel cycling on row 2 (Theme family)
+        wheel_up = MouseMsg(x=40, y=6, action=MouseAction.PRESS, button=MouseButton.WHEEL_DOWN)
+        prev_fam_idx = modal.theme_idx
+        modal, _ = modal.update(wheel_up)
+        self.assertNotEqual(modal.theme_idx, prev_fam_idx)
+
+        # Mouse click Cancel button
+        modal.view(80, 24)
+        pos_y = max(0, (24 - modal.last_modal_h) // 2)
+        btn_y = pos_y + 2 + modal.buttons_row_offset
+        click_cancel = MouseMsg(x=55, y=btn_y, action=MouseAction.PRESS, button=MouseButton.LEFT)
+        modal, cmd = modal.update(click_cancel)
+        self.assertIsNotNone(cmd)
+        closed_msg = cmd()
+        self.assertIsInstance(closed_msg, ModalClosedMsg)
+
+    def test_all_theme_families_have_dark_and_light_modes(self) -> None:
+        """Verify each of the 6 theme families has both a valid Dark and Light variant."""
+        from espressomail.themes.engine import COLOR_MODES, THEME_FAMILIES, THEMES, ThemeEngine
+
+        for family in THEME_FAMILIES:
+            # Dark variant
+            dark_theme = THEMES.get(family)
+            self.assertIsNotNone(dark_theme, f"Missing dark theme for {family}")
+            self.assertFalse(dark_theme.is_light, f"{family} dark variant should have is_light=False")
+
+            # Light variant
+            light_key = f"{family}_light"
+            light_theme = THEMES.get(light_key)
+            self.assertIsNotNone(light_theme, f"Missing light theme {light_key}")
+            self.assertTrue(light_theme.is_light, f"{light_key} should have is_light=True")
+            self.assertTrue(light_theme.bg_primary.startswith("#"))
+            self.assertTrue(light_theme.bg_secondary.startswith("#"))
+
+        # Test ThemeEngine helpers
+        engine = ThemeEngine("espresso")
+        self.assertEqual(engine.color_mode, "dark")
+        self.assertEqual(engine.theme_family, "espresso")
+
+        # Toggle to light
+        engine.toggle_color_mode()
+        self.assertEqual(engine.color_mode, "light")
+        self.assertEqual(engine.current.id, "espresso_light")
+
+        # Switch family
+        engine.set_family_and_mode("nord", "light")
+        self.assertEqual(engine.current.id, "nord_light")
+        self.assertEqual(engine.theme_family, "nord")
+
+        engine.toggle_color_mode()
+        self.assertEqual(engine.current.id, "nord")
+        self.assertEqual(engine.color_mode, "dark")
 
 
 if __name__ == "__main__":

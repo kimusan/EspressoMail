@@ -71,6 +71,7 @@ DEFAULT_MENUS: tuple[MenuCategory, ...] = (
         hotkey="v",
         items=(
             MenuItem("unified_inbox", "Unified Inbox (All Accounts)", "U"),
+            MenuItem("toggle_unread_filter", "Toggle Unread Only Filter", "Ctrl+U"),
             MenuItem("toggle_threading", "Toggle Message Threading", "t"),
             MenuItem("cycle_image_mode", "Cycle Image Renderer (Chafa/Sixel)", "i"),
             MenuItem("toggle_headers", "Toggle Raw RFC 5322 Headers", "H"),
