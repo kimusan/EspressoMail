@@ -62,6 +62,10 @@ from espressomail.models.entities import (
     classify_folder_type,
     split_folder_hierarchy,
 )
+from espressomail.notifications import (
+    notify_new_messages,
+    send_desktop_notification,
+)
 from espressomail.protocols.icalendar import (
     CalendarEvent,
     build_rsvp_mime_message,
@@ -288,6 +292,8 @@ class EspressoMailApp(Model):
         self.folder_count_mode: str = self.store.get_setting("folder_count_mode", "unread_only")
         cur_batch = self.store.get_setting("fetch_batch_size", "50")
         self.fetch_batch_size: int = int(cur_batch) if cur_batch.isdigit() else 50
+        self.desktop_notifications: bool = self.store.get_setting("desktop_notifications", "1") == "1"
+        self.notification_sound: bool = self.store.get_setting("notification_sound", "0") == "1"
 
         # Active modal overlay
         self.active_modal: Model | None = None
@@ -442,6 +448,7 @@ class EspressoMailApp(Model):
             PaletteItem("save_attachments", "Mail: Download Attachments", "Save attachments to downloads directory", "w", "Mail"),
             PaletteItem("fetch_more", "Mail: Fetch Older Messages", "Download earlier emails from IMAP folder", "M", "Mail"),
             PaletteItem("address_book", "Tools: Local Address Book", "Manage contacts and PGP fingerprints", "B", "Tools"),
+            PaletteItem("test_notification", "Tools: Test Desktop Notification", "Send a test desktop notification to verify system daemon", "", "Tools"),
             PaletteItem("sieve_filters", "Tools: ManageSieve Filter Rules", "Configure RFC 5228 Sieve scripts", "F", "Tools"),
             PaletteItem("pgp_manager", "Security: GPG/PGP Keyring Manager", "Inspect keys, sign, verify, and decrypt", "G", "Security"),
             PaletteItem("account_settings", "Accounts: Edit Account Settings", "Update password, IMAP/SMTP hosts, ports, and TLS", "A", "Accounts"),
@@ -999,6 +1006,8 @@ class EspressoMailApp(Model):
             self.show_raw_headers = msg.show_raw_headers
             self.folder_count_mode = msg.folder_count_mode
             self.fetch_batch_size = msg.fetch_batch_size
+            self.desktop_notifications = msg.desktop_notifications
+            self.notification_sound = msg.notification_sound
             self.refresh_data()
             self.status_message = (
                 f"✔ Saved preferences: theme={msg.theme}, renderer={msg.image_backend}, "
@@ -1084,6 +1093,21 @@ class EspressoMailApp(Model):
                 return self, tick(180.0, AutoSyncTickMsg())
 
             self.is_syncing = True
+
+            # Trigger desktop notification for newly arrived messages if enabled
+            if self.desktop_notifications and msg.new_messages > 0:
+                new_msgs = self.store.list_messages(
+                    account_id=msg.account_id,
+                    folder=msg.folder_name,
+                    limit=min(5, msg.new_messages),
+                )
+                if new_msgs:
+                    notify_new_messages(
+                        new_msgs,
+                        account_name=msg.account_name,
+                        folder_name=msg.folder_name,
+                        sound=self.notification_sound,
+                    )
 
             # Only rebuild message rows and reader viewport if this synced folder affects the current view
             folder_affects_view = False
@@ -1825,6 +1849,18 @@ class EspressoMailApp(Model):
 
         if action_id == "address_book":
             self.active_modal = AddressBookModal(self.store, self.theme)
+            return self, None
+
+        if action_id == "test_notification":
+            sent = send_desktop_notification(
+                title="EspressoMail Test Notification",
+                body="Desktop notifications are configured and functioning correctly!",
+                sound=self.notification_sound,
+            )
+            if sent:
+                self.status_message = "✔ Test desktop notification dispatched."
+            else:
+                self.status_message = "⚠ Could not send desktop notification (daemon or tool not found)."
             return self, None
 
         if action_id == "sieve_filters":

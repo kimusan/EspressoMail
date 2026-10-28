@@ -122,6 +122,9 @@ class PreferencesSavedMsg(Msg):
     allow_remote_images: bool
     folder_count_mode: str = "unread_only"
     fetch_batch_size: int = 50
+    desktop_notifications: bool = True
+    notification_sound: bool = False
+
 
 
 # ---------------------------------------------------------------------------
@@ -2026,7 +2029,7 @@ class PreferencesModal(Model):
     ) -> None:
         self.store = store
         self.current_theme = current_theme
-        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=color_mode, 4=threading, 5=raw_headers, 6=sync_startup, 7=remote_imgs, 8=count_mode, 9=batch_size, 10=buttons
+        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=color_mode, 4=threading, 5=raw_headers, 6=sync_startup, 7=remote_imgs, 8=count_mode, 9=batch_size, 10=notifications, 11=sound, 12=buttons
         self.status_msg = ""
         self.error_msg = ""
 
@@ -2034,10 +2037,10 @@ class PreferencesModal(Model):
         self.last_app_w = 80
         self.last_app_h = 24
         self.last_modal_w = 68
-        self.last_modal_h = 18
+        self.last_modal_h = 20
         self.last_pos_x = 6
         self.last_pos_y = 3
-        self.buttons_row_offset = 11
+        self.buttons_row_offset = 13
 
         # Settings
         self.input_download_dir = TextInput(
@@ -2070,6 +2073,8 @@ class PreferencesModal(Model):
         self.show_raw_headers = show_raw_headers
         self.sync_on_startup = self.store.get_setting("sync_on_startup", "1") == "1"
         self.allow_remote_images = self.store.get_setting("allow_remote_images", "1") == "1"
+        self.desktop_notifications = self.store.get_setting("desktop_notifications", "1") == "1"
+        self.notification_sound = self.store.get_setting("notification_sound", "0") == "1"
 
         cur_count_mode = self.store.get_setting("folder_count_mode", "unread_only")
         self.count_mode_idx = (
@@ -2134,6 +2139,10 @@ class PreferencesModal(Model):
             self.count_mode_idx = (self.count_mode_idx + delta) % len(self.FOLDER_COUNT_MODES)
         elif row_idx == 9:
             self.batch_idx = (self.batch_idx + delta) % len(self.FETCH_BATCH_SIZES)
+        elif row_idx == 10:
+            self.desktop_notifications = not self.desktop_notifications
+        elif row_idx == 11:
+            self.notification_sound = not self.notification_sound
 
     def init(self) -> Cmd | None:
         return None
@@ -2158,14 +2167,14 @@ class PreferencesModal(Model):
                 # Mouse Wheel cycling
                 if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
                     delta = -1 if msg.button == MouseButton.WHEEL_UP else 1
-                    target_row = row_idx if 0 <= row_idx <= 9 else self.focus_idx
+                    target_row = row_idx if 0 <= row_idx <= 11 else self.focus_idx
                     self._cycle_row(target_row, delta)
                     return self, None
 
                 # Mouse Left Click
                 if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
                     # Check button row
-                    btn_row = getattr(self, "buttons_row_offset", 11)
+                    btn_row = getattr(self, "buttons_row_offset", 13)
                     if row_idx == btn_row:
                         # Save button is on left half, Cancel on right half
                         if rel_x < modal_w // 2:
@@ -2173,8 +2182,8 @@ class PreferencesModal(Model):
                         else:
                             return self, lambda: ModalClosedMsg("Closed preferences.")
 
-                    # Check setting rows (0 to 9)
-                    if 0 <= row_idx <= 9:
+                    # Check setting rows (0 to 11)
+                    if 0 <= row_idx <= 11:
                         self.focus_idx = row_idx
                         self._sync_focus()
                         # If clicked on left arrow or left side of option value, cycle backwards; else forwards
@@ -2191,21 +2200,21 @@ class PreferencesModal(Model):
                 return self, lambda: ModalClosedMsg("Closed preferences.")
 
             if k in ("enter", "ctrl+s"):
-                if self.focus_idx == 10:
+                if self.focus_idx == 12:
                     return self._save_preferences()
                 return self._save_preferences()
 
             if k in ("tab", "down"):
-                self.focus_idx = (self.focus_idx + 1) % 11
+                self.focus_idx = (self.focus_idx + 1) % 13
                 self._sync_focus()
                 return self, None
             if k in ("shift+tab", "up"):
-                self.focus_idx = (self.focus_idx - 1) % 11
+                self.focus_idx = (self.focus_idx - 1) % 13
                 self._sync_focus()
                 return self, None
 
             # Cycling / toggling options via arrows / space / h / l
-            if 1 <= self.focus_idx <= 9 and k in ("left", "right", "h", "l", " ", "space"):
+            if 1 <= self.focus_idx <= 11 and k in ("left", "right", "h", "l", " ", "space"):
                 delta = 1 if k in ("right", "l", " ", "space") else -1
                 self._cycle_row(self.focus_idx, delta)
                 return self, None
@@ -2246,6 +2255,8 @@ class PreferencesModal(Model):
         self.store.set_setting("allow_remote_images", "1" if self.allow_remote_images else "0")
         self.store.set_setting("folder_count_mode", count_mode_val)
         self.store.set_setting("fetch_batch_size", str(batch_val))
+        self.store.set_setting("desktop_notifications", "1" if self.desktop_notifications else "0")
+        self.store.set_setting("notification_sound", "1" if self.notification_sound else "0")
 
         return self, lambda: PreferencesSavedMsg(
             download_dir=str(p),
@@ -2257,6 +2268,8 @@ class PreferencesModal(Model):
             allow_remote_images=self.allow_remote_images,
             folder_count_mode=count_mode_val,
             fetch_batch_size=batch_val,
+            desktop_notifications=self.desktop_notifications,
+            notification_sound=self.notification_sound,
         )
 
     def view(self, width: int = 80, height: int = 24) -> str:
@@ -2311,6 +2324,14 @@ class PreferencesModal(Model):
         cur_bs = f"{self.FETCH_BATCH_SIZES[self.batch_idx]} emails"
         rows.append(f"Fetch Batch Size:     ◀ {_opt_style(9, cur_bs)} ▶")
 
+        # Row 10: Desktop Notifications
+        notif_val = "[x] Enabled" if self.desktop_notifications else "[ ] Disabled"
+        rows.append(f"Desktop Notifications: {_opt_style(10, notif_val)}")
+
+        # Row 11: Notification Sound
+        sound_val = "[x] Enabled" if self.notification_sound else "[ ] Disabled"
+        rows.append(f"Notification Sound:    {_opt_style(11, sound_val)}")
+
         if self.error_msg:
             rows.append("")
             rows.append(
@@ -2320,8 +2341,8 @@ class PreferencesModal(Model):
         rows.append("")
         self.buttons_row_offset = len(rows)
 
-        # Row 10 (or buttons row)
-        save_focused = (self.focus_idx == 10)
+        # Row 12 (or buttons row)
+        save_focused = (self.focus_idx == 12)
         save_btn = (
             Style().bold(True).background(self.current_theme.accent_primary).foreground(self.current_theme.bg_primary).render(" [ Save Preferences (Enter) ] ")
             if save_focused

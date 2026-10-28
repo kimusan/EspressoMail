@@ -1972,8 +1972,8 @@ class TestUIAndApp(unittest.TestCase):
         # Render view to establish exact modal geometry
         modal.view(80, 24)
         pos_y = modal.last_pos_y
-        self.assertEqual(modal.last_modal_h, 18)
-        self.assertEqual(pos_y, 3)
+        self.assertEqual(modal.last_modal_h, 20)
+        self.assertEqual(pos_y, 2)
 
         # Mouse click row 2 (Theme name) to cycle theme family
         # Row 2 is y = pos_y + 2 (border/padding) + 2 (row 2) = 7
@@ -2128,6 +2128,7 @@ class TestUIAndApp(unittest.TestCase):
 
         populate_test_store(self.store)
         app = EspressoMailApp(store=self.store, show_splash=False)
+        app.desktop_notifications = False
         app.active_account_id = "acc_oss"
         app.active_folder = "INBOX"
         app.refresh_data()
@@ -2363,9 +2364,104 @@ class TestUIAndApp(unittest.TestCase):
         self.assertIsInstance(app.active_modal, RSVPModal)
         self.assertEqual(app.active_modal.selected_response, "ACCEPTED")
 
+    def test_desktop_notifications_dispatch_and_preferences(self) -> None:
+        """Verify cross-platform desktop notifications, sound alert preferences, and sync dispatch."""
+        from unittest.mock import patch
+        from espressomail.notifications import (
+            is_notification_supported,
+            notify_new_messages,
+            play_alert_sound,
+            send_desktop_notification,
+        )
+        from espressomail.ui.app import SyncProgressMsg
+
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+
+        # 1. Test notifications module functions with mocking
+        with patch("subprocess.Popen") as mock_popen, patch("shutil.which", return_value="/usr/bin/notify-send"), patch("platform.system", return_value="Linux"):
+            self.assertTrue(is_notification_supported())
+            
+            # send_desktop_notification without sound
+            ok = send_desktop_notification(title="Test", body="Hello World", sound=False)
+            self.assertTrue(ok)
+            mock_popen.assert_called_once()
+            args = mock_popen.call_args[0][0]
+            self.assertIn("notify-send", args)
+            self.assertIn("Hello World", args)
+
+        with patch("subprocess.Popen") as mock_popen, patch("shutil.which", side_effect=lambda x: "/usr/bin/canberra-gtk-play" if x == "canberra-gtk-play" else "/usr/bin/notify-send"), patch("platform.system", return_value="Linux"):
+            mock_popen.reset_mock()
+            ok = send_desktop_notification(title="Test", body="Hello with sound", sound=True)
+            self.assertTrue(ok)
+            self.assertEqual(mock_popen.call_count, 2)  # sound + notification
+
+        # Test notify_new_messages with single and multiple messages
+        msgs = self.store.list_messages(account_id="acc_work", folder="INBOX", limit=2)
+        self.assertTrue(len(msgs) >= 1)
+        with patch("espressomail.notifications.send_desktop_notification") as mock_send:
+            notify_new_messages([msgs[0]], account_name="Work", folder_name="INBOX")
+            mock_send.assert_called_once()
+            self.assertIn("New Email from", mock_send.call_args[1]["title"])
+
+        with patch("espressomail.notifications.send_desktop_notification") as mock_send:
+            notify_new_messages([msgs[0], msgs[0]], account_name="Work", folder_name="INBOX")
+            mock_send.assert_called_once()
+            self.assertIn("New Emails in INBOX", mock_send.call_args[1]["title"])
+
+        # 2. Preferences modal: toggle notifications (focus 10) and sound (focus 11)
+        app, _ = app.update(KeyMsg("p"))
+        modal = app.active_modal
+        self.assertIsInstance(modal, PreferencesModal)
+        modal.focus_idx = 10
+        init_notif = modal.desktop_notifications
+        modal, _ = modal.update(KeyMsg("space"))
+        self.assertEqual(modal.desktop_notifications, not init_notif)
+
+        modal.focus_idx = 11
+        init_sound = modal.notification_sound
+        modal, _ = modal.update(KeyMsg("space"))
+        self.assertEqual(modal.notification_sound, not init_sound)
+
+        # Save preferences
+        app, _ = app.update(KeyMsg("enter"))
+        self.assertIsNone(app.active_modal)
+        self.assertEqual(app.desktop_notifications, not init_notif)
+        self.assertEqual(app.notification_sound, not init_sound)
+        self.assertEqual(self.store.get_setting("desktop_notifications"), "0" if init_notif else "1")
+        self.assertEqual(self.store.get_setting("notification_sound"), "1" if not init_sound else "0")
+
+        # 3. Test sync triggers notification when enabled
+        app.desktop_notifications = True
+        with patch("espressomail.ui.app.notify_new_messages") as mock_notify:
+            sync_step = SyncProgressMsg(
+                account_id="acc_work",
+                account_name="Work",
+                action="synced_folder",
+                folder_name="INBOX",
+                new_messages=1,
+                remaining_steps=(("acc_work", "sync_folder", "Sent"),),
+                total_steps=2,
+            )
+            app, _ = app.update(sync_step)
+            mock_notify.assert_called_once()
+
+        # When disabled, no notification dispatched
+        app.desktop_notifications = False
+        with patch("espressomail.ui.app.notify_new_messages") as mock_notify:
+            app, _ = app.update(sync_step)
+            mock_notify.assert_not_called()
+
+        # 4. Command palette "test_notification"
+        with patch("espressomail.ui.app.send_desktop_notification", return_value=True) as mock_send:
+            app, _ = app._execute_action("test_notification")
+            mock_send.assert_called_once()
+            self.assertIn("Test desktop notification dispatched", app.status_message)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
