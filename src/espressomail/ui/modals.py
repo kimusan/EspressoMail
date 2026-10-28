@@ -581,7 +581,7 @@ class SearchModal(Model):
         tips = (
             Style()
             .foreground(self.theme.fg_muted)
-            .render("Operators: from:<name>  to:<addr>  subject:<word>  has:attachment  is:unread  is:starred  is:pgp")
+            .render("Operators: from:<name>  to:<addr>  subject:<word>  body:<text>  att:<file>  has:attachment  is:unread")
         )
 
         rows: list[str] = []
@@ -610,13 +610,21 @@ class SearchModal(Model):
                         .width(inner_w)
                         .render(truncated)
                     )
+                    if hit.snippet:
+                        snippet_line = f"    ↳ {hit.snippet.strip()}"
+                        rows.append(
+                            Style()
+                            .italic(True)
+                            .foreground(self.theme.accent_secondary)
+                            .render(truncate_ansi(snippet_line, inner_w))
+                        )
                 else:
                     rows.append(Style().foreground(self.theme.fg_primary).render(truncated))
 
         footer = (
             Style()
             .foreground(self.theme.fg_muted)
-            .render(f"{len(self.results)} matches   [↑/↓] Navigate   [Enter] Open Email   [Esc] Close")
+            .render(f"{len(self.results)} matches [FTS5/Fuzzy]   [↑/↓] Navigate   [Enter] Open Email   [Esc] Close")
         )
 
         content = join_vertical(
@@ -628,7 +636,7 @@ class SearchModal(Model):
             "",
             footer,
         )
-        return self.theme.modal_style(modal_w, "🔍 Instant Fuzzy Database Search").render(content)
+        return self.theme.modal_style(modal_w, "🔍 Instant Full-Text & Fuzzy Database Search (FTS5)").render(content)
 
 
 # ---------------------------------------------------------------------------

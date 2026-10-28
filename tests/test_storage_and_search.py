@@ -262,6 +262,86 @@ class TestStorageAndSearch(unittest.TestCase):
         self.assertIsNotNone(contact)
         self.assertEqual(contact.name, "Elena Rostova")
 
+    def test_sqlite_fts5_full_text_search_and_rebuild(self) -> None:
+        """Verify SQLite FTS5 index creation, rebuild, BM25 ranking, snippet generation, and stemming."""
+        from espressomail.search import build_fts5_query, parse_search_query
+
+        self.assertTrue(self.store.is_fts_enabled())
+
+        # Rebuild index and verify count
+        indexed_count = self.store.rebuild_fts_index()
+        self.assertEqual(indexed_count, 3)
+
+        # 1. Porter stemming match: 'benchmarks' matches 'benchmark'
+        stemmed_hits = self.store.search_messages_fts("benchmarks")
+        self.assertGreaterEqual(len(stemmed_hits), 1)
+        hit_msg, hit_score, snippet = stemmed_hits[0]
+        self.assertIn("benchmark", hit_msg.subject.lower())
+        self.assertIn("«", snippet)
+        self.assertIn("»", snippet)
+        self.assertGreaterEqual(hit_score, 50.0)
+
+        # 2. Body text search: 'rasterization' only appears in msg_thread1_1 body
+        body_hits = self.store.search_messages_fts("rasterization")
+        self.assertEqual(len(body_hits), 1)
+        self.assertEqual(body_hits[0][0].id, "msg_thread1_1")
+        self.assertIn("rasterization", body_hits[0][2].lower())
+
+        # 3. Attachment filename indexing: 'mascot' matches espresso_mascot.ppm
+        att_hits = self.store.search_messages_fts("mascot")
+        self.assertEqual(len(att_hits), 1)
+        self.assertEqual(att_hits[0][0].id, "msg_thread1_1")
+
+        # 4. Sender search: 'Vance' matches Marcus Vance
+        sender_hits = self.store.search_messages_fts("Vance")
+        self.assertEqual(len(sender_hits), 1)
+        self.assertEqual(sender_hits[0][0].id, "msg_work_pgp")
+
+        # 5. Column filter query building
+        sq = parse_search_query("body:rasterization has:attachment")
+        self.assertEqual(sq.body_filter, "rasterization")
+        self.assertTrue(sq.has_attachment)
+        built = build_fts5_query(sq)
+        self.assertIn("body_text :", built)
+
+        # 6. Integrated FuzzySearchEngine using FTS5 with BM25 and fallback
+        engine = FuzzySearchEngine(self.store)
+
+        # Fast FTS5 hit with snippet
+        fts_res = engine.search("rasterization")
+        self.assertGreaterEqual(len(fts_res), 1)
+        self.assertIn("fts", fts_res[0].matched_fields)
+        self.assertTrue(bool(fts_res[0].snippet))
+
+        # Typo tolerance fallback: 'wiregard' (misspelled) falls back to fuzzy match 'WireGuard'
+        typo_res = engine.search("wiregard")
+        self.assertGreaterEqual(len(typo_res), 1)
+        self.assertEqual(typo_res[0].message.id, "msg_work_pgp")
+
+        # Prefix search: 'extra*' or 'wireg*'
+        prefix_res = engine.search("wireg*")
+        self.assertGreaterEqual(len(prefix_res), 1)
+        self.assertEqual(prefix_res[0].message.id, "msg_work_pgp")
+
+    def test_fts5_search_modal_view_and_snippet_display(self) -> None:
+        """Verify SearchModal renders FTS5 title, operator hints, and contextual snippet preview."""
+        from espressomail.themes.engine import THEMES
+        from espressomail.ui.modals import SearchModal
+        from espresso import KeyMsg
+
+        theme = THEMES["espresso"]
+        modal = SearchModal(self.store, theme, initial_query="rasterization")
+
+        # View rendering includes FTS5 modal header
+        view_out = modal.view(80)
+        self.assertIn("FTS5", view_out)
+        self.assertIn("body:", view_out)
+        self.assertIn("att:", view_out)
+
+        # The selected row displays contextual matched snippet preview
+        self.assertIn("↳", view_out)
+        self.assertIn("rasterization", view_out.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

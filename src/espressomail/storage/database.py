@@ -260,19 +260,29 @@ class LocalStore:
         )
 
         try:
-            cur.execute(
-                """
-                CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                    msg_id UNINDEXED,
-                    subject,
-                    sender_name,
-                    sender_email,
-                    recipients,
-                    body_text,
-                    folder
-                );
-                """
-            )
+            cur.execute("PRAGMA table_info(messages_fts)")
+            existing_cols = {row[1] for row in cur.fetchall()}
+            if existing_cols and ("attachment_names" not in existing_cols or "account_id" not in existing_cols):
+                cur.execute("DROP TABLE messages_fts")
+                existing_cols = set()
+
+            if not existing_cols:
+                cur.execute(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                        msg_id UNINDEXED,
+                        account_id UNINDEXED,
+                        folder UNINDEXED,
+                        subject,
+                        sender_name,
+                        sender_email,
+                        recipients,
+                        body_text,
+                        attachment_names,
+                        tokenize = 'porter unicode61 remove_diacritics 2'
+                    );
+                    """
+                )
             self._fts_enabled = True
         except sqlite3.OperationalError:
             self._fts_enabled = False
@@ -914,21 +924,25 @@ class LocalStore:
         # Update FTS5 index
         if self._fts_enabled:
             self._conn.execute("DELETE FROM messages_fts WHERE msg_id = ?", (msg.id,))
-            recipients_flat = " ".join(msg.recipients_to + msg.recipients_cc)
+            recipients_flat = " ".join(msg.recipients_to + msg.recipients_cc + msg.recipients_bcc)
+            attachment_names = " ".join(att.filename for att in msg.attachments)
             self._conn.execute(
                 """
                 INSERT INTO messages_fts (
-                    msg_id, subject, sender_name, sender_email, recipients, body_text, folder
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    msg_id, account_id, folder, subject, sender_name, sender_email,
+                    recipients, body_text, attachment_names
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     msg.id,
+                    msg.account_id,
+                    msg.folder,
                     msg.subject,
                     msg.sender_name,
                     msg.sender_email,
                     recipients_flat,
                     msg.body_text,
-                    msg.folder,
+                    attachment_names,
                 ),
             )
 
@@ -1046,6 +1060,114 @@ class LocalStore:
             params.append(limit)
             rows = self._conn.execute(query, params).fetchall()
             return [self._row_to_message(r, include_attachments=True) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Full-Text Search (SQLite FTS5)
+    # ------------------------------------------------------------------
+
+    def is_fts_enabled(self) -> bool:
+        """Return True if SQLite FTS5 extension is active and available."""
+        return self._fts_enabled
+
+    def rebuild_fts_index(self) -> int:
+        """Re-index all stored messages and attachment filenames into messages_fts."""
+        if not self._fts_enabled:
+            return 0
+        with self._lock:
+            self._conn.execute("DELETE FROM messages_fts")
+            query = """
+            SELECT m.id, m.account_id, m.folder, m.subject, m.sender_name, m.sender_email,
+                   m.recipients_to_json, m.recipients_cc_json, m.recipients_bcc_json,
+                   m.body_text,
+                   COALESCE(GROUP_CONCAT(a.filename, ' '), '') AS attachment_names
+            FROM messages m
+            LEFT JOIN attachments a ON a.message_id = m.id
+            GROUP BY m.id
+            """
+            rows = self._conn.execute(query).fetchall()
+            for r in rows:
+                to_l = json.loads(r["recipients_to_json"] or "[]")
+                cc_l = json.loads(r["recipients_cc_json"] or "[]")
+                bcc_l = json.loads(r["recipients_bcc_json"] or "[]")
+                recips = " ".join(to_l + cc_l + bcc_l)
+                self._conn.execute(
+                    """
+                    INSERT INTO messages_fts (
+                        msg_id, account_id, folder, subject, sender_name, sender_email,
+                        recipients, body_text, attachment_names
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        r["id"],
+                        r["account_id"],
+                        r["folder"],
+                        r["subject"],
+                        r["sender_name"],
+                        r["sender_email"],
+                        recips,
+                        r["body_text"],
+                        r["attachment_names"],
+                    ),
+                )
+            self._conn.commit()
+            return len(rows)
+
+    def search_messages_fts(
+        self,
+        match_expr: str,
+        account_id: str = "*",
+        folder: str = "ALL",
+        include_trashed: bool = False,
+        limit: int = 100,
+    ) -> list[tuple[EmailMessage, float, str]]:
+        """Search local messages using SQLite FTS5 full-text index with BM25 ranking.
+
+        Returns list of (EmailMessage, relevance_score_0_to_100, matched_snippet).
+        """
+        if not self._fts_enabled or not match_expr.strip():
+            return []
+
+        with self._lock:
+            where_clauses = ["messages_fts MATCH ?"]
+            params: list[Any] = [match_expr.strip()]
+
+            if account_id and account_id != "*":
+                where_clauses.append("messages_fts.account_id = ?")
+                params.append(account_id)
+
+            if folder and folder.upper() != "ALL":
+                where_clauses.append("messages_fts.folder = ?")
+                params.append(folder)
+
+            if not include_trashed:
+                where_clauses.append("m.is_trashed = 0")
+
+            params.append(limit)
+
+            sql = f"""
+            SELECT m.*,
+                   bm25(messages_fts, 5.0, 2.0, 1.5, 1.0, 1.0, 2.0) AS fts_rank,
+                   snippet(messages_fts, -1, '«', '»', '...', 12) AS fts_snippet
+            FROM messages_fts
+            JOIN messages m ON m.id = messages_fts.msg_id
+            WHERE {" AND ".join(where_clauses)}
+            ORDER BY fts_rank ASC, m.timestamp DESC
+            LIMIT ?
+            """
+            try:
+                rows = self._conn.execute(sql, tuple(params)).fetchall()
+            except sqlite3.OperationalError:
+                # E.g. syntax error in MATCH expression; caller can fall back
+                return []
+
+            results: list[tuple[EmailMessage, float, str]] = []
+            for r in rows:
+                msg = self._row_to_message(r, include_attachments=True)
+                raw_rank = r["fts_rank"]  # BM25 is negative; lower is better
+                score = round(min(100.0, max(10.0, 75.0 - (raw_rank * 12.0))), 2)
+                snippet_txt = r["fts_snippet"] or ""
+                results.append((msg, score, snippet_txt))
+            return results
 
     def mark_read(self, msg_id: str, is_read: bool = True) -> None:
         """Set or unset the read status of a message."""
