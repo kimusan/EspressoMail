@@ -33,6 +33,7 @@ from espressomail.models.entities import (
     Attachment,
     Contact,
     EmailMessage,
+    Folder,
     PGPStatus,
     SecurityType,
     SieveFilterRule,
@@ -1770,11 +1771,16 @@ class HelpModal(Model):
             f"  {k_style.render('U')}                 Jump directly to Unified Inbox (all accounts)",
             f"  {k_style.render('F10 / m')}           Open interactive top drop-down Menu Bar",
             "",
+            h_style.render("Inbox Zero & Single-Key Triaging"),
+            f"  {k_style.render('e / y')}  Archive message       {k_style.render('d / #')}  Move to Trash",
+            f"  {k_style.render('s')}      Toggle Star / Flag    {k_style.render('u')}      Toggle Read / Unread",
+            f"  {k_style.render('J')}      Mark as Spam / Junk   {k_style.render('v')}      Move to Folder...",
+            f"  {k_style.render('x')}      Select / mark message {k_style.render('Ctrl+U')} Toggle Unread Filter",
+            "",
             h_style.render("Mail Actions"),
             f"  {k_style.render('c')}  Compose new mail      {k_style.render('r / R')}  Reply / Reply All",
-            f"  {k_style.render('f')}  Forward message       {k_style.render('s')}      Toggle Star / Flag",
-            f"  {k_style.render('1/2/3')} Calendar RSVP (Accept/Tentative/Decline)",
-            f"  {k_style.render('w')}  Save attachments      {k_style.render('M')}      Fetch older messages",
+            f"  {k_style.render('f')}  Forward message       {k_style.render('w')}      Save attachments",
+            f"  {k_style.render('1/2/3')} Calendar RSVP      {k_style.render('M')}      Fetch older messages",
             f"  {k_style.render('S')}  Sync all accounts     {k_style.render('X')}      Empty Trash",
             "",
             h_style.render("Accounts, Search, Security, Filters & Settings"),
@@ -2629,4 +2635,171 @@ class RSVPModal(Model):
         return rendered
 
 
+# ---------------------------------------------------------------------------
+# 11. Move Message to Folder Modal
+# ---------------------------------------------------------------------------
 
+
+@dataclass
+class MoveFolderSubmittedMsg(Msg):
+    message_id: str
+    account_id: str
+    uid: int
+    source_folder: str
+    target_folder: str
+
+
+class MoveFolderModal(Model):
+    """Modal to select a target mailbox folder and move the active email into it."""
+
+    def __init__(
+        self,
+        account: AccountConfig | None,
+        folders: list[Folder],
+        message: EmailMessage,
+        theme: Theme,
+    ) -> None:
+        self.account = account
+        self.folders = [f for f in folders if f.name]
+        self.message = message
+        self.theme = theme
+        self.cursor = 0
+        self.filter_text = ""
+        self.last_modal_w = 64
+        self.last_modal_h = 16
+        self.last_pos_x = 0
+        self.last_pos_y = 0
+        self.items_y_offset = 4
+        self.buttons_y_offset = 12
+
+    def _filtered_folders(self) -> list[Folder]:
+        if not self.filter_text:
+            return self.folders
+        q = self.filter_text.lower()
+        return [f for f in self.folders if q in f.name.lower() or q in f.display_name.lower()]
+
+    def init(self) -> Cmd | None:
+        return None
+
+    def update(self, msg: Msg) -> tuple[MoveFolderModal, Cmd | None]:
+        filtered = self._filtered_folders()
+        if isinstance(msg, KeyMsg):
+            k = str(msg.key)
+            if k in ("esc", "ctrl+c"):
+                return self, lambda: ModalClosedMsg()
+            if k in ("down", "j"):
+                if filtered:
+                    self.cursor = (self.cursor + 1) % len(filtered)
+                return self, None
+            if k in ("up", "k"):
+                if filtered:
+                    self.cursor = (self.cursor - 1) % len(filtered)
+                return self, None
+            if k == "backspace":
+                if self.filter_text:
+                    self.filter_text = self.filter_text[:-1]
+                    self.cursor = 0
+                return self, None
+            if k == "enter":
+                if filtered and 0 <= self.cursor < len(filtered):
+                    target = filtered[self.cursor]
+                    return self, lambda: MoveFolderSubmittedMsg(
+                        message_id=self.message.id,
+                        account_id=self.message.account_id,
+                        uid=self.message.uid,
+                        source_folder=self.message.folder,
+                        target_folder=target.name,
+                    )
+                return self, None
+            if len(k) == 1 and k.isprintable() and k not in ("\t", "\n", "\r"):
+                self.filter_text += k
+                self.cursor = 0
+                return self, None
+
+        if isinstance(msg, MouseMsg):
+            if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
+                if filtered:
+                    delta = -1 if msg.button == MouseButton.WHEEL_UP else 1
+                    self.cursor = (self.cursor + delta) % len(filtered)
+                return self, None
+            if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
+                rel_y = msg.y - self.last_pos_y
+                rel_x = msg.x - self.last_pos_x
+                if 0 <= rel_x < self.last_modal_w and 0 <= rel_y < self.last_modal_h:
+                    if self.items_y_offset <= rel_y < self.items_y_offset + len(filtered[:8]):
+                        clicked_idx = rel_y - self.items_y_offset
+                        if 0 <= clicked_idx < len(filtered):
+                            self.cursor = clicked_idx
+                            target = filtered[self.cursor]
+                            return self, lambda: MoveFolderSubmittedMsg(
+                                message_id=self.message.id,
+                                account_id=self.message.account_id,
+                                uid=self.message.uid,
+                                source_folder=self.message.folder,
+                                target_folder=target.name,
+                            )
+                    if rel_y == self.buttons_y_offset:
+                        if rel_x < 17:
+                            if filtered and 0 <= self.cursor < len(filtered):
+                                target = filtered[self.cursor]
+                                return self, lambda: MoveFolderSubmittedMsg(
+                                    message_id=self.message.id,
+                                    account_id=self.message.account_id,
+                                    uid=self.message.uid,
+                                    source_folder=self.message.folder,
+                                    target_folder=target.name,
+                                )
+                        else:
+                            return self, lambda: ModalClosedMsg()
+                else:
+                    return self, lambda: ModalClosedMsg()
+        return self, None
+
+    def view(self, width: int = 80, height: int = 24) -> str:
+        modal_w = min(68, max(48, width - 8))
+        inner_w = modal_w - 6
+        filtered = self._filtered_folders()
+
+        rows: list[str] = []
+        subj = (self.message.subject or "(no subject)").strip()
+        rows.append(Style().bold(True).foreground(self.theme.accent_primary).render(f"Email: {subj[:inner_w - 8]}"))
+        filter_display = f"Filter: {self.filter_text}_" if self.filter_text else "Filter: (type to filter...)"
+        rows.append(Style().foreground(self.theme.fg_muted).render(filter_display))
+        rows.append("")
+
+        self.items_y_offset = len(rows) + 1
+        if not filtered:
+            rows.append(Style().italic(True).foreground(self.theme.fg_muted).render("  No matching folders found."))
+        else:
+            for idx, f in enumerate(filtered[:8]):
+                name_display = f.display_name or f.name
+                line = f" {f.icon} {name_display:<30} ({f.total_count} msgs)"
+                truncated = truncate_ansi(line, inner_w)
+                if idx == self.cursor:
+                    rows.append(
+                        Style()
+                        .bold(True)
+                        .foreground(self.theme.bg_primary)
+                        .background(self.theme.accent_primary)
+                        .width(inner_w)
+                        .render(f" ▸{truncated[2:]}" if len(truncated) >= 2 else truncated)
+                    )
+                else:
+                    rows.append(Style().foreground(self.theme.fg_primary).render(f"   {truncated[2:]}" if len(truncated) >= 2 else truncated))
+
+        rows.append("")
+        self.buttons_y_offset = len(rows) + 1
+        move_btn = Style().bold(True).background(self.theme.accent_primary).foreground(self.theme.bg_primary).render(" [ Move (Enter) ] ")
+        cancel_btn = Style().background(self.theme.bg_highlight).foreground(self.theme.fg_muted).render(" [ Cancel (Esc) ] ")
+        rows.append(f"  {move_btn}   {cancel_btn}")
+
+        rows.append("")
+        rows.append(Style().foreground(self.theme.fg_muted).render("  [↑/↓/j/k] Navigate  [Type] Filter  [Enter] Move  [Esc] Cancel"))
+
+        rendered = self.theme.modal_style(modal_w, "📁 Move Message to Folder").render("\n".join(rows))
+        modal_lines = rendered.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        self.last_modal_h = len(modal_lines)
+        self.last_modal_w = max((string_width(l) for l in modal_lines), default=modal_w)
+        self.last_pos_x = max(0, (width - self.last_modal_w) // 2)
+        self.last_pos_y = max(0, (height - self.last_modal_h) // 2)
+        return rendered

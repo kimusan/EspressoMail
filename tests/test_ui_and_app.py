@@ -2591,6 +2591,143 @@ class TestUIAndApp(unittest.TestCase):
         self.assertEqual(app.imap_push_enabled, init_push)
         self.assertEqual(self.store.get_setting("imap_push_enabled"), "1" if init_push else "0")
 
+    def test_single_key_triaging_and_batch_actions(self) -> None:
+        """Verify single-key triaging (e, y, d, #, J, s, u, v, x) and multi-selection batch triage."""
+        from unittest.mock import MagicMock, patch
+        from espressomail.ui.modals import MoveFolderModal, MoveFolderSubmittedMsg
+
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.desktop_notifications = False
+        app.focused_pane = "messages"
+
+        initial_count = len(app.message_rows)
+        self.assertGreaterEqual(initial_count, 3)
+
+        # 1. Single-key Star via 's' and Read via 'u'
+        curr_msg = app.selected_message
+        self.assertIsNotNone(curr_msg)
+        orig_star = curr_msg.is_starred
+        app, _ = app.update(KeyMsg("s"))
+        self.assertEqual(app.selected_message.is_starred, not orig_star)
+
+        orig_read = app.selected_message.is_read
+        app, _ = app.update(KeyMsg("u"))
+        self.assertEqual(app.selected_message.is_read, not orig_read)
+
+        # 2. Multi-selection batch triage via 'x'
+        app.selected_message_ids.clear()
+        msg_a = app.message_rows[0].message
+        msg_b = app.message_rows[1].message
+        app.message_cursor = 0
+        app, _ = app.update(KeyMsg("x"))
+        self.assertIn(msg_a.id, app.selected_message_ids)
+        self.assertEqual(app.message_cursor, 1)
+
+        app, _ = app.update(KeyMsg("x"))
+        self.assertIn(msg_b.id, app.selected_message_ids)
+
+        # Check rendered message list has checkmark
+        rendered = app._render_message_list_pane(50, 20)
+        self.assertIn("✓", rendered)
+
+        # Archive both marked messages simultaneously via 'e'
+        cnt_before = len(app.message_rows)
+        app, _ = app.update(KeyMsg("e"))
+        self.assertEqual(len(app.message_rows), cnt_before - 2)
+        self.assertEqual(len(app.selected_message_ids), 0)
+        self.assertIn("Archived 2 messages", app.status_message)
+
+        # 3. Single-key Move to folder modal via 'v'
+        app, _ = app.update(KeyMsg("v"))
+        self.assertIsInstance(app.active_modal, MoveFolderModal)
+        modal = app.active_modal
+        # Test filtering
+        modal, _ = modal.update(KeyMsg("a"))
+        modal, _ = modal.update(KeyMsg("r"))
+        self.assertTrue(any("archive" in f.name.lower() for f in modal._filtered_folders()))
+        # Submit move via Enter
+        with patch.object(app, "_make_move_msg_cmd", return_value=None):
+            app, _ = app.update(KeyMsg("enter"))
+        self.assertIsNone(app.active_modal)
+        self.assertIn("Moved message to", app.status_message)
+
+        # 4. Single-key Archive via 'y'
+        m = app.selected_message
+        if m:
+            cnt_before = len(app.message_rows)
+            app, _ = app.update(KeyMsg("y"))
+            self.assertEqual(len(app.message_rows), cnt_before - 1)
+            archived = self.store.get_message(m.id)
+            self.assertEqual(archived.folder, "Archive")
+
+        # 5. Single-key Trash via 'd'
+        m = app.selected_message
+        if m:
+            cnt_before = len(app.message_rows)
+            app, _ = app.update(KeyMsg("d"))
+            self.assertEqual(len(app.message_rows), cnt_before - 1)
+            trashed = self.store.get_message(m.id)
+            self.assertEqual(trashed.folder, "Trash")
+
+        # 6. Single-key Spam via 'J' or '#'
+        # Insert a fresh email to ensure spam/zero flow is tested
+        from espressomail.models.entities import EmailMessage
+        fresh_msg = EmailMessage(
+            id="msg_triage_test",
+            account_id="acc_work",
+            folder="INBOX",
+            uid=999,
+            message_id="<triage@test.com>",
+            sender_name="Spammer",
+            sender_email="spammer@evil.com",
+            subject="Spam Offer",
+            body_text="Click here",
+        )
+        self.store.save_message(fresh_msg)
+        app.refresh_data()
+        self.assertGreaterEqual(len(app.message_rows), 1)
+
+        app, _ = app.update(KeyMsg("J"))
+        spammed = self.store.get_message("msg_triage_test")
+        self.assertIn(spammed.folder.lower(), ("spam", "junk"))
+        self.assertIn("Spam", app.status_message)
+
+        # 7. Triage down to Inbox Zero
+        while app.selected_message:
+            app, _ = app.update(KeyMsg("d"))
+        self.assertEqual(len(app.message_rows), 0)
+        self.assertIn("Inbox zero!", app.status_message)
+        self.assertIn("No email selected", app.reader_viewport.view())
+
+        # 8. IMAPClient move_message and delete_message verification
+        from espressomail.protocols.imap_client import IMAPClient
+        acc = self.store.list_accounts()[0]
+        client = IMAPClient(acc)
+        client._conn = MagicMock()
+        client._select_mailbox = MagicMock(return_value=True)
+
+        # Test MOVE with capability
+        client.has_capability = MagicMock(return_value=True)
+        client._conn.uid.return_value = ("OK", [b"Success"])
+        ok = client.move_message("INBOX", 101, "Archive")
+        self.assertTrue(ok)
+        client._conn.uid.assert_called_with("MOVE", "101", '"Archive"')
+
+        # Test fallback without MOVE capability (COPY + STORE + EXPUNGE)
+        client.has_capability = MagicMock(return_value=False)
+        client._conn.uid.side_effect = [("OK", [b"Copied"]), ("OK", [b"Stored"])]
+        ok = client.move_message("INBOX", 102, "Archive")
+        self.assertTrue(ok)
+        client._conn.expunge.assert_called()
+
+        # Test delete_message
+        client._conn.uid.side_effect = None
+        client._conn.uid.return_value = ("OK", [b"Deleted"])
+        ok = client.delete_message("INBOX", 103)
+        self.assertTrue(ok)
+        client._conn.uid.assert_called_with("STORE", "103", "+FLAGS", r"(\Deleted)")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1083,6 +1083,22 @@ class LocalStore:
         """Move a message to another folder (e.g. Archive, INBOX)."""
         is_trash = 1 if target_folder.lower() == "trash" else 0
         is_draft = 1 if target_folder.lower() == "drafts" else 0
+        row = self._conn.execute(
+            "SELECT account_id FROM messages WHERE id = ?", (msg_id,)
+        ).fetchone()
+        if row:
+            acc_id = row["account_id"]
+            f_row = self._conn.execute(
+                "SELECT id FROM folders WHERE account_id = ? AND name = ?", (acc_id, target_folder)
+            ).fetchone()
+            if not f_row:
+                ftype = classify_folder_type([target_folder])
+                f_id = f"{acc_id}:{target_folder}"
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO folders (id, account_id, name, display_name, folder_type, subscribed) "
+                    "VALUES (?, ?, ?, ?, ?, 1)",
+                    (f_id, acc_id, target_folder, target_folder, ftype.value),
+                )
         self._conn.execute(
             "UPDATE messages SET folder = ?, is_trashed = ?, is_draft = ? WHERE id = ?",
             (target_folder, is_trash, is_draft, msg_id),
@@ -1093,6 +1109,38 @@ class LocalStore:
                 (target_folder, msg_id),
             )
         self._conn.commit()
+
+    def archive_message(self, msg_id: str) -> str:
+        """Archive a message into the account's Archive mailbox (or 'Archive'). Returns target folder name."""
+        row = self._conn.execute(
+            "SELECT account_id, folder FROM messages WHERE id = ?", (msg_id,)
+        ).fetchone()
+        if not row:
+            return "Archive"
+        target_folder = "Archive"
+        folders = self.list_folders(row["account_id"])
+        for f in folders:
+            if f.folder_type == FolderType.ARCHIVE or f.name.lower() in ("archive", "archives", "all mail"):
+                target_folder = f.name
+                break
+        self.move_to_folder(msg_id, target_folder)
+        return target_folder
+
+    def move_to_spam(self, msg_id: str) -> str:
+        """Move a message to Spam/Junk mailbox (or 'Spam'). Returns target folder name."""
+        row = self._conn.execute(
+            "SELECT account_id, folder FROM messages WHERE id = ?", (msg_id,)
+        ).fetchone()
+        if not row:
+            return "Spam"
+        target_folder = "Spam"
+        folders = self.list_folders(row["account_id"])
+        for f in folders:
+            if f.folder_type == FolderType.SPAM or f.name.lower() in ("spam", "junk", "bulk mail"):
+                target_folder = f.name
+                break
+        self.move_to_folder(msg_id, target_folder)
+        return target_folder
 
     def move_to_trash(self, msg_id: str) -> None:
         """Move a message to Trash (or permanently delete if already in Trash)."""

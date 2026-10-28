@@ -844,6 +844,57 @@ class IMAPClient:
             logger.warning("Failed to unsubscribe from IMAP folder %s: %s", folder, exc)
             return False
 
+    def move_message(self, source_folder: str, uid: int, target_folder: str) -> bool:
+        """Move an email UID from source_folder to target_folder using IMAP MOVE (RFC 6851) or COPY+DELETE."""
+        if self._conn is None:
+            try:
+                self.connect()
+            except Exception as exc:
+                logger.error("Failed to connect to IMAP to move message UID %s: %s", uid, exc)
+                return False
+        if not self._select_mailbox(source_folder, readonly=False):
+            logger.warning("Failed to select source mailbox '%s' to move UID %s", source_folder, uid)
+            return False
+        clean_target = target_folder.strip()
+        quoted_target = clean_target if (clean_target.startswith('"') and clean_target.endswith('"')) else f'"{clean_target}"'
+        try:
+            # Check RFC 6851 MOVE capability
+            if self.has_capability("MOVE"):
+                res_status, _ = self._conn.uid("MOVE", str(uid), quoted_target)
+                if res_status == "OK":
+                    return True
+            # Fallback: COPY then mark \Deleted and EXPUNGE
+            res_status, _ = self._conn.uid("COPY", str(uid), quoted_target)
+            if res_status == "OK":
+                self._conn.uid("STORE", str(uid), "+FLAGS", r"(\Deleted)")
+                self._conn.expunge()
+                return True
+            return False
+        except Exception as exc:
+            logger.error("Error moving UID %s from '%s' to '%s': %s", uid, source_folder, target_folder, exc)
+            return False
+
+    def delete_message(self, folder: str, uid: int) -> bool:
+        """Mark an email UID as \\Deleted and EXPUNGE from folder."""
+        if self._conn is None:
+            try:
+                self.connect()
+            except Exception as exc:
+                logger.error("Failed to connect to IMAP to delete message UID %s: %s", uid, exc)
+                return False
+        if not self._select_mailbox(folder, readonly=False):
+            logger.warning("Failed to select mailbox '%s' to delete UID %s", folder, uid)
+            return False
+        try:
+            res_status, _ = self._conn.uid("STORE", str(uid), "+FLAGS", r"(\Deleted)")
+            if res_status == "OK":
+                self._conn.expunge()
+                return True
+            return False
+        except Exception as exc:
+            logger.error("Error deleting UID %s from '%s': %s", uid, folder, exc)
+            return False
+
     def sync_to_store(
         self,
         store: LocalStore,

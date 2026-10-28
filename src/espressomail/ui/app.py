@@ -100,6 +100,8 @@ from espressomail.ui.modals import (
     DownloadAttachmentsModal,
     HelpModal,
     ModalClosedMsg,
+    MoveFolderModal,
+    MoveFolderSubmittedMsg,
     PGPModal,
     PreferencesModal,
     PreferencesSavedMsg,
@@ -287,6 +289,7 @@ class EspressoMailApp(Model):
         self.message_rows: list[MessageListRow] = []
         self.message_cursor = 0
         self.message_scroll = 0
+        self.selected_message_ids: set[str] = set()
 
         self.reader_viewport = Viewport(width=50, height=24)
         self._last_rendered_msg_key = ""
@@ -446,6 +449,12 @@ class EspressoMailApp(Model):
     def _build_command_palette(self) -> CommandPalette:
         items = [
             PaletteItem("compose", "Mail: Compose New Message", "Open email composer", "c", "Mail"),
+            PaletteItem("archive_msg", "Mail: Archive Message", "Archive message and advance to next", "e / y", "Mail"),
+            PaletteItem("trash_msg", "Mail: Move to Trash", "Move message to trash (or delete permanently)", "d / #", "Mail"),
+            PaletteItem("spam_msg", "Mail: Mark as Spam / Junk", "Move message to Spam folder", "J", "Mail"),
+            PaletteItem("move_to_folder", "Mail: Move to Folder...", "Select mailbox folder to move email into", "v", "Mail"),
+            PaletteItem("toggle_star", "Mail: Star / Unstar Message", "Toggle star/flag on selected email", "s", "Mail"),
+            PaletteItem("toggle_read", "Mail: Mark Read / Unread", "Toggle read status on selected email", "u", "Mail"),
             PaletteItem("reply", "Mail: Reply to Sender", "Reply to selected message", "r", "Mail"),
             PaletteItem("reply_all", "Mail: Reply All", "Reply to all recipients", "R", "Mail"),
             PaletteItem("forward", "Mail: Forward Message", "Forward selected message", "f", "Mail"),
@@ -806,6 +815,9 @@ class EspressoMailApp(Model):
                 )
 
         self.message_rows = rows
+        if hasattr(self, "selected_message_ids") and self.selected_message_ids:
+            valid_ids = {r.message.id for r in rows}
+            self.selected_message_ids &= valid_ids
         if self.message_rows:
             if cur_id:
                 for idx, r in enumerate(self.message_rows):
@@ -1068,6 +1080,16 @@ class EspressoMailApp(Model):
                     self.status_message = "⟳ Synchronizing IMAP accounts in background..."
                     return self, self._sync_accounts_cmd
                 return self, None
+            if isinstance(msg, MoveFolderSubmittedMsg):
+                self.active_modal = None
+                self.store.move_to_folder(msg.message_id, msg.target_folder)
+                self.refresh_data()
+                remaining = len(self.message_rows)
+                self.status_message = f"Moved message to '{msg.target_folder}' ({remaining} remaining)."
+                adv_cmd = self._on_message_selection_changed(mark_read=True)
+                sync_cmd = self._make_move_msg_cmd(msg.account_id, msg.source_folder, msg.uid, msg.target_folder)
+                cmds = [c for c in (adv_cmd, sync_cmd) if c is not None]
+                return self, batch(*cmds) if cmds else None
             if isinstance(msg, ComposeSubmittedMsg):
                 return self._handle_compose_submitted(msg)
             if isinstance(msg, RSVPSubmittedMsg):
@@ -1088,7 +1110,7 @@ class EspressoMailApp(Model):
             self.active_modal, cmd = self.active_modal.update(msg)
             if cmd is not None and callable(cmd):
                 emitted = cmd()
-                if isinstance(emitted, (ModalClosedMsg, ComposeSubmittedMsg, SearchSelectMessageMsg, ComposeToContactMsg, PreferencesSavedMsg, RSVPSubmittedMsg)):
+                if isinstance(emitted, (ModalClosedMsg, ComposeSubmittedMsg, SearchSelectMessageMsg, ComposeToContactMsg, PreferencesSavedMsg, RSVPSubmittedMsg, MoveFolderSubmittedMsg)):
                     return self.update(emitted)
                 if cmd is quit_app or (hasattr(emitted, "__class__") and emitted.__class__.__name__ == "QuitMsg"):
                     return self, quit_app
@@ -1323,12 +1345,16 @@ class EspressoMailApp(Model):
             return self._execute_action("toggle_unread_filter")
         if k in ("M", "ctrl+m"):
             return self._execute_action("fetch_more")
-        if k == "e":
+        if k in ("e", "y"):
             if self.focused_pane == "folders":
                 return self._execute_action("account_settings")
             return self._execute_action("archive_msg")
-        if k in ("d", "delete"):
+        if k in ("d", "#", "delete"):
             return self._execute_action("trash_msg")
+        if k == "J":
+            return self._execute_action("spam_msg")
+        if k == "v":
+            return self._execute_action("move_to_folder")
         if k == "X":
             return self._execute_action("empty_trash")
         if k == "w":
@@ -1480,6 +1506,20 @@ class EspressoMailApp(Model):
                 self.message_cursor = len(self.message_rows) - 1
                 cmd = self._on_message_selection_changed()
                 return self, cmd
+            elif k == "x" and self.message_rows:
+                m = self.selected_message
+                if m:
+                    if m.id in self.selected_message_ids:
+                        self.selected_message_ids.remove(m.id)
+                        self.status_message = f"Deselected '{m.subject[:30]}' ({len(self.selected_message_ids)} selected)."
+                    else:
+                        self.selected_message_ids.add(m.id)
+                        self.status_message = f"Selected '{m.subject[:30]}' ({len(self.selected_message_ids)} selected). Press 'e' to archive or 'd' to trash."
+                    if self.message_cursor < len(self.message_rows) - 1:
+                        self.message_cursor += 1
+                        cmd = self._on_message_selection_changed(mark_read=False)
+                        return self, cmd
+                return self, None
             elif k in ("enter", " ", "space", "l", "right"):
                 m = self.selected_message
                 if m and m.is_draft:
@@ -1492,8 +1532,6 @@ class EspressoMailApp(Model):
             return self, None
 
         if self.focused_pane == "reader":
-            if k in ("v", "x") and self.selected_message:
-                return self._execute_action("pgp_manager")
             self.reader_viewport, cmd = self.reader_viewport.update(msg)
             return self, cmd
 
@@ -1834,6 +1872,46 @@ class EspressoMailApp(Model):
                     success=False,
                     error=str(exc),
                 )
+
+        return _runner
+
+    def _make_move_msg_cmd(
+        self, account_id: str, source_folder: str, uid: int, target_folder: str
+    ) -> Cmd | None:
+        """Create a background TEA command to move an email UID on the remote IMAP server."""
+        if not account_id or account_id == "*" or uid <= 0 or not source_folder:
+            return None
+        acc = self.store.get_account(account_id)
+        if not acc or not acc.imap_password:
+            return None
+
+        def _runner() -> Msg | None:
+            try:
+                with IMAPClient(acc, timeout=15.0) as client:
+                    client.move_message(source_folder, uid, target_folder)
+            except Exception as exc:
+                logger.error("Failed to move remote IMAP message %s to %s: %s", uid, target_folder, exc)
+            return None
+
+        return _runner
+
+    def _make_delete_msg_cmd(
+        self, account_id: str, folder: str, uid: int
+    ) -> Cmd | None:
+        """Create a background TEA command to delete an email UID on the remote IMAP server."""
+        if not account_id or account_id == "*" or uid <= 0 or not folder:
+            return None
+        acc = self.store.get_account(account_id)
+        if not acc or not acc.imap_password:
+            return None
+
+        def _runner() -> Msg | None:
+            try:
+                with IMAPClient(acc, timeout=15.0) as client:
+                    client.delete_message(folder, uid)
+            except Exception as exc:
+                logger.error("Failed to delete remote IMAP message %s from %s: %s", uid, folder, exc)
+            return None
 
         return _runner
 
@@ -2189,23 +2267,121 @@ class EspressoMailApp(Model):
             return self, None
 
         if action_id == "archive_msg":
-            m = self.selected_message
-            if m:
-                self.store.move_to_folder(m.id, "Archive")
+            if self.selected_message_ids:
+                targets = [self.store.get_message(mid) for mid in list(self.selected_message_ids)]
+                valid_targets = [m for m in targets if m is not None]
+                self.selected_message_ids.clear()
+            else:
+                m = self.selected_message
+                valid_targets = [m] if m else []
+
+            if valid_targets:
+                cmds: list[Cmd] = []
+                for m in valid_targets:
+                    src = m.folder
+                    tgt = self.store.archive_message(m.id)
+                    cmd = self._make_move_msg_cmd(m.account_id, src, m.uid, tgt)
+                    if cmd is not None:
+                        cmds.append(cmd)
                 self.refresh_data()
-                self.status_message = f"Archived '{m.subject[:36]}'."
+                remaining = len(self.message_rows)
+                if len(valid_targets) == 1:
+                    m = valid_targets[0]
+                    subj = m.subject[:32] if m.subject else "(no subject)"
+                    msg_text = f"Archived '{subj}'. Inbox zero!" if remaining == 0 else f"Archived '{subj}' ({remaining} remaining)."
+                else:
+                    msg_text = f"Archived {len(valid_targets)} messages. Inbox zero!" if remaining == 0 else f"Archived {len(valid_targets)} messages ({remaining} remaining)."
+                self.status_message = msg_text
+                adv_cmd = self._on_message_selection_changed(mark_read=True)
+                if adv_cmd is not None:
+                    cmds.append(adv_cmd)
+                return self, batch(*cmds) if cmds else None
             return self, None
 
         if action_id == "trash_msg":
-            m = self.selected_message
-            if m:
-                if m.is_trashed or m.folder == "Trash":
-                    self.store.delete_message_permanently(m.id)
-                    self.status_message = f"Permanently deleted '{m.subject[:36]}'."
-                else:
-                    self.store.move_to_trash(m.id)
-                    self.status_message = f"Moved '{m.subject[:36]}' to Trash."
+            if self.selected_message_ids:
+                targets = [self.store.get_message(mid) for mid in list(self.selected_message_ids)]
+                valid_targets = [m for m in targets if m is not None]
+                self.selected_message_ids.clear()
+            else:
+                m = self.selected_message
+                valid_targets = [m] if m else []
+
+            if valid_targets:
+                cmds: list[Cmd] = []
+                for m in valid_targets:
+                    src = m.folder
+                    if m.is_trashed or m.folder.lower() == "trash":
+                        self.store.delete_message_permanently(m.id)
+                        cmd = self._make_delete_msg_cmd(m.account_id, src, m.uid)
+                    else:
+                        self.store.move_to_trash(m.id)
+                        cmd = self._make_move_msg_cmd(m.account_id, src, m.uid, "Trash")
+                    if cmd is not None:
+                        cmds.append(cmd)
                 self.refresh_data()
+                remaining = len(self.message_rows)
+                if len(valid_targets) == 1:
+                    m = valid_targets[0]
+                    subj = m.subject[:32] if m.subject else "(no subject)"
+                    msg_text = f"Moved '{subj}' to Trash. Inbox zero!" if remaining == 0 else f"Moved '{subj}' to Trash ({remaining} remaining)."
+                else:
+                    msg_text = f"Moved {len(valid_targets)} messages to Trash. Inbox zero!" if remaining == 0 else f"Moved {len(valid_targets)} messages to Trash ({remaining} remaining)."
+                self.status_message = msg_text
+                adv_cmd = self._on_message_selection_changed(mark_read=True)
+                if adv_cmd is not None:
+                    cmds.append(adv_cmd)
+                return self, batch(*cmds) if cmds else None
+            return self, None
+
+        if action_id == "spam_msg":
+            if self.selected_message_ids:
+                targets = [self.store.get_message(mid) for mid in list(self.selected_message_ids)]
+                valid_targets = [m for m in targets if m is not None]
+                self.selected_message_ids.clear()
+            else:
+                m = self.selected_message
+                valid_targets = [m] if m else []
+
+            if valid_targets:
+                cmds: list[Cmd] = []
+                for m in valid_targets:
+                    src = m.folder
+                    tgt = self.store.move_to_spam(m.id)
+                    cmd = self._make_move_msg_cmd(m.account_id, src, m.uid, tgt)
+                    if cmd is not None:
+                        cmds.append(cmd)
+                self.refresh_data()
+                remaining = len(self.message_rows)
+                if len(valid_targets) == 1:
+                    m = valid_targets[0]
+                    subj = m.subject[:32] if m.subject else "(no subject)"
+                    msg_text = f"Marked as Spam: '{subj}'. Inbox zero!" if remaining == 0 else f"Marked as Spam: '{subj}' ({remaining} remaining)."
+                else:
+                    msg_text = f"Marked {len(valid_targets)} messages as Spam. Inbox zero!" if remaining == 0 else f"Marked {len(valid_targets)} messages as Spam ({remaining} remaining)."
+                self.status_message = msg_text
+                adv_cmd = self._on_message_selection_changed(mark_read=True)
+                if adv_cmd is not None:
+                    cmds.append(adv_cmd)
+                return self, batch(*cmds) if cmds else None
+            return self, None
+
+        if action_id == "move_to_folder":
+            m = self.selected_message
+            if not m:
+                self.status_message = "No message selected to move."
+                return self, None
+            acc = self.store.get_account(m.account_id) or (
+                self.store.list_accounts()[0] if self.store.list_accounts() else None
+            )
+            folders = self.store.list_folders(m.account_id) if m.account_id != "*" else self.store.list_folders()
+            selectable = [f for f in folders if f.name]
+            self.active_modal = MoveFolderModal(
+                account=acc,
+                folders=selectable,
+                message=m,
+                theme=self.theme,
+            )
             return self, None
 
         if action_id == "empty_trash":
@@ -2944,7 +3120,11 @@ class EspressoMailApp(Model):
                 m = row.message
                 is_sel = abs_idx == self.message_cursor
 
-                unread_ch = "●" if not m.is_read else " "
+                is_checked = hasattr(self, "selected_message_ids") and m.id in self.selected_message_ids
+                if is_checked:
+                    unread_ch = "✓"
+                else:
+                    unread_ch = "●" if not m.is_read else " "
                 star_ch = "★" if m.is_starred else " "
                 att_ch = "📎 " if m.has_attachments else ""
                 pgp_ch = "🔒 " if m.pgp_status != PGPStatus.NONE else ""
@@ -3136,11 +3316,15 @@ class EspressoMailApp(Model):
                 priority=2,
             )
         )
+        if self.focused_pane in ("messages", "reader"):
+            center_text = "[c]Compose [e]Archive [d]Trash [s]Star [u]Read [v]Move [?]Help"
+        else:
+            center_text = "[c]Compose [/]Search [r]Reply [t]Threads [i]Img [?]Help"
         bar = StatusBar(
             left=left_sections,
             center=[
                 StatusSection(
-                    "[c]Compose [/]Search [r]Reply [t]Threads [i]Img [?]Help",
+                    center_text,
                     style=Style().foreground(self.theme.fg_muted),
                     priority=1,
                 )
