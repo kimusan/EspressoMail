@@ -37,46 +37,33 @@ if command -v makepkg &>/dev/null; then
         makepkg -f --nodeps
     )
     find "${BUILD_DIR}" -name "*.pkg.tar.*" -exec cp {} "${OUTPUT_DIR}/" \;
-elif command -v docker &>/dev/null && ([ -n "${CI:-}" ] || [ -n "$(docker images -q archlinux:latest 2>/dev/null)" ]); then
-    echo "Building Arch package using Docker archlinux:latest container..."
-    chmod -R 777 "${BUILD_DIR}"
-    docker run --rm \
-        -v "${BUILD_DIR}:/pkg" \
-        -w /pkg \
-        archlinux:latest \
-        bash -c "
-            pacman -Syu --noconfirm base-devel binutils zstd > /dev/null 2>&1
-            useradd -m builder
-            chown -R builder:builder /pkg
-            su builder -c 'makepkg -f --nodeps'
-        "
-    find "${BUILD_DIR}" -name "*.pkg.tar.*" -exec cp {} "${OUTPUT_DIR}/" \;
-else
-    echo "Warning: Neither 'makepkg' nor 'docker' is available. Creating Arch package via bsdtar/tar..."
-    # Fallback to tar+zstd package assembly
-    (
-        cd "${BUILD_DIR}"
-        PKG_ROOT="${BUILD_DIR}/pkg"
-        mkdir -p "${PKG_ROOT}/usr/bin"
-        mkdir -p "${PKG_ROOT}/usr/share/applications"
-        mkdir -p "${PKG_ROOT}/usr/share/icons/hicolor/scalable/apps"
-        mkdir -p "${PKG_ROOT}/usr/share/licenses/espressomail"
-        mkdir -p "${PKG_ROOT}/usr/share/doc/espressomail"
+elif command -v bsdtar &>/dev/null && command -v zstd &>/dev/null; then
+    echo "Building Arch package using bsdtar and zstd..."
+    PKG_ROOT="${BUILD_DIR}/pkg"
+    mkdir -p "${PKG_ROOT}/usr/bin"
+    mkdir -p "${PKG_ROOT}/usr/share/applications"
+    mkdir -p "${PKG_ROOT}/usr/share/icons/hicolor/scalable/apps"
+    mkdir -p "${PKG_ROOT}/usr/share/licenses/espressomail"
+    mkdir -p "${PKG_ROOT}/usr/share/doc/espressomail"
 
-        install -m 755 espressomail "${PKG_ROOT}/usr/bin/espressomail"
-        install -m 644 espressomail.desktop "${PKG_ROOT}/usr/share/applications/espressomail.desktop"
-        install -m 644 espressomail.svg "${PKG_ROOT}/usr/share/icons/hicolor/scalable/apps/espressomail.svg"
-        install -m 644 LICENSE "${PKG_ROOT}/usr/share/licenses/espressomail/LICENSE"
-        install -m 644 README.md "${PKG_ROOT}/usr/share/doc/espressomail/README.md"
+    install -m 755 "${BINARY_PATH}" "${PKG_ROOT}/usr/bin/espressomail"
+    install -m 644 "${REPO_ROOT}/packaging/espressomail.desktop" "${PKG_ROOT}/usr/share/applications/espressomail.desktop"
+    install -m 644 "${REPO_ROOT}/packaging/icons/espressomail.svg" "${PKG_ROOT}/usr/share/icons/hicolor/scalable/apps/espressomail.svg"
+    install -m 644 "${REPO_ROOT}/LICENSE" "${PKG_ROOT}/usr/share/licenses/espressomail/LICENSE"
+    install -m 644 "${REPO_ROOT}/README.md" "${PKG_ROOT}/usr/share/doc/espressomail/README.md"
 
-        cat <<EOF > "${PKG_ROOT}/.PKGINFO"
+    INSTALLED_SIZE=$(du -sb "${PKG_ROOT}" | cut -f1)
+    BUILD_DATE=$(date +%s)
+
+    cat <<EOF > "${PKG_ROOT}/.PKGINFO"
 pkgname = espressomail
+pkgbase = espressomail
 pkgver = ${VERSION}-1
 pkgdesc = A modern, multi-account terminal email client built on Espresso TUI
 url = https://github.com/kimusan/EspressoMail
-builddate = $(date +%s)
+builddate = ${BUILD_DATE}
 packager = Kim Schulz <kim@schulz.dk>
-size = $(du -sb "${PKG_ROOT}" | cut -f1)
+size = ${INSTALLED_SIZE}
 arch = x86_64
 license = MIT
 depend = glibc
@@ -85,8 +72,53 @@ optdepend = gnupg: PGP/GPG email signing and encryption
 provides = espressomail
 conflict = espressomail
 EOF
+
+    (
         cd "${PKG_ROOT}"
-        tar -c -f - .PKGINFO usr | zstd -c -T0 > "${OUTPUT_DIR}/espressomail-${VERSION}-1-x86_64.pkg.tar.zst"
+        LANG=C bsdtar -czf .MTREE --format=mtree \
+            --options='!all,use-set,type,uid,gid,mode,time,size,sha256,link' \
+            .PKGINFO usr
+        bsdtar --uid 0 --gid 0 -cf - .PKGINFO .MTREE usr | zstd -c -T0 > "${OUTPUT_DIR}/espressomail-${VERSION}-1-x86_64.pkg.tar.zst"
+    )
+else
+    echo "Building Arch package using tar and zstd..."
+    PKG_ROOT="${BUILD_DIR}/pkg"
+    mkdir -p "${PKG_ROOT}/usr/bin"
+    mkdir -p "${PKG_ROOT}/usr/share/applications"
+    mkdir -p "${PKG_ROOT}/usr/share/icons/hicolor/scalable/apps"
+    mkdir -p "${PKG_ROOT}/usr/share/licenses/espressomail"
+    mkdir -p "${PKG_ROOT}/usr/share/doc/espressomail"
+
+    install -m 755 "${BINARY_PATH}" "${PKG_ROOT}/usr/bin/espressomail"
+    install -m 644 "${REPO_ROOT}/packaging/espressomail.desktop" "${PKG_ROOT}/usr/share/applications/espressomail.desktop"
+    install -m 644 "${REPO_ROOT}/packaging/icons/espressomail.svg" "${PKG_ROOT}/usr/share/icons/hicolor/scalable/apps/espressomail.svg"
+    install -m 644 "${REPO_ROOT}/LICENSE" "${PKG_ROOT}/usr/share/licenses/espressomail/LICENSE"
+    install -m 644 "${REPO_ROOT}/README.md" "${PKG_ROOT}/usr/share/doc/espressomail/README.md"
+
+    INSTALLED_SIZE=$(du -sb "${PKG_ROOT}" | cut -f1)
+    BUILD_DATE=$(date +%s)
+
+    cat <<EOF > "${PKG_ROOT}/.PKGINFO"
+pkgname = espressomail
+pkgbase = espressomail
+pkgver = ${VERSION}-1
+pkgdesc = A modern, multi-account terminal email client built on Espresso TUI
+url = https://github.com/kimusan/EspressoMail
+builddate = ${BUILD_DATE}
+packager = Kim Schulz <kim@schulz.dk>
+size = ${INSTALLED_SIZE}
+arch = x86_64
+license = MIT
+depend = glibc
+optdepend = chafa: high-resolution inline terminal image rendering
+optdepend = gnupg: PGP/GPG email signing and encryption
+provides = espressomail
+conflict = espressomail
+EOF
+
+    (
+        cd "${PKG_ROOT}"
+        tar --owner=0 --group=0 --numeric-owner -cf - .PKGINFO usr | zstd -c -T0 > "${OUTPUT_DIR}/espressomail-${VERSION}-1-x86_64.pkg.tar.zst"
     )
 fi
 
