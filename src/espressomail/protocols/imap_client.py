@@ -7,12 +7,16 @@ import email
 import email.header
 import email.utils
 import imaplib
+import logging
 import re
 import ssl
+import types
 import uuid
 from datetime import datetime, timezone
 from email.message import Message
 from typing import Any, Sequence
+
+logger = logging.getLogger("espressomail.imap")
 
 from espressomail.models.entities import (
     AccountConfig,
@@ -363,8 +367,22 @@ class IMAPClient:
         self.timeout = timeout
         self._conn: imaplib.IMAP4 | None = None
 
+    def __enter__(self) -> IMAPClient:
+        self.connect()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: types.TracebackType | None,
+    ) -> None:
+        self.disconnect()
+
     def connect(self) -> None:
         """Connect and authenticate to the configured IMAP server."""
+        if self._conn is not None:
+            return
         if not self.account.imap_host.strip():
             raise ValueError("IMAP host is required.")
         if not self.account.imap_username.strip() or not self.account.imap_password:
@@ -459,11 +477,20 @@ class IMAPClient:
                 except Exception:
                     continue
 
-        # Also query subscribed folders (lsub) to ensure no user folders are missed
+        # Also query subscribed folders (lsub) to detect which mailboxes are subscribed on server
+        subscribed_names: set[str] = set()
+        has_lsub_data = False
         try:
             l_status, l_res = self._conn.lsub()
             if l_status == "OK" and l_res:
+                has_lsub_data = True
                 data.extend(l_res)
+                for item in l_res:
+                    parsed_lsub = parse_imap_list_response(item)
+                    if parsed_lsub:
+                        _, _, raw_lsub_name = parsed_lsub
+                        l_clean = "INBOX" if raw_lsub_name.upper() == "INBOX" else raw_lsub_name
+                        subscribed_names.add(l_clean)
         except Exception:
             pass
 
@@ -492,6 +519,19 @@ class IMAPClient:
                 display = parts[-1] if parts else name
 
             ftype = classify_folder_type(parts, flags_lower)
+            is_std = ftype in (
+                FolderType.INBOX,
+                FolderType.SENT,
+                FolderType.DRAFTS,
+                FolderType.TRASH,
+                FolderType.SPAM,
+                FolderType.ARCHIVE,
+            )
+            if has_lsub_data and subscribed_names:
+                is_sub = (name in subscribed_names) or is_std
+            else:
+                is_sub = True
+
             folders.append(
                 Folder(
                     id=f"{self.account.id}:{name}",
@@ -500,6 +540,7 @@ class IMAPClient:
                     display_name=display or name,
                     folder_type=ftype,
                     selectable=not is_noselect,
+                    subscribed=is_sub,
                 )
             )
         return folders
@@ -617,13 +658,60 @@ class IMAPClient:
 
     def set_flag(self, folder: str, uid: int, flag: str, enable: bool = True) -> bool:
         """Add or remove an IMAP flag (e.g. \\Seen, \\Flagged, \\Deleted) by message UID."""
-        if self._conn is None or uid <= 0:
+        if uid <= 0:
             return False
+        if self._conn is None:
+            try:
+                self.connect()
+            except Exception as exc:
+                logger.error("Failed to connect to IMAP server to set flag %s: %s", flag, exc)
+                return False
         if not self._select_mailbox(folder, readonly=False):
+            logger.warning("Failed to select mailbox '%s' to set flag %s for UID %s", folder, flag, uid)
             return False
         cmd = "+FLAGS" if enable else "-FLAGS"
-        res_status, _ = self._conn.uid("STORE", str(uid), cmd, f"({flag})")
-        return res_status == "OK"
+        try:
+            res_status, _ = self._conn.uid("STORE", str(uid), cmd, f"({flag})")
+            if res_status != "OK":
+                logger.warning("IMAP STORE command returned %s for UID %s flag %s", res_status, uid, flag)
+            return res_status == "OK"
+        except Exception as exc:
+            logger.error("Error setting flag %s on UID %s in '%s': %s", flag, uid, folder, exc)
+            return False
+
+    def subscribe_folder(self, folder: str) -> bool:
+        """Issue IMAP SUBSCRIBE command for the specified mailbox folder."""
+        if self._conn is None:
+            try:
+                self.connect()
+            except Exception as exc:
+                logger.error("Failed to connect to IMAP to subscribe folder %s: %s", folder, exc)
+                return False
+        clean = folder.strip()
+        quoted = clean if (clean.startswith('"') and clean.endswith('"')) else f'"{clean}"'
+        try:
+            status, _ = self._conn.subscribe(quoted)
+            return status == "OK"
+        except Exception as exc:
+            logger.warning("Failed to subscribe to IMAP folder %s: %s", folder, exc)
+            return False
+
+    def unsubscribe_folder(self, folder: str) -> bool:
+        """Issue IMAP UNSUBSCRIBE command for the specified mailbox folder."""
+        if self._conn is None:
+            try:
+                self.connect()
+            except Exception as exc:
+                logger.error("Failed to connect to IMAP to unsubscribe folder %s: %s", folder, exc)
+                return False
+        clean = folder.strip()
+        quoted = clean if (clean.startswith('"') and clean.endswith('"')) else f'"{clean}"'
+        try:
+            status, _ = self._conn.unsubscribe(quoted)
+            return status == "OK"
+        except Exception as exc:
+            logger.warning("Failed to unsubscribe from IMAP folder %s: %s", folder, exc)
+            return False
 
     def sync_to_store(
         self,

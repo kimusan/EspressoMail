@@ -527,6 +527,64 @@ class TestProtocolsAndCrypto(unittest.TestCase):
         finally:
             store.close()
 
+    def test_imap_client_context_manager(self) -> None:
+        """Verify IMAPClient supports the context manager protocol (__enter__ and __exit__)."""
+        client = IMAPClient(self.account)
+        mock_conn = mock.MagicMock()
+
+        with mock.patch.object(client, "connect", return_value=mock_conn) as mock_connect, \
+             mock.patch.object(client, "disconnect") as mock_disconnect:
+            with client as ctx:
+                self.assertIs(ctx, client)
+                mock_connect.assert_called_once()
+                mock_disconnect.assert_not_called()
+            mock_disconnect.assert_called_once()
+
+    def test_imap_client_subscribe_and_unsubscribe(self) -> None:
+        """Verify subscribe_folder and unsubscribe_folder send quoted IMAP commands."""
+        client = IMAPClient(self.account)
+        mock_conn = mock.MagicMock()
+        mock_conn.subscribe.return_value = ("OK", [b"Completed"])
+        mock_conn.unsubscribe.return_value = ("OK", [b"Completed"])
+        client._conn = mock_conn
+
+        self.assertTrue(client.subscribe_folder("INBOX.Work"))
+        mock_conn.subscribe.assert_called_once_with('"INBOX.Work"')
+
+        self.assertTrue(client.unsubscribe_folder("INBOX.Work"))
+        mock_conn.unsubscribe.assert_called_once_with('"INBOX.Work"')
+
+    def test_logging_setup(self) -> None:
+        """Verify setup_logging configures file handler and logging level."""
+        import logging
+        import espressomail.logging_config as log_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "test_run.log"
+            orig_configured = log_mod._LOG_CONFIGURED
+            log_mod._LOG_CONFIGURED = False
+            root = logging.getLogger()
+            old_handlers = list(root.handlers)
+            root.handlers.clear()
+            try:
+                resolved = log_mod.setup_logging(debug=True, log_file=log_path)
+                self.assertEqual(resolved, log_path.resolve())
+
+                test_logger = logging.getLogger("espressomail.test")
+                test_logger.debug("Debug probe message")
+                test_logger.info("Info probe message")
+                for h in root.handlers:
+                    h.flush()
+
+                content = log_path.read_text(encoding="utf-8")
+                self.assertIn("Debug probe message", content)
+                self.assertIn("Info probe message", content)
+            finally:
+                for h in list(root.handlers):
+                    h.close()
+                root.handlers = old_handlers
+                log_mod._LOG_CONFIGURED = orig_configured
+
 
 if __name__ == "__main__":
     unittest.main()

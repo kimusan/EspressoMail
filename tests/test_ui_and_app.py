@@ -7,35 +7,41 @@ import tempfile
 import unittest
 from unittest import mock
 
-from espresso import KeyMsg, MouseAction, MouseButton, MouseMsg, WindowSizeMsg
+try:
+    from espresso import KeyMsg, MouseAction, MouseButton, MouseMsg, WindowSizeMsg
+    from espressomail.ui import (
+        PROVIDER_PRESETS,
+        AccountSettingsModal,
+        AddressBookModal,
+        ComposeModal,
+        DownloadAttachmentsModal,
+        EspressoMailApp,
+        ImageRenderBackend,
+        MoreMessagesFetchedMsg,
+        OnboardingCompleteMsg,
+        OnboardingWizard,
+        PreferencesModal,
+        PreferencesSavedMsg,
+        SieveModal,
+        SplashDoneMsg,
+        SplashScreen,
+        SplashTickMsg,
+        TerminalImageRenderer,
+        format_message_for_reading_pane,
+        html_to_terminal_text,
+    )
+    from espressomail.themes import ThemeEngine
+    HAS_ESPRESSO = True
+except ImportError:
+    HAS_ESPRESSO = False
+    ThemeEngine = None  # type: ignore[assignment,misc]
+
 from espressomail.models import AccountConfig, Contact, EmailMessage, Folder, FolderType
 from espressomail.storage import LocalStore
-from espressomail.themes import ThemeEngine
-from espressomail.ui import (
-    PROVIDER_PRESETS,
-    AccountSettingsModal,
-    AddressBookModal,
-    ComposeModal,
-    DownloadAttachmentsModal,
-    EspressoMailApp,
-    ImageRenderBackend,
-    MoreMessagesFetchedMsg,
-    OnboardingCompleteMsg,
-    OnboardingWizard,
-    PreferencesModal,
-    PreferencesSavedMsg,
-    SieveModal,
-    SplashDoneMsg,
-    SplashScreen,
-    SplashTickMsg,
-    TerminalImageRenderer,
-    format_message_for_reading_pane,
-    html_to_terminal_text,
-)
-from espressomail.ui.formatter import _apply_inline_formatting
 from tests.test_storage_and_search import populate_test_store
 
 
+@unittest.skipUnless(HAS_ESPRESSO, "espresso package not installed in environment")
 class TestUIAndApp(unittest.TestCase):
     def setUp(self) -> None:
         self.store = LocalStore(":memory:")

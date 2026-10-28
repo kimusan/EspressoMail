@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+logger = logging.getLogger("espressomail.app")
 
 from espresso import (
     Cmd,
@@ -283,6 +287,7 @@ class EspressoMailApp(Model):
         # Background sync state
         self.is_syncing: bool = False
         self.sync_progress_text: str = ""
+        self._last_folder_sync: dict[tuple[str, str], float] = {}
 
         # Command Palette (Ctrl+P)
         self.command_palette = self._build_command_palette()
@@ -1569,15 +1574,23 @@ class EspressoMailApp(Model):
                 if row.account_id != "*" and not row.subscribed:
                     acc = self.store.get_account(row.account_id)
                     if acc and acc.imap_password:
-                        sync_cmd = self._make_single_folder_sync_cmd(acc, row.folder_name)
-                        if cmd is not None:
-                            def _combined_cmd() -> Msg:
-                                c_res = cmd() if callable(cmd) else None
-                                s_res = sync_cmd() if callable(sync_cmd) else None
-                                return s_res or c_res
+                        now = time.time()
+                        last_sync = self._last_folder_sync.get((row.account_id, row.folder_name), 0.0)
+                        if now - last_sync > 60.0:
+                            self._last_folder_sync[(row.account_id, row.folder_name)] = now
+                            self.status_message = f"Opened {path_label} (unsubscribed — syncing now...)"
+                            logger.info("Triggering on-demand sync for unsubscribed folder: %s/%s", row.account_id, row.folder_name)
+                            sync_cmd = self._make_single_folder_sync_cmd(acc, row.folder_name)
+                            if cmd is not None:
+                                def _combined_cmd() -> Msg:
+                                    c_res = cmd() if callable(cmd) else None
+                                    s_res = sync_cmd() if callable(sync_cmd) else None
+                                    return s_res or c_res
 
-                            return _combined_cmd
-                        return sync_cmd
+                                return _combined_cmd
+                            return sync_cmd
+                        else:
+                            self.status_message = f"Opened {path_label} (unsubscribed — cached)"
                 return cmd
         return None
 
@@ -1623,7 +1636,9 @@ class EspressoMailApp(Model):
         def _runner() -> Msg:
             try:
                 with IMAPClient(acc, timeout=15.0) as client:
-                    client.set_flag(folder, uid, flag, enable)
+                    ok = client.set_flag(folder, uid, flag, enable)
+                    if not ok:
+                        logger.warning("IMAP server did not confirm flag %s for UID %s in '%s'", flag, uid, folder)
                 return FlagSyncedMsg(
                     account_id=account_id,
                     folder=folder,
@@ -1633,6 +1648,10 @@ class EspressoMailApp(Model):
                     success=True,
                 )
             except Exception as exc:
+                logger.error(
+                    "Failed to sync flag %s (enable=%s) for %s/%s UID %s: %s",
+                    flag, enable, account_id, folder, uid, exc, exc_info=True,
+                )
                 return FlagSyncedMsg(
                     account_id=account_id,
                     folder=folder,
@@ -1883,6 +1902,26 @@ class EspressoMailApp(Model):
                     self.refresh_data()
                     state_str = "Subscribed to" if new_sub else "Unsubscribed from"
                     self.status_message = f"{state_str} '{row.label}'"
+                    acc = self.store.get_account(row.account_id)
+                    if acc and acc.imap_password:
+                        target_folder = row.folder_name
+                        def _sync_sub_remote() -> Msg | None:
+                            try:
+                                with IMAPClient(acc, timeout=15.0) as client:
+                                    if new_sub:
+                                        client.subscribe_folder(target_folder)
+                                    else:
+                                        client.unsubscribe_folder(target_folder)
+                                logger.info(
+                                    "Synced IMAP %s for %s/%s",
+                                    "SUBSCRIBE" if new_sub else "UNSUBSCRIBE",
+                                    acc.id, target_folder,
+                                )
+                            except Exception as exc:
+                                logger.warning("Could not sync subscription state to IMAP: %s", exc)
+                            return None
+                        return self, _sync_sub_remote
+                    return self, None
                 else:
                     self.status_message = "Cannot toggle subscription for this item."
             return self, None
