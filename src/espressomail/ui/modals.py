@@ -39,6 +39,7 @@ from espressomail.models.entities import (
     SieveFilterRule,
     SieveScript,
 )
+from espressomail.keymaps import KEYMAP_PRESETS, KeymapManager
 from espressomail.protocols.carddav import CardDAVClient
 from espressomail.protocols.icalendar import CalendarEvent
 from espressomail.protocols.sieve import (
@@ -129,6 +130,7 @@ class PreferencesSavedMsg(Msg):
     notification_sound: bool = False
     auto_sync_interval: int = 300
     imap_push_enabled: bool = True
+    keymap_preset: str = "default"
 
 
 
@@ -1778,8 +1780,9 @@ class AccountSettingsModal(Model):
 class HelpModal(Model):
     """Comprehensive keyboard & mouse shortcut reference card."""
 
-    def __init__(self, theme: Theme) -> None:
+    def __init__(self, theme: Theme, keymap: KeymapManager | None = None) -> None:
         self.theme = theme
+        self.keymap = keymap
 
     def init(self) -> Cmd | None:
         return None
@@ -1796,39 +1799,48 @@ class HelpModal(Model):
         h_style = Style().bold(True).foreground(self.theme.accent_secondary)
         k_style = Style().bold(True).foreground(self.theme.accent_primary)
 
+        preset_str = f" [{self.keymap.preset.upper()}]" if self.keymap else ""
+
+        def _k(action: str, default: str) -> str:
+            if self.keymap:
+                keys = self.keymap.get_keys_for_action(action)
+                if keys:
+                    return " / ".join(keys[:2])
+            return default
+
         lines = [
             h_style.render("Navigation & Layout"),
             f"  {k_style.render('Tab / Shift+Tab')}   Cycle focus across Folders, Message List, and Reading Pane",
             f"  {k_style.render('j / k / ↑ / ↓')}     Navigate folders, threads, or scroll reading pane",
             f"  {k_style.render('Enter / Space')}     Select folder, open message, or expand/collapse thread",
             f"  {k_style.render('[ / ]')}             Resize splitter (widen reading pane / message list; or drag with mouse)",
-            f"  {k_style.render('U')}                 Jump directly to Unified Inbox (all accounts)",
+            f"  {k_style.render(_k('unified_inbox', 'U'))}                 Jump directly to Unified Inbox (all accounts)",
             f"  {k_style.render('F10 / m')}           Open interactive top drop-down Menu Bar",
             "",
             h_style.render("Inbox Zero & Single-Key Triaging"),
-            f"  {k_style.render('e / y')}  Archive message       {k_style.render('d / #')}  Move to Trash",
-            f"  {k_style.render('s')}      Toggle Star / Flag    {k_style.render('u')}      Toggle Read / Unread",
-            f"  {k_style.render('J')}      Mark as Spam / Junk   {k_style.render('v')}      Move to Folder...",
-            f"  {k_style.render('x')}      Select / mark message {k_style.render('Ctrl+U')} Toggle Unread Filter",
+            f"  {k_style.render(_k('archive_msg', 'e / y'))}  Archive message       {k_style.render(_k('trash_msg', 'd / #'))}  Move to Trash",
+            f"  {k_style.render(_k('toggle_star', 's'))}      Toggle Star / Flag    {k_style.render(_k('toggle_read', 'u'))}      Toggle Read / Unread",
+            f"  {k_style.render(_k('spam_msg', 'J'))}      Mark as Spam / Junk   {k_style.render(_k('move_to_folder', 'v'))}      Move to Folder...",
+            f"  {k_style.render(_k('select_message_toggle', 'x'))}      Select / mark message {k_style.render(_k('toggle_unread_filter', 'Ctrl+U'))} Toggle Unread Filter",
             "",
             h_style.render("Mail Actions"),
-            f"  {k_style.render('c')}  Compose new mail      {k_style.render('r / R')}  Reply / Reply All",
-            f"  {k_style.render('f')}  Forward message       {k_style.render('w')}      Save attachments",
-            f"  {k_style.render('1/2/3')} Calendar RSVP      {k_style.render('M')}      Fetch older messages",
-            f"  {k_style.render('S')}  Sync all accounts     {k_style.render('X')}      Empty Trash",
+            f"  {k_style.render(_k('compose', 'c'))}  Compose new mail      {k_style.render(_k('reply', 'r / R'))}  Reply / Reply All",
+            f"  {k_style.render(_k('forward', 'f'))}  Forward message       {k_style.render(_k('save_attachments', 'w'))}      Save attachments",
+            f"  {k_style.render('1/2/3')} Calendar RSVP      {k_style.render(_k('fetch_more', 'M'))}      Fetch older messages",
+            f"  {k_style.render(_k('sync_all', 'S'))}  Sync all accounts     {k_style.render(_k('empty_trash', 'X'))}      Empty Trash",
             "",
             h_style.render("Accounts, Search, Security, Filters & Settings"),
-            f"  {k_style.render('A')}      Edit Account Settings (Password, IMAP/SMTP hosts, ports, TLS)",
-            f"  {k_style.render('O')}      Add New Account (Onboarding Wizard)",
-            f"  {k_style.render('p')}      General Preferences (Downloads folder, image renderer, light/dark mode)",
-            f"  {k_style.render('/')}      Instant Fuzzy Search across local SQLite store",
-            f"  {k_style.render('t')}      Toggle Conversation Threading view",
-            f"  {k_style.render('i')}      Cycle Terminal Image Renderer (Chafa / Sixel / Kitty / Half-Block)",
-            f"  {k_style.render('B')}      Local Address Book    {k_style.render('F')}  ManageSieve Filters",
-            f"  {k_style.render('G')}      GPG/PGP Keyring       {k_style.render('Ctrl+P')} Command Palette",
-            f"  {k_style.render('q')}      Quit EspressoMail",
+            f"  {k_style.render(_k('account_settings', 'A'))}      Edit Account Settings (Password, IMAP/SMTP hosts, ports, TLS)",
+            f"  {k_style.render(_k('new_account', 'O'))}      Add New Account (Onboarding Wizard)",
+            f"  {k_style.render(_k('preferences', 'p'))}      General Preferences (Keymaps, Downloads, theme, dark/light)",
+            f"  {k_style.render(_k('fuzzy_search', '/'))}      Instant Fuzzy Search across local SQLite store",
+            f"  {k_style.render(_k('toggle_threading', 't'))}      Toggle Conversation Threading view",
+            f"  {k_style.render(_k('cycle_image_mode', 'i'))}      Cycle Terminal Image Renderer (Chafa / Sixel / Kitty / Half-Block)",
+            f"  {k_style.render(_k('address_book', 'B'))}      Local Address Book    {k_style.render(_k('sieve_filters', 'F'))}  ManageSieve Filters",
+            f"  {k_style.render(_k('pgp_manager', 'G'))}      GPG/PGP Keyring       {k_style.render('Ctrl+P')} Command Palette",
+            f"  {k_style.render(_k('quit_app', 'q'))}      Quit EspressoMail",
         ]
-        return self.theme.modal_style(modal_w, "⌨️ EspressoMail Keyboard & Mouse Shortcuts").render(
+        return self.theme.modal_style(modal_w, f"⌨️ EspressoMail Shortcuts{preset_str}").render(
             "\n".join(lines)
         )
 
@@ -2060,6 +2072,7 @@ class PreferencesModal(Model):
     FOLDER_COUNT_MODES: tuple[str, ...] = ("unread_only", "unread_and_total")
     FETCH_BATCH_SIZES: tuple[int, ...] = (25, 50, 100, 200)
     AUTO_SYNC_INTERVALS: tuple[int, ...] = (0, 60, 120, 180, 300, 600, 900, 1800, 3600)
+    KEYMAP_PRESETS: tuple[str, ...] = KEYMAP_PRESETS
     AUTO_SYNC_LABELS: dict[int, str] = {
         0: "Manual Only (Off)",
         60: "1 minute",
@@ -2083,7 +2096,7 @@ class PreferencesModal(Model):
     ) -> None:
         self.store = store
         self.current_theme = current_theme
-        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=color_mode, 4=threading, 5=raw_headers, 6=sync_startup, 7=remote_imgs, 8=count_mode, 9=batch_size, 10=notifications, 11=sound, 12=auto_sync, 13=imap_push, 14=buttons
+        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=color_mode, 4=threading, 5=raw_headers, 6=sync_startup, 7=remote_imgs, 8=count_mode, 9=batch_size, 10=notifications, 11=sound, 12=auto_sync, 13=imap_push, 14=keymap_preset, 15=buttons
         self.status_msg = ""
         self.error_msg = ""
 
@@ -2091,10 +2104,10 @@ class PreferencesModal(Model):
         self.last_app_w = 80
         self.last_app_h = 24
         self.last_modal_w = 68
-        self.last_modal_h = 22
+        self.last_modal_h = 23
         self.last_pos_x = 6
         self.last_pos_y = 3
-        self.buttons_row_offset = 15
+        self.buttons_row_offset = 16
 
         # Settings
         self.input_download_dir = TextInput(
@@ -2158,6 +2171,13 @@ class PreferencesModal(Model):
             else 4
         )
 
+        cur_kp = self.store.get_setting("keymap_preset", "default")
+        self.keymap_preset_idx = (
+            self.KEYMAP_PRESETS.index(cur_kp)
+            if cur_kp in self.KEYMAP_PRESETS
+            else 0
+        )
+
         self._sync_focus()
 
     def _get_active_theme_key(self) -> str:
@@ -2212,6 +2232,8 @@ class PreferencesModal(Model):
             self.sync_interval_idx = (self.sync_interval_idx + delta) % len(self.AUTO_SYNC_INTERVALS)
         elif row_idx == 13:
             self.imap_push_enabled = not self.imap_push_enabled
+        elif row_idx == 14:
+            self.keymap_preset_idx = (self.keymap_preset_idx + delta) % len(self.KEYMAP_PRESETS)
 
     def init(self) -> Cmd | None:
         return None
@@ -2236,14 +2258,14 @@ class PreferencesModal(Model):
                 # Mouse Wheel cycling
                 if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
                     delta = -1 if msg.button == MouseButton.WHEEL_UP else 1
-                    target_row = row_idx if 0 <= row_idx <= 13 else self.focus_idx
+                    target_row = row_idx if 0 <= row_idx <= 14 else self.focus_idx
                     self._cycle_row(target_row, delta)
                     return self, None
 
                 # Mouse Left Click
                 if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
                     # Check button row
-                    btn_row = getattr(self, "buttons_row_offset", 15)
+                    btn_row = getattr(self, "buttons_row_offset", 16)
                     if row_idx == btn_row:
                         # Save button is on left half, Cancel on right half
                         if rel_x < modal_w // 2:
@@ -2251,8 +2273,8 @@ class PreferencesModal(Model):
                         else:
                             return self, lambda: ModalClosedMsg("Closed preferences.")
 
-                    # Check setting rows (0 to 13)
-                    if 0 <= row_idx <= 13:
+                    # Check setting rows (0 to 14)
+                    if 0 <= row_idx <= 14:
                         self.focus_idx = row_idx
                         self._sync_focus()
                         # If clicked on left arrow or left side of option value, cycle backwards; else forwards
@@ -2269,21 +2291,21 @@ class PreferencesModal(Model):
                 return self, lambda: ModalClosedMsg("Closed preferences.")
 
             if k in ("enter", "ctrl+s"):
-                if self.focus_idx == 14:
+                if self.focus_idx == 15:
                     return self._save_preferences()
                 return self._save_preferences()
 
             if k in ("tab", "down"):
-                self.focus_idx = (self.focus_idx + 1) % 15
+                self.focus_idx = (self.focus_idx + 1) % 16
                 self._sync_focus()
                 return self, None
             if k in ("shift+tab", "up"):
-                self.focus_idx = (self.focus_idx - 1) % 15
+                self.focus_idx = (self.focus_idx - 1) % 16
                 self._sync_focus()
                 return self, None
 
             # Cycling / toggling options via arrows / space / h / l
-            if 1 <= self.focus_idx <= 13 and k in ("left", "right", "h", "l", " ", "space"):
+            if 1 <= self.focus_idx <= 14 and k in ("left", "right", "h", "l", " ", "space"):
                 delta = 1 if k in ("right", "l", " ", "space") else -1
                 self._cycle_row(self.focus_idx, delta)
                 return self, None
@@ -2313,6 +2335,7 @@ class PreferencesModal(Model):
         backend_val = self.IMAGE_BACKENDS[self.backend_idx]
         count_mode_val = self.FOLDER_COUNT_MODES[self.count_mode_idx]
         batch_val = self.FETCH_BATCH_SIZES[self.batch_idx]
+        keymap_val = self.KEYMAP_PRESETS[self.keymap_preset_idx]
 
         self.store.set_setting("download_dir", str(p))
         self.store.set_setting("image_backend", backend_val)
@@ -2329,6 +2352,7 @@ class PreferencesModal(Model):
         sync_interval_val = self.AUTO_SYNC_INTERVALS[self.sync_interval_idx]
         self.store.set_setting("auto_sync_interval", str(sync_interval_val))
         self.store.set_setting("imap_push_enabled", "1" if self.imap_push_enabled else "0")
+        self.store.set_setting("keymap_preset", keymap_val)
 
         return self, lambda: PreferencesSavedMsg(
             download_dir=str(p),
@@ -2344,6 +2368,7 @@ class PreferencesModal(Model):
             notification_sound=self.notification_sound,
             auto_sync_interval=sync_interval_val,
             imap_push_enabled=self.imap_push_enabled,
+            keymap_preset=keymap_val,
         )
 
     def view(self, width: int = 80, height: int = 24) -> str:
@@ -2415,6 +2440,10 @@ class PreferencesModal(Model):
         push_val = "[x] Enabled (Real-time)" if self.imap_push_enabled else "[ ] Disabled"
         rows.append(f"IMAP Push (IDLE):     {_opt_style(13, push_val)}")
 
+        # Row 14: Keyboard Shortcuts Preset
+        cur_kp = self.KEYMAP_PRESETS[self.keymap_preset_idx].upper()
+        rows.append(f"Keyboard Shortcuts:    ◀ {_opt_style(14, cur_kp)} ▶")
+
         if self.error_msg:
             rows.append("")
             rows.append(
@@ -2424,8 +2453,8 @@ class PreferencesModal(Model):
         rows.append("")
         self.buttons_row_offset = len(rows)
 
-        # Row 14 (or buttons row)
-        save_focused = (self.focus_idx == 14)
+        # Row 15: Buttons row
+        save_focused = (self.focus_idx == 15)
         save_btn = (
             Style().bold(True).background(self.current_theme.accent_primary).foreground(self.current_theme.bg_primary).render(" [ Save Preferences (Enter) ] ")
             if save_focused

@@ -52,6 +52,7 @@ from espresso.crema import (
 )
 
 from espressomail.crypto.pgp import PGPManager
+from espressomail.keymaps import KeymapManager
 from espressomail.models.entities import (
     AccountConfig,
     Contact,
@@ -254,6 +255,7 @@ class EspressoMailApp(Model):
         self.pgp = PGPManager()
         self.toasts = ToastManager()
         self.menu_bar = MenuBar()
+        self.keymap = KeymapManager.load_from_store(self.store)
 
         self.width = 120
         self.height = 34
@@ -1047,10 +1049,13 @@ class EspressoMailApp(Model):
             self.auto_sync_interval = msg.auto_sync_interval
             old_push = self.imap_push_enabled
             self.imap_push_enabled = msg.imap_push_enabled
+            if getattr(msg, "keymap_preset", None):
+                self.keymap.set_preset(msg.keymap_preset)
+                self.keymap.save_to_store(self.store)
             self.refresh_data()
             self.status_message = (
                 f"✔ Saved preferences: theme={msg.theme}, renderer={msg.image_backend}, "
-                f"batch={msg.fetch_batch_size}, auto-sync={msg.auto_sync_interval}s, push={msg.imap_push_enabled}"
+                f"batch={msg.fetch_batch_size}, auto-sync={msg.auto_sync_interval}s, push={msg.imap_push_enabled}, keymap={getattr(msg, 'keymap_preset', 'default')}"
             )
             cmds: list[Cmd] = []
             if self.auto_sync_interval > 0 and (old_sync_interval != self.auto_sync_interval or not self.is_syncing):
@@ -1297,21 +1302,7 @@ class EspressoMailApp(Model):
     def _handle_key(self, msg: KeyMsg) -> tuple[EspressoMailApp, Cmd | None]:
         k = str(msg.key)
 
-        # Global shortcuts
-        if k == "q":
-            self.active_modal = ConfirmExitModal(self.theme)
-            return self, None
-        if k in ("f10", "m"):
-            self.menu_bar.open_category(0)
-            return self, None
-        if k == "f1":
-            return self._execute_action("replay_splash")
-        if k == "?":
-            return self._execute_action("show_shortcuts")
-        if k == "/":
-            return self._execute_action("fuzzy_search")
-        if k == "c":
-            return self._execute_action("compose")
+        # 1. Calendar RSVP shortcuts 1, 2, 3
         if k in ("1", "2", "3") and self.selected_message and self.active_modal is None:
             ev = find_calendar_event(self.selected_message)
             if ev and ev.method in ("REQUEST", "PUBLISH"):
@@ -1328,72 +1319,27 @@ class EspressoMailApp(Model):
                         initial_response=resp,
                     )
                     return self, None
-        if k == "r":
-            return self._execute_action("reply")
-        if k == "R":
-            return self._execute_action("reply_all")
-        if k == "f":
-            return self._execute_action("forward")
-        if k == "a":
-            return self._execute_action("add_sender_contact")
-        if k == "s":
-            if self.focused_pane == "folders":
-                return self._execute_action("toggle_folder_subscription")
-            return self._execute_action("toggle_star")
-        if k == "u":
-            return self._execute_action("toggle_read")
-        if k in ("ctrl+u", "!", "V"):
-            return self._execute_action("toggle_unread_filter")
-        if k in ("M", "ctrl+m"):
-            return self._execute_action("fetch_more")
-        if k in ("e", "y"):
-            if self.focused_pane == "folders":
-                return self._execute_action("account_settings")
-            return self._execute_action("archive_msg")
-        if k in ("d", "#", "delete"):
-            return self._execute_action("trash_msg")
-        if k == "J":
-            return self._execute_action("spam_msg")
-        if k == "v":
-            return self._execute_action("move_to_folder")
-        if k == "X":
-            return self._execute_action("empty_trash")
-        if k == "w":
-            return self._execute_action("save_attachments")
-        if k == "t":
-            return self._execute_action("toggle_threading")
-        if k == "i":
-            return self._execute_action("cycle_image_mode")
-        if k == "H":
-            return self._execute_action("toggle_headers")
-        if k == "U":
-            return self._execute_action("unified_inbox")
-        if k == "B":
-            return self._execute_action("address_book")
-        if k == "F":
-            return self._execute_action("sieve_filters")
-        if k == "G":
-            return self._execute_action("pgp_manager")
-        if k == "A":
-            return self._execute_action("account_settings")
-        if k in ("p", "P"):
-            return self._execute_action("preferences")
-        if k == "O":
-            return self._execute_action("new_account")
-        if k == "S":
-            return self._execute_action("sync_all")
-        if k == "{":
-            return self._execute_action("narrow_folder_list")
-        if k == "}":
-            return self._execute_action("widen_folder_list")
-        if k == "[":
-            if self.focused_pane == "folders":
-                return self._execute_action("narrow_folder_list")
-            return self._execute_action("expand_reader")
-        if k == "]":
-            if self.focused_pane == "folders":
-                return self._execute_action("widen_folder_list")
-            return self._execute_action("expand_list")
+
+        # 2. Configurable keymap resolution
+        mapped_action = self.keymap.resolve_key(k, pane=self.focused_pane)
+        if mapped_action:
+            if mapped_action == "quit_app":
+                self.active_modal = ConfirmExitModal(self.theme)
+                return self, None
+            if mapped_action == "open_menu":
+                self.menu_bar.open_category(0)
+                return self, None
+            if mapped_action == "next_pane":
+                panes = ["folders", "messages", "reader"]
+                idx = panes.index(self.focused_pane)
+                self.focused_pane = panes[(idx + 1) % len(panes)]
+                return self, None
+            if mapped_action == "prev_pane":
+                panes = ["folders", "messages", "reader"]
+                idx = panes.index(self.focused_pane)
+                self.focused_pane = panes[(idx - 1) % len(panes)]
+                return self, None
+            return self._execute_action(mapped_action)
 
         # Pane focus cycling
         panes = ["folders", "messages", "reader"]
@@ -1979,7 +1925,23 @@ class EspressoMailApp(Model):
             return self, self.splash.init()
 
         if action_id == "show_shortcuts":
-            self.active_modal = HelpModal(self.theme)
+            self.active_modal = HelpModal(self.theme, keymap=self.keymap)
+            return self, None
+
+        if action_id == "select_message_toggle":
+            if self.message_rows:
+                m = self.selected_message
+                if m:
+                    if m.id in self.selected_message_ids:
+                        self.selected_message_ids.remove(m.id)
+                        self.status_message = f"Deselected '{m.subject[:30]}' ({len(self.selected_message_ids)} selected)."
+                    else:
+                        self.selected_message_ids.add(m.id)
+                        self.status_message = f"Selected '{m.subject[:30]}' ({len(self.selected_message_ids)} selected). Press 'e' to archive or 'd' to trash."
+                    if self.message_cursor < len(self.message_rows) - 1:
+                        self.message_cursor += 1
+                        cmd = self._on_message_selection_changed(mark_read=False)
+                        return self, cmd
             return self, None
 
         if action_id == "command_palette":
@@ -3322,10 +3284,21 @@ class EspressoMailApp(Model):
                 priority=2,
             )
         )
+        k_comp = self.keymap.get_display_key("compose", "c")
+        k_help = self.keymap.get_display_key("show_shortcuts", "?")
         if self.focused_pane in ("messages", "reader"):
-            center_text = "[c]Compose [e]Archive [d]Trash [s]Star [u]Read [v]Move [?]Help"
+            k_arch = self.keymap.get_display_key("archive_msg", "e")
+            k_trash = self.keymap.get_display_key("trash_msg", "d")
+            k_star = self.keymap.get_display_key("toggle_star", "s")
+            k_read = self.keymap.get_display_key("toggle_read", "u")
+            k_move = self.keymap.get_display_key("move_to_folder", "v")
+            center_text = f"[{k_comp}]Compose [{k_arch}]Archive [{k_trash}]Trash [{k_star}]Star [{k_read}]Read [{k_move}]Move [{k_help}]Help"
         else:
-            center_text = "[c]Compose [/]Search [r]Reply [t]Threads [i]Img [?]Help"
+            k_search = self.keymap.get_display_key("fuzzy_search", "/")
+            k_reply = self.keymap.get_display_key("reply", "r")
+            k_thread = self.keymap.get_display_key("toggle_threading", "t")
+            k_img = self.keymap.get_display_key("cycle_image_mode", "i")
+            center_text = f"[{k_comp}]Compose [{k_search}]Search [{k_reply}]Reply [{k_thread}]Threads [{k_img}]Img [{k_help}]Help"
         bar = StatusBar(
             left=left_sections,
             center=[

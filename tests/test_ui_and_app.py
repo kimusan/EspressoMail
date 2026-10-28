@@ -1972,8 +1972,8 @@ class TestUIAndApp(unittest.TestCase):
         # Render view to establish exact modal geometry
         modal.view(80, 24)
         pos_y = modal.last_pos_y
-        self.assertEqual(modal.last_modal_h, 22)
-        self.assertEqual(pos_y, 1)
+        self.assertEqual(modal.last_modal_h, 23)
+        self.assertEqual(pos_y, 0)
 
         # Mouse click row 2 (Theme name) to cycle theme family
         # Row 2 is y = pos_y + 2 (border/padding) + 2 (row 2) = 7
@@ -2806,6 +2806,100 @@ class TestUIAndApp(unittest.TestCase):
         self.assertIn("Sprint 42", latest_sent.body_html)
         self.assertIn(">Plan A</li>", latest_sent.body_html)
         self.assertIn(">Plan B</li>", latest_sent.body_html)
+
+    def test_configurable_keymaps_presets_and_custom_bindings(self) -> None:
+        """Verify KeymapManager presets, custom overrides, persistence, and application key dispatching."""
+        from espressomail.keymaps import KeymapManager, KEYMAP_PRESETS
+        from espressomail.ui.modals import HelpModal
+        import tempfile
+
+        # 1. KeymapManager presets and context-awareness
+        km = KeymapManager(preset="default")
+        self.assertEqual(km.resolve_key("c"), "compose")
+        self.assertEqual(km.resolve_key("e"), "archive_msg")
+        self.assertEqual(km.resolve_key("d"), "trash_msg")
+        self.assertEqual(km.resolve_key("s", pane="messages"), "toggle_star")
+        self.assertEqual(km.resolve_key("s", pane="folders"), "toggle_folder_subscription")
+
+        # Switch to Gmail preset
+        km.set_preset("gmail")
+        self.assertEqual(km.resolve_key("c"), "compose")
+        self.assertEqual(km.resolve_key("#"), "trash_msg")
+        self.assertEqual(km.resolve_key("!"), "spam_msg")
+        self.assertEqual(km.resolve_key("shift+u"), "toggle_read")
+
+        # Switch to Vim preset
+        km.set_preset("vim")
+        self.assertEqual(km.resolve_key("y"), "archive_msg")
+        self.assertEqual(km.resolve_key("d"), "trash_msg")
+        self.assertEqual(km.resolve_key("m"), "move_to_folder")
+
+        # Custom override
+        km.set_binding("ctrl+k", "compose")
+        self.assertEqual(km.resolve_key("ctrl+k"), "compose")
+        self.assertEqual(km.get_display_key("compose"), "ctrl+k")
+
+        # File persistence
+        with tempfile.NamedTemporaryFile(suffix=".json") as tmp:
+            km.save_to_file(tmp.name)
+            loaded_km = KeymapManager.load_from_file(tmp.name)
+            self.assertEqual(loaded_km.preset, "vim")
+            self.assertEqual(loaded_km.resolve_key("ctrl+k"), "compose")
+
+        # Store persistence
+        km.save_to_store(self.store)
+        store_km = KeymapManager.load_from_store(self.store)
+        self.assertEqual(store_km.preset, "vim")
+        self.assertEqual(store_km.resolve_key("ctrl+k"), "compose")
+
+        # 2. Application UI integration
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        self.assertEqual(app.keymap.preset, "vim")
+
+        # Status bar displays vim keys
+        status_bar_out = app._render_status_bar()
+        self.assertIn("Compose", status_bar_out)
+
+        # Custom binding 'ctrl+k' opens ComposeModal in app
+        app, _ = app.update(KeyMsg("ctrl+k"))
+        self.assertIsInstance(app.active_modal, ComposeModal)
+        app.active_modal = None
+
+        # PreferencesModal cycling keymap preset to Gmail
+        modal = PreferencesModal(
+            store=self.store,
+            current_theme=app.theme,
+            download_dir=app.download_dir,
+        )
+        self.assertEqual(modal.KEYMAP_PRESETS[modal.keymap_preset_idx], "vim")
+        # Cycle to 'gmail'
+        gmail_idx = modal.KEYMAP_PRESETS.index("gmail")
+        modal.keymap_preset_idx = gmail_idx
+        modal, cmd = modal.update(KeyMsg("ctrl+s"))
+        self.assertIsNotNone(cmd)
+        saved_msg = cmd()
+        self.assertIsInstance(saved_msg, PreferencesSavedMsg)
+        self.assertEqual(saved_msg.keymap_preset, "gmail")
+
+        # Apply PreferencesSavedMsg to app
+        app, _ = app.update(saved_msg)
+        self.assertEqual(app.keymap.preset, "gmail")
+        self.assertEqual(self.store.get_setting("keymap_preset"), "gmail")
+
+        # In Gmail keymap, '#' moves selected message to trash
+        self.assertTrue(len(app.message_rows) > 0)
+        first_id = app.message_rows[0].message.id
+        app, _ = app.update(KeyMsg("#"))
+        self.assertIn("to Trash", app.status_message)
+        trashed_msg = self.store.get_message(first_id)
+        self.assertTrue(trashed_msg.is_trashed)
+
+        # HelpModal displays active preset
+        app, _ = app.update(KeyMsg("?"))
+        self.assertIsInstance(app.active_modal, HelpModal)
+        help_view = app.active_modal.view(80)
+        self.assertIn("GMAIL", help_view)
 
 
 if __name__ == "__main__":
