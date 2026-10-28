@@ -253,6 +253,19 @@ def update_changelog(
 
     # Check if there is already an entry for this version
     if f"## [{new_version}]" in content:
+        blocks = []
+        if message and message.strip() and message.strip() not in content:
+            blocks.append(f"> {message.strip()}")
+        if notes and notes.strip() and notes.strip() not in content:
+            blocks.append(notes.strip())
+
+        if blocks:
+            header_pattern = rf"(##\s*\[{re.escape(new_version)}\][^\n]*\n)"
+            msg_block = "\n" + "\n\n".join(blocks) + "\n\n"
+            new_content = re.sub(header_pattern, rf"\1{msg_block}", content, count=1)
+            if not dry_run:
+                CHANGELOG_FILE.write_text(new_content, encoding="utf-8")
+            return True
         log_warn(f"Section ## [{new_version}] already exists in CHANGELOG.md.")
         return False
 
@@ -390,14 +403,17 @@ def perform_release(
         return
 
     # Live execution: stage files
-    stage_paths = [str(cf.relative_to(REPO_ROOT)) for cf in changed_files]
-    log(f"Staging changed files: {' '.join(stage_paths)}")
-    run_cmd(["git", "add"] + stage_paths)
+    if changed_files:
+        stage_paths = [str(cf.relative_to(REPO_ROOT)) for cf in changed_files]
+        log(f"Staging changed files: {' '.join(stage_paths)}")
+        run_cmd(["git", "add"] + stage_paths)
 
-    # Live execution: commit
-    commit_msg = f"chore(release): {tag_name}"
-    log(f"Creating release commit: '{commit_msg}'")
-    run_cmd(["git", "commit", "-m", commit_msg])
+        # Live execution: commit
+        commit_msg = f"chore(release): {tag_name}"
+        log(f"Creating release commit: '{commit_msg}'")
+        run_cmd(["git", "commit", "-m", commit_msg])
+    else:
+        log("No modified files to commit; working tree is up to date.")
 
     # Live execution: tag
     log(f"Creating annotated tag: '{tag_name}'")
