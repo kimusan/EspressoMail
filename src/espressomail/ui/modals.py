@@ -23,6 +23,7 @@ from espresso.crema import (
     Align,
     Style,
     join_vertical,
+    string_width,
     truncate_ansi,
 )
 
@@ -2019,8 +2020,10 @@ class PreferencesModal(Model):
         self.last_app_w = 80
         self.last_app_h = 24
         self.last_modal_w = 68
-        self.last_modal_h = 20
-        self.buttons_row_offset = 12
+        self.last_modal_h = 18
+        self.last_pos_x = 6
+        self.last_pos_y = 3
+        self.buttons_row_offset = 11
 
         # Settings
         self.input_download_dir = TextInput(
@@ -2127,9 +2130,9 @@ class PreferencesModal(Model):
             app_w = getattr(self, "last_app_w", 80)
             app_h = getattr(self, "last_app_h", 24)
             modal_w = getattr(self, "last_modal_w", min(74, max(56, app_w - 8)))
-            modal_h = getattr(self, "last_modal_h", 20)
-            pos_x = max(0, (app_w - modal_w) // 2)
-            pos_y = max(0, (app_h - modal_h) // 2)
+            modal_h = getattr(self, "last_modal_h", 18)
+            pos_x = getattr(self, "last_pos_x", max(0, (app_w - modal_w) // 2))
+            pos_y = getattr(self, "last_pos_y", max(0, (app_h - modal_h) // 2))
 
             # Check if mouse event is within modal bounds
             if pos_y <= msg.y < pos_y + modal_h and pos_x <= msg.x < pos_x + modal_w:
@@ -2148,7 +2151,7 @@ class PreferencesModal(Model):
                 # Mouse Left Click
                 if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
                     # Check button row
-                    btn_row = getattr(self, "buttons_row_offset", 12)
+                    btn_row = getattr(self, "buttons_row_offset", 11)
                     if row_idx == btn_row:
                         # Save button is on left half, Cancel on right half
                         if rel_x < modal_w // 2:
@@ -2322,9 +2325,12 @@ class PreferencesModal(Model):
             )
         )
 
-        self.last_modal_h = len(rows) + 4
-        return self.current_theme.modal_style(modal_w, "⚙️ General Preferences").render(
-            join_vertical(Align.LEFT, *rows)
-        )
+        rendered = self.current_theme.modal_style(modal_w, "⚙️ General Preferences").render("\n".join(rows))
+        modal_lines = rendered.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        self.last_modal_h = len(modal_lines)
+        self.last_modal_w = max((string_width(l) for l in modal_lines), default=modal_w)
+        self.last_pos_x = max(0, (width - self.last_modal_w) // 2)
+        self.last_pos_y = max(0, (height - self.last_modal_h) // 2)
+        return rendered
 
 

@@ -1969,24 +1969,37 @@ class TestUIAndApp(unittest.TestCase):
         self.assertEqual(modal.color_mode_idx, 0)  # dark
         self.assertEqual(modal.THEME_FAMILIES[modal.theme_idx], "espresso")
 
+        # Render view to establish exact modal geometry
+        modal.view(80, 24)
+        pos_y = modal.last_pos_y
+        self.assertEqual(modal.last_modal_h, 18)
+        self.assertEqual(pos_y, 3)
+
+        # Mouse click row 2 (Theme name) to cycle theme family
+        # Row 2 is y = pos_y + 2 (border/padding) + 2 (row 2) = 7
+        click_theme = MouseMsg(x=40, y=pos_y + 4, action=MouseAction.PRESS, button=MouseButton.LEFT)
+        prev_fam_idx = modal.theme_idx
+        modal, _ = modal.update(click_theme)
+        self.assertNotEqual(modal.theme_idx, prev_fam_idx)
+        self.assertEqual(modal.color_mode_idx, 0)  # Color mode remains dark!
+
         # Mouse click row 3 (Color Mode) to toggle dark -> light
-        # Modal bounds roughly center of 80x24: pos_x=5, pos_y=2. Row 3 is y = pos_y + 2 + 3 = 7
-        click_mode = MouseMsg(x=40, y=7, action=MouseAction.PRESS, button=MouseButton.LEFT)
+        # Row 3 is y = pos_y + 2 (border/padding) + 3 (row 3) = 8
+        click_mode = MouseMsg(x=40, y=pos_y + 5, action=MouseAction.PRESS, button=MouseButton.LEFT)
         modal, _ = modal.update(click_mode)
         self.assertEqual(modal.color_mode_idx, 1)  # light
         self.assertTrue(modal.current_theme.is_light)
-        self.assertEqual(modal.current_theme.id, "espresso_light")
+        self.assertEqual(modal.current_theme.id, f"{modal.THEME_FAMILIES[modal.theme_idx]}_light")
 
-        # Mouse wheel cycling on row 2 (Theme family)
-        wheel_up = MouseMsg(x=40, y=6, action=MouseAction.PRESS, button=MouseButton.WHEEL_DOWN)
+        # Mouse wheel cycling on row 2 (Theme family at y = pos_y + 4)
+        wheel_up = MouseMsg(x=40, y=pos_y + 4, action=MouseAction.PRESS, button=MouseButton.WHEEL_DOWN)
         prev_fam_idx = modal.theme_idx
         modal, _ = modal.update(wheel_up)
         self.assertNotEqual(modal.theme_idx, prev_fam_idx)
 
         # Mouse click Cancel button
         modal.view(80, 24)
-        pos_y = max(0, (24 - modal.last_modal_h) // 2)
-        btn_y = pos_y + 2 + modal.buttons_row_offset
+        btn_y = modal.last_pos_y + 2 + modal.buttons_row_offset
         click_cancel = MouseMsg(x=55, y=btn_y, action=MouseAction.PRESS, button=MouseButton.LEFT)
         modal, cmd = modal.update(click_cancel)
         self.assertIsNotNone(cmd)
