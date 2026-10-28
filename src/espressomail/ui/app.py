@@ -110,11 +110,21 @@ from espressomail.ui.modals import (
     RSVPModal,
     RSVPSubmittedMsg,
     SearchModal,
+    SearchRemoteMsg,
     SearchSelectMessageMsg,
     SieveModal,
 )
 from espressomail.ui.onboarding import OnboardingCompleteMsg, OnboardingWizard
 from espressomail.ui.splash import SplashDoneMsg, SplashScreen
+
+
+@dataclass(frozen=True)
+class RemoteSearchDoneMsg(Msg):
+    """Emitted when background remote IMAP search completes."""
+
+    query: str
+    found_count: int
+    error: str = ""
 
 
 @dataclass(frozen=True)
@@ -464,6 +474,7 @@ class EspressoMailApp(Model):
             PaletteItem("forward", "Mail: Forward Message", "Forward selected message", "f", "Mail"),
             PaletteItem("rsvp_calendar", "Mail: RSVP to Calendar Invitation", "Respond to invitation (Accept, Tentative, Decline)", "1/2/3", "Mail"),
             PaletteItem("fuzzy_search", "Search: Fuzzy Search Local Store", "Instant search across all emails", "/", "Search"),
+            PaletteItem("remote_search", "Search: Remote IMAP Search (MULTISEARCH)", "Search remote servers across all mailboxes using MULTISEARCH/ESEARCH", "Ctrl+R", "Search"),
             PaletteItem("unified_inbox", "View: Unified Inbox", "Aggregate Inbox across all accounts", "U", "View"),
             PaletteItem("toggle_unread_filter", "View: Toggle Unread Only Filter", "Show only unread emails in current folder", "Ctrl+U", "View"),
             PaletteItem("toggle_threading", "View: Toggle Message Threading", "Group conversations into threads", "t", "View"),
@@ -1067,6 +1078,23 @@ class EspressoMailApp(Model):
                 cmds.append(self._make_idle_push_cmd())
             return self, batch(*cmds) if cmds else None
 
+        # Remote IMAP search commands & completions
+        if isinstance(msg, SearchRemoteMsg):
+            return self._start_remote_search(msg.query, msg.account_id)
+
+        if isinstance(msg, RemoteSearchDoneMsg):
+            self.refresh_data()
+            if msg.error and msg.found_count == 0:
+                self.status_message = f"⚠ Remote search error: {msg.error}"
+                if isinstance(self.active_modal, SearchModal):
+                    self.active_modal.status_msg = f"⚠ Remote search failed: {msg.error}"
+            else:
+                self.status_message = f"✔ Remote search completed: {msg.found_count} messages synced."
+                if isinstance(self.active_modal, SearchModal):
+                    self.active_modal.status_msg = f"✔ Remote search returned {msg.found_count} messages."
+                    self.active_modal._refresh_results()
+            return self, None
+
         # 6. Active Modal Dialogs
         if self.active_modal is not None:
             if isinstance(msg, ModalClosedMsg):
@@ -1120,7 +1148,7 @@ class EspressoMailApp(Model):
             self.active_modal, cmd = self.active_modal.update(msg)
             if cmd is not None and callable(cmd):
                 emitted = cmd()
-                if isinstance(emitted, (ModalClosedMsg, ComposeSubmittedMsg, SearchSelectMessageMsg, ComposeToContactMsg, PreferencesSavedMsg, RSVPSubmittedMsg, MoveFolderSubmittedMsg)):
+                if isinstance(emitted, (ModalClosedMsg, ComposeSubmittedMsg, SearchSelectMessageMsg, SearchRemoteMsg, ComposeToContactMsg, PreferencesSavedMsg, RSVPSubmittedMsg, MoveFolderSubmittedMsg)):
                     return self.update(emitted)
                 if cmd is quit_app or (hasattr(emitted, "__class__") and emitted.__class__.__name__ == "QuitMsg"):
                     return self, quit_app
@@ -1952,7 +1980,7 @@ class EspressoMailApp(Model):
             self.command_palette.is_open = True
             return self, None
 
-        if action_id == "fuzzy_search":
+        if action_id in ("fuzzy_search", "remote_search"):
             self.active_modal = SearchModal(self.store, self.theme)
             return self, None
 
@@ -2807,6 +2835,30 @@ class EspressoMailApp(Model):
                 synced_count=0,
                 summary=f"Sync finished: {exc}",
             )
+
+    def _start_remote_search(
+        self, query: str, account_id: str = "*"
+    ) -> tuple[EspressoMailApp, Cmd | None]:
+        self.status_message = f"⟳ Searching remote IMAP servers for '{query}'..."
+
+        def _search_cmd() -> Msg:
+            total_found = 0
+            err_msg = ""
+            accounts = [acc for acc in self.store.list_accounts(enabled_only=True) if acc.imap_password]
+            if account_id and account_id != "*":
+                accounts = [a for a in accounts if a.id == account_id]
+            for acc in accounts:
+                try:
+                    client = IMAPClient(acc)
+                    client.connect()
+                    msgs = client.search_remote_messages(query, store=self.store, limit=50)
+                    total_found += len(msgs)
+                    client.disconnect()
+                except Exception as exc:
+                    err_msg = str(exc)
+            return RemoteSearchDoneMsg(query=query, found_count=total_found, error=err_msg)
+
+        return self, _search_cmd
 
     def _make_idle_push_cmd(self, account_id: str | None = None) -> Cmd:
         """Create a non-blocking TEA command that listens for real-time IMAP push events (RFC 2177 IDLE)."""

@@ -108,6 +108,14 @@ class SearchSelectMessageMsg(Msg):
 
 
 @dataclass(frozen=True)
+class SearchRemoteMsg(Msg):
+    """Emitted when the user initiates a remote IMAP search."""
+
+    query: str
+    account_id: str = "*"
+
+
+@dataclass(frozen=True)
 class ComposeToContactMsg(Msg):
     """Emitted when the user presses Enter/c on a contact in the Address Book."""
 
@@ -540,6 +548,7 @@ class SearchModal(Model):
         self.query_input.focus()
         self.results: list[SearchResult] = []
         self.cursor = 0
+        self.status_msg = ""
         self._refresh_results()
 
     def _refresh_results(self) -> None:
@@ -554,6 +563,11 @@ class SearchModal(Model):
             k = str(msg.key)
             if k == "esc":
                 return self, lambda: ModalClosedMsg()
+            if k in ("ctrl+r", "f5"):
+                q = self.query_input.value.strip()
+                if q:
+                    self.status_msg = "⟳ Searching remote IMAP servers (MULTISEARCH)..."
+                    return self, lambda: SearchRemoteMsg(query=q)
             if k == "down":
                 if self.results:
                     self.cursor = (self.cursor + 1) % len(self.results)
@@ -621,10 +635,16 @@ class SearchModal(Model):
                 else:
                     rows.append(Style().foreground(self.theme.fg_primary).render(truncated))
 
+        if self.status_msg:
+            rows.append("")
+            rows.append(
+                Style().bold(True).foreground(self.theme.accent_secondary).render(self.status_msg)
+            )
+
         footer = (
             Style()
             .foreground(self.theme.fg_muted)
-            .render(f"{len(self.results)} matches [FTS5/Fuzzy]   [↑/↓] Navigate   [Enter] Open Email   [Esc] Close")
+            .render(f"{len(self.results)} matches [FTS5]   [Ctrl+R] Remote IMAP   [↑/↓] Navigate   [Enter] Open   [Esc] Close")
         )
 
         content = join_vertical(

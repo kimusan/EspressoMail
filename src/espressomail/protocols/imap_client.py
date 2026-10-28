@@ -961,3 +961,190 @@ class IMAPClient:
         except Exception:
             pass
         return count
+
+    def search_uids_remote(
+        self,
+        criteria: str | Sequence[str],
+        folders: Sequence[str] | None = None,
+        limit: int = 50,
+    ) -> dict[str, list[int]]:
+        """Search remote IMAP server for matching message UIDs by folder.
+
+        Uses RFC 7377 MULTISEARCH when advertised by the server to search multiple
+        mailboxes in a single round-trip.
+        Falls back to per-mailbox UID SEARCH when MULTISEARCH is not available.
+
+        Returns {folder_name: [uid, ...]}.
+        """
+        if self._conn is None:
+            raise RuntimeError("IMAPClient is not connected")
+
+        if isinstance(criteria, str):
+            criteria_tokens = build_imap_search_criteria(criteria)
+        else:
+            criteria_tokens = list(criteria) if criteria else ["ALL"]
+
+        target_folders = list(folders) if folders else []
+        if not target_folders:
+            discovered = self.discover_folders()
+            if discovered:
+                target_folders = [f.name for f in discovered if f.selectable]
+            else:
+                target_folders = ["INBOX"]
+
+        results: dict[str, list[int]] = {}
+
+        # 1. Try RFC 7377 MULTISEARCH if advertised by the server
+        if self.has_capability("MULTISEARCH") and len(target_folders) > 1:
+            try:
+                mailbox_spec = " ".join(f'"{f}"' for f in target_folders)
+                search_args = [f"IN (mailboxes {mailbox_spec})"] + criteria_tokens
+                status, dat = self._conn._simple_command("UID", "SEARCH", *search_args)
+                if status == "OK":
+                    raw_lines: list[str | bytes] = list(dat) if dat else []
+                    untagged_esearch = getattr(self._conn, "untagged_responses", {}).pop("ESEARCH", [])
+                    raw_lines.extend(untagged_esearch)
+                    parsed_multi = parse_multisearch_response(raw_lines)
+                    if parsed_multi:
+                        total = 0
+                        for f, uids in parsed_multi.items():
+                            slice_len = max(0, limit - total)
+                            if slice_len <= 0:
+                                break
+                            trimmed = uids[:slice_len]
+                            results[f] = trimmed
+                            total += len(trimmed)
+                        return results
+            except Exception:
+                pass
+
+        # 2. Per-folder UID SEARCH fallback
+        total_found = 0
+        for f_name in target_folders:
+            if total_found >= limit:
+                break
+            if not self._select_mailbox(f_name, readonly=True):
+                continue
+
+            try:
+                cmd_args = ["CHARSET", "UTF-8"] + criteria_tokens
+                status, search_data = self._conn.uid("SEARCH", *cmd_args)
+                if status != "OK" or not search_data or not search_data[0]:
+                    status, search_data = self._conn.uid("SEARCH", *criteria_tokens)
+
+                if status == "OK" and search_data and search_data[0]:
+                    raw_uids = search_data[0]
+                    if isinstance(raw_uids, bytes):
+                        uid_tokens = raw_uids.split()
+                    else:
+                        uid_tokens = str(raw_uids).encode("ascii", errors="ignore").split()
+                    uids = [int(u) for u in uid_tokens if u.isdigit()]
+                    if uids:
+                        needed = limit - total_found
+                        recent_uids = list(reversed(uids[-needed:]))
+                        results[f_name] = recent_uids
+                        total_found += len(recent_uids)
+            except Exception:
+                continue
+
+        return results
+
+    def search_remote_messages(
+        self,
+        query: Any,
+        folders: Sequence[str] | None = None,
+        limit: int = 50,
+        store: LocalStore | None = None,
+    ) -> list[EmailMessage]:
+        """Search remote IMAP server and fetch matched EmailMessages.
+
+        Optionally caches fetched messages into store.
+        """
+        if self._conn is None:
+            raise RuntimeError("IMAPClient is not connected")
+
+        criteria = build_imap_search_criteria(query)
+        matched_dict = self.search_uids_remote(criteria, folders=folders, limit=limit)
+        if not matched_dict:
+            return []
+
+        messages: list[EmailMessage] = []
+        for f_name, uids in matched_dict.items():
+            if not uids:
+                continue
+            if not self._select_mailbox(f_name, readonly=True):
+                continue
+
+            batch_size = 10
+            for i in range(0, len(uids), batch_size):
+                chunk = uids[i : i + batch_size]
+                uid_str = ",".join(str(u) for u in chunk)
+                try:
+                    fetch_res = self._conn.uid("FETCH", uid_str, "(BODY.PEEK[] FLAGS RFC822.SIZE UID)")
+                    if fetch_res[0] != "OK" or not fetch_res[1]:
+                        continue
+                    self._extract_messages_from_fetch(
+                        fetch_res[1], folder=f_name, fallback_uid=chunk[0], out=messages
+                    )
+                except Exception as exc:
+                    logger.debug("Error fetching search messages for %s UIDs %s: %s", f_name, uid_str, exc)
+                    continue
+
+        if store is not None and messages:
+            store.save_messages(messages)
+
+        return messages
+
+
+def parse_multisearch_response(lines: list[str | bytes]) -> dict[str, list[int]]:
+    """Parse untagged ESEARCH lines returned by RFC 7377 MULTISEARCH into {folder: [uids]}."""
+    results: dict[str, list[int]] = {}
+    for line in lines:
+        s = line.decode("utf-8", errors="replace") if isinstance(line, bytes) else str(line)
+        m_box = re.search(r'MAILBOX\s+(?:"([^"]+)"|(\S+))', s, re.IGNORECASE)
+        if not m_box:
+            continue
+        mailbox = m_box.group(1) or m_box.group(2)
+        uid_part = re.search(r'UID\s+([^)\r\n]+)', s, re.IGNORECASE)
+        if not uid_part:
+            continue
+        uids: list[int] = []
+        for token in uid_part.group(1).split():
+            token = token.strip().rstrip(")]")
+            if token.isdigit():
+                uids.append(int(token))
+            elif ":" in token:
+                start_s, end_s = token.split(":", 1)
+                if start_s.isdigit() and end_s.isdigit():
+                    start_i, end_i = int(start_s), int(end_s)
+                    step = 1 if start_i <= end_i else -1
+                    uids.extend(range(start_i, end_i + step, step))
+        if uids:
+            results.setdefault(mailbox, []).extend(uids)
+    return results
+
+
+def build_imap_search_criteria(raw_query: Any) -> list[str]:
+    """Convert a query string or SearchQuery into IMAP4rev1 search criteria tokens."""
+    from espressomail.search.fuzzy import SearchQuery, parse_search_query
+
+    sq = parse_search_query(raw_query) if isinstance(raw_query, str) else raw_query
+    tokens: list[str] = []
+    if getattr(sq, "from_filter", ""):
+        tokens.extend(["FROM", sq.from_filter])
+    if getattr(sq, "to_filter", ""):
+        tokens.extend(["TO", sq.to_filter])
+    if getattr(sq, "subject_filter", ""):
+        tokens.extend(["SUBJECT", sq.subject_filter])
+    if getattr(sq, "body_filter", ""):
+        tokens.extend(["BODY", sq.body_filter])
+    if getattr(sq, "is_unread", None) is True:
+        tokens.append("UNSEEN")
+    elif getattr(sq, "is_unread", None) is False:
+        tokens.append("SEEN")
+    if getattr(sq, "is_starred", None) is True:
+        tokens.append("FLAGGED")
+    if getattr(sq, "terms", None):
+        for term in sq.terms:
+            tokens.extend(["TEXT", term])
+    return tokens if tokens else ["ALL"]

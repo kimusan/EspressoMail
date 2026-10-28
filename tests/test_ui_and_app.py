@@ -3005,9 +3005,76 @@ class TestUIAndApp(unittest.TestCase):
         app, _ = app.update(saved_msg)
         self.assertEqual(app.external_editor, expected_editor)
 
+    def test_search_modal_remote_search_flow(self) -> None:
+        from unittest.mock import MagicMock, patch
+        from espressomail.ui.modals import SearchModal, SearchRemoteMsg
+        from espressomail.ui.app import RemoteSearchDoneMsg
+
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+
+        # 1. Test SearchModal with empty query does not trigger remote search
+        modal = SearchModal(store=self.store, theme=app.theme)
+        modal.query_input.value = ""
+        modal, cmd = modal.update(KeyMsg("ctrl+r"))
+        self.assertIsNone(cmd)
+
+        # 2. Test SearchModal view contains Remote IMAP hint
+        modal.query_input.value = "espresso"
+        modal_view = modal.view(90)
+        self.assertIn("[Ctrl+R] Remote IMAP", modal_view)
+
+        # Trigger remote search with Ctrl+R
+        modal, cmd = modal.update(KeyMsg("ctrl+r"))
+        self.assertIsNotNone(cmd)
+        emitted_msg = cmd()
+        self.assertIsInstance(emitted_msg, SearchRemoteMsg)
+        self.assertEqual(emitted_msg.query, "espresso")
+        self.assertIn("Searching remote IMAP servers", modal.status_msg)
+
+        # Trigger remote search with F5
+        modal, cmd_f5 = modal.update(KeyMsg("f5"))
+        self.assertIsNotNone(cmd_f5)
+        self.assertEqual(cmd_f5().query, "espresso")
+
+        # 3. Test App handling SearchRemoteMsg
+        app.active_modal = modal
+        app, start_cmd = app.update(emitted_msg)
+        self.assertIsNotNone(start_cmd)
+        self.assertIn("Searching remote IMAP server", app.status_message)
+
+        # Test executing start_cmd with mocked IMAP client
+        with patch("espressomail.ui.app.IMAPClient") as mock_client_cls:
+            fake_imap = mock_client_cls.return_value
+            fake_imap.search_remote_messages.return_value = [
+                MagicMock(id="remote_msg_1", subject="Remote Subject", account_id="acc_work", folder="INBOX")
+            ]
+            result_done_msg = start_cmd()
+            self.assertIsInstance(result_done_msg, RemoteSearchDoneMsg)
+            self.assertEqual(result_done_msg.query, "espresso")
+            self.assertEqual(result_done_msg.found_count, 2)
+            self.assertEqual(result_done_msg.error, "")
+
+        # 4. Test App handling RemoteSearchDoneMsg success
+        app, _ = app.update(result_done_msg)
+        self.assertIn("Remote search returned 2 messages", modal.status_msg)
+        self.assertIn("Remote search completed: 2 messages synced", app.status_message)
+
+        # 5. Test App handling RemoteSearchDoneMsg failure
+        err_msg = RemoteSearchDoneMsg(query="espresso", found_count=0, error="Connection timed out")
+        app, _ = app.update(err_msg)
+        self.assertIn("Remote search failed: Connection timed out", modal.status_msg)
+        self.assertIn("Remote search error: Connection timed out", app.status_message)
+
+        # 6. Test Command Palette action 'remote_search'
+        app.active_modal = None
+        app._execute_action("remote_search")
+        self.assertIsInstance(app.active_modal, SearchModal)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

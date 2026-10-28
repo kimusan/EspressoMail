@@ -737,6 +737,117 @@ class TestProtocolsAndCrypto(unittest.TestCase):
         self.assertEqual(domain_msg.attachments[0].filename, "invite.ics")
         self.assertIn(b"PARTSTAT=ACCEPTED", domain_msg.attachments[0].data)
 
+    def test_imap_multisearch_and_modern_search_features(self) -> None:
+        """Verify RFC 7377 MULTISEARCH response parsing, criteria building, and client search methods."""
+        from unittest.mock import MagicMock
+        from espressomail.protocols.imap_client import (
+            IMAPClient,
+            build_imap_search_criteria,
+            parse_multisearch_response,
+        )
+        from espressomail.storage.database import LocalStore
+
+        # 1. Test parse_multisearch_response with individual UIDs and ranges
+        lines = [
+            '* ESEARCH (TAG "A01") MAILBOX "INBOX" UID 101 102 105:108',
+            b'* ESEARCH (TAG "A01") MAILBOX "Sent" UID 201 202',
+            b'* ESEARCH (TAG "A01") MAILBOX "Archives/2026" UID 300 305:307',
+        ]
+        parsed = parse_multisearch_response(lines)
+        self.assertEqual(parsed["INBOX"], [101, 102, 105, 106, 107, 108])
+        self.assertEqual(parsed["Sent"], [201, 202])
+        self.assertEqual(parsed["Archives/2026"], [300, 305, 306, 307])
+
+        # 2. Test build_imap_search_criteria
+        crit = build_imap_search_criteria("from:elena subject:release is:unread espresso")
+        self.assertIn("FROM", crit)
+        self.assertIn("elena", crit)
+        self.assertIn("SUBJECT", crit)
+        self.assertIn("release", crit)
+        self.assertIn("UNSEEN", crit)
+        self.assertIn("TEXT", crit)
+        self.assertIn("espresso", crit)
+
+        # 3. Test IMAPClient with MULTISEARCH capability
+        client = IMAPClient(self.account)
+        mock_conn = MagicMock()
+        mock_conn.capabilities = ("IMAP4REV1", "MULTISEARCH", "ESEARCH", "IDLE")
+        client._conn = mock_conn
+
+        # Mock MULTISEARCH response
+        mock_conn._simple_command.return_value = (
+            "OK",
+            ['* ESEARCH (TAG "X") MAILBOX "INBOX" UID 50 51', '* ESEARCH (TAG "X") MAILBOX "Sent" UID 80'],
+        )
+        mock_conn.untagged_responses = {}
+
+        res_uids = client.search_uids_remote(
+            criteria="espresso",
+            folders=["INBOX", "Sent"],
+            limit=50,
+        )
+        self.assertEqual(res_uids["INBOX"], [50, 51])
+        self.assertEqual(res_uids["Sent"], [80])
+        # Verify MULTISEARCH command format was sent
+        mock_conn._simple_command.assert_called_once()
+        cmd_args = mock_conn._simple_command.call_args[0]
+        self.assertEqual(cmd_args[0], "UID")
+        self.assertEqual(cmd_args[1], "SEARCH")
+        self.assertIn('IN (mailboxes "INBOX" "Sent")', cmd_args[2])
+
+        # 4. Test IMAPClient fallback without MULTISEARCH capability (per-mailbox UID SEARCH)
+        mock_conn_no_multi = MagicMock()
+        mock_conn_no_multi.capabilities = ("IMAP4REV1", "IDLE")
+        mock_conn_no_multi.select.return_value = ("OK", [b"100"])
+        mock_conn_no_multi.uid.return_value = ("OK", [b"10 20 30"])
+        client_no_multi = IMAPClient(self.account)
+        client_no_multi._conn = mock_conn_no_multi
+
+        fallback_res = client_no_multi.search_uids_remote(
+            criteria="from:elena",
+            folders=["INBOX"],
+            limit=10,
+        )
+        self.assertIn("INBOX", fallback_res)
+        self.assertEqual(fallback_res["INBOX"], [30, 20, 10])
+
+        # 5. Test search_remote_messages with store caching
+        sample_mime = (
+            b"From: elena@example.com\r\n"
+            b"To: kim@schulz.dk\r\n"
+            b"Subject: Remote search hit\r\n"
+            b"Date: Sun, 27 Oct 2026 10:00:00 +0000\r\n"
+            b"\r\n"
+            b"Matched remote search body payload."
+        )
+        mock_fetch_data = [
+            (b"1 (BODY[] {%d}\r\n" % len(sample_mime), sample_mime),
+            b" UID 30 FLAGS (\\Seen))",
+        ]
+        mock_conn_no_multi.uid.side_effect = [
+            ("OK", [b"30"]),  # search result
+            ("OK", mock_fetch_data),  # fetch result
+        ]
+
+        store = LocalStore(":memory:")
+        store.save_account(self.account)
+        matched_msgs = client_no_multi.search_remote_messages(
+            query="from:elena",
+            folders=["INBOX"],
+            limit=5,
+            store=store,
+        )
+        self.assertEqual(len(matched_msgs), 1)
+        self.assertEqual(matched_msgs[0].subject, "Remote search hit")
+        self.assertEqual(matched_msgs[0].folder, "INBOX")
+
+        # Verify message was cached into store and is searchable in FTS5
+        saved_msg = store.get_message(matched_msgs[0].id)
+        self.assertIsNotNone(saved_msg)
+        self.assertEqual(saved_msg.subject, "Remote search hit")
+        fts_hits = store.search_messages_fts("Remote")
+        self.assertEqual(len(fts_hits), 1)
+        store.close()
 
 
 if __name__ == "__main__":
