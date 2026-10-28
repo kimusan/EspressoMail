@@ -198,6 +198,12 @@ class LocalStore:
                 ON messages(thread_id);
             CREATE INDEX IF NOT EXISTS idx_messages_flags
                 ON messages(is_trashed, is_draft, is_starred, is_read);
+            CREATE INDEX IF NOT EXISTS idx_messages_unread
+                ON messages(is_trashed, is_draft, is_read);
+            CREATE INDEX IF NOT EXISTS idx_folders_acc_name
+                ON folders(account_id, name);
+            CREATE INDEX IF NOT EXISTS idx_folders_type
+                ON folders(folder_type);
 
             CREATE TABLE IF NOT EXISTS attachments (
                 id TEXT PRIMARY KEY,
@@ -732,45 +738,57 @@ class LocalStore:
 
             return result
 
-    def refresh_folder_counts(self) -> None:
-        """Recalculate unread and total message counts for all account folders."""
+    def refresh_folder_counts(self, account_id: str | None = None, folder_name: str | None = None) -> None:
+        """Recalculate unread and total message counts for all folders or a specific folder."""
         with self._lock:
-            folders = self._conn.execute("SELECT id, account_id, name, folder_type FROM folders").fetchall()
-            for f in folders:
-                acc_id = f["account_id"]
-                fname = f["name"]
-                ftype = f["folder_type"]
-                if ftype == FolderType.STARRED.value or fname == "Starred":
-                    row = self._conn.execute(
-                        "SELECT SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) AS u, COUNT(*) AS t "
-                        "FROM messages WHERE account_id = ? AND is_starred = 1 AND is_trashed = 0",
-                        (acc_id,),
-                    ).fetchone()
-                elif ftype == FolderType.TRASH.value or fname == "Trash":
-                    row = self._conn.execute(
-                        "SELECT SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) AS u, COUNT(*) AS t "
-                        "FROM messages WHERE account_id = ? AND (is_trashed = 1 OR folder = ?)",
-                        (acc_id, fname),
-                    ).fetchone()
-                elif ftype == FolderType.DRAFTS.value or fname == "Drafts":
-                    row = self._conn.execute(
-                        "SELECT COUNT(*) AS u, COUNT(*) AS t "
-                        "FROM messages WHERE account_id = ? AND (is_draft = 1 OR folder = ?) AND is_trashed = 0",
-                        (acc_id, fname),
-                    ).fetchone()
+            with self._conn:
+                if account_id and folder_name:
+                    folders = self._conn.execute(
+                        "SELECT id, account_id, name, folder_type FROM folders WHERE account_id = ? AND name = ?",
+                        (account_id, folder_name),
+                    ).fetchall()
+                elif account_id:
+                    folders = self._conn.execute(
+                        "SELECT id, account_id, name, folder_type FROM folders WHERE account_id = ?",
+                        (account_id,),
+                    ).fetchall()
                 else:
-                    row = self._conn.execute(
-                        "SELECT SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) AS u, COUNT(*) AS t "
-                        "FROM messages WHERE account_id = ? AND folder = ? AND is_trashed = 0",
-                        (acc_id, fname),
-                    ).fetchone()
-                u = int(row["u"] or 0)
-                t = int(row["t"] or 0)
-                self._conn.execute(
-                    "UPDATE folders SET unread_count = ?, total_count = ? WHERE id = ?",
-                    (u, t, f["id"]),
-                )
-            self._conn.commit()
+                    folders = self._conn.execute("SELECT id, account_id, name, folder_type FROM folders").fetchall()
+
+                for f in folders:
+                    acc_id = f["account_id"]
+                    fname = f["name"]
+                    ftype = f["folder_type"]
+                    if ftype == FolderType.STARRED.value or fname == "Starred":
+                        row = self._conn.execute(
+                            "SELECT SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) AS u, COUNT(*) AS t "
+                            "FROM messages WHERE account_id = ? AND is_starred = 1 AND is_trashed = 0",
+                            (acc_id,),
+                        ).fetchone()
+                    elif ftype == FolderType.TRASH.value or fname == "Trash":
+                        row = self._conn.execute(
+                            "SELECT SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) AS u, COUNT(*) AS t "
+                            "FROM messages WHERE account_id = ? AND (is_trashed = 1 OR folder = ?)",
+                            (acc_id, fname),
+                        ).fetchone()
+                    elif ftype == FolderType.DRAFTS.value or fname == "Drafts":
+                        row = self._conn.execute(
+                            "SELECT COUNT(*) AS u, COUNT(*) AS t "
+                            "FROM messages WHERE account_id = ? AND (is_draft = 1 OR folder = ?) AND is_trashed = 0",
+                            (acc_id, fname),
+                        ).fetchone()
+                    else:
+                        row = self._conn.execute(
+                            "SELECT SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) AS u, COUNT(*) AS t "
+                            "FROM messages WHERE account_id = ? AND folder = ? AND is_trashed = 0",
+                            (acc_id, fname),
+                        ).fetchone()
+                    u = int(row["u"] or 0)
+                    t = int(row["t"] or 0)
+                    self._conn.execute(
+                        "UPDATE folders SET unread_count = ?, total_count = ? WHERE id = ?",
+                        (u, t, f["id"]),
+                    )
 
     def get_folder_min_uid(self, account_id: str, folder: str) -> int:
         """Return the minimum IMAP UID stored locally for an account and folder, or 0 if none."""
@@ -787,138 +805,151 @@ class LocalStore:
     # Messages & Attachments CRUD
     # ------------------------------------------------------------------
 
-    def save_message(self, msg: EmailMessage, harvest_contacts: bool = True) -> None:
-        """Insert or update an EmailMessage and its attachments in the local store."""
-        with self._lock:
-            if not msg.thread_id:
-                msg.thread_id = msg.in_reply_to or (msg.references[0] if msg.references else msg.message_id) or msg.id
+    def _save_message_in_tx(self, msg: EmailMessage, harvest_contacts: bool = True) -> None:
+        """Internal helper to insert or update an EmailMessage and its attachments in active transaction."""
+        if not msg.thread_id:
+            msg.thread_id = msg.in_reply_to or (msg.references[0] if msg.references else msg.message_id) or msg.id
 
+        self._conn.execute(
+            """
+            INSERT INTO messages (
+                id, account_id, folder, uid, message_id, in_reply_to, references_json,
+                thread_id, subject, sender_name, sender_email,
+                recipients_to_json, recipients_cc_json, recipients_bcc_json,
+                date_iso, timestamp, snippet, body_text, body_html, raw_headers_json,
+                is_read, is_starred, is_draft, is_trashed, is_answered,
+                pgp_status, pgp_key_fingerprint, pgp_signer, pgp_raw_payload, labels_json
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                folder = excluded.folder,
+                uid = excluded.uid,
+                message_id = excluded.message_id,
+                in_reply_to = excluded.in_reply_to,
+                references_json = excluded.references_json,
+                thread_id = excluded.thread_id,
+                subject = excluded.subject,
+                sender_name = excluded.sender_name,
+                sender_email = excluded.sender_email,
+                recipients_to_json = excluded.recipients_to_json,
+                recipients_cc_json = excluded.recipients_cc_json,
+                recipients_bcc_json = excluded.recipients_bcc_json,
+                date_iso = excluded.date_iso,
+                timestamp = excluded.timestamp,
+                snippet = excluded.snippet,
+                body_text = excluded.body_text,
+                body_html = excluded.body_html,
+                raw_headers_json = excluded.raw_headers_json,
+                is_read = excluded.is_read,
+                is_starred = excluded.is_starred,
+                is_draft = excluded.is_draft,
+                is_trashed = excluded.is_trashed,
+                is_answered = excluded.is_answered,
+                pgp_status = excluded.pgp_status,
+                pgp_key_fingerprint = excluded.pgp_key_fingerprint,
+                pgp_signer = excluded.pgp_signer,
+                pgp_raw_payload = excluded.pgp_raw_payload,
+                labels_json = excluded.labels_json
+            """,
+            (
+                msg.id,
+                msg.account_id,
+                msg.folder,
+                msg.uid,
+                msg.message_id,
+                msg.in_reply_to,
+                json.dumps(msg.references),
+                msg.thread_id,
+                msg.subject,
+                msg.sender_name,
+                msg.sender_email,
+                json.dumps(msg.recipients_to),
+                json.dumps(msg.recipients_cc),
+                json.dumps(msg.recipients_bcc),
+                msg.date_iso,
+                msg.timestamp,
+                msg.snippet,
+                msg.body_text,
+                msg.body_html,
+                json.dumps(msg.raw_headers),
+                int(msg.is_read),
+                int(msg.is_starred),
+                int(msg.is_draft),
+                int(msg.is_trashed),
+                int(msg.is_answered),
+                msg.pgp_status.value,
+                msg.pgp_key_fingerprint,
+                msg.pgp_signer,
+                msg.pgp_raw_payload,
+                json.dumps(msg.labels),
+            ),
+        )
+
+        # Save attachments
+        self._conn.execute("DELETE FROM attachments WHERE message_id = ?", (msg.id,))
+        for att in msg.attachments:
+            att_id = att.id or f"{msg.id}:att:{att.filename}"
             self._conn.execute(
                 """
-                INSERT INTO messages (
-                    id, account_id, folder, uid, message_id, in_reply_to, references_json,
-                    thread_id, subject, sender_name, sender_email,
-                    recipients_to_json, recipients_cc_json, recipients_bcc_json,
-                    date_iso, timestamp, snippet, body_text, body_html, raw_headers_json,
-                    is_read, is_starred, is_draft, is_trashed, is_answered,
-                    pgp_status, pgp_key_fingerprint, pgp_signer, pgp_raw_payload, labels_json
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )
-                ON CONFLICT(id) DO UPDATE SET
-                    folder = excluded.folder,
-                    uid = excluded.uid,
-                    message_id = excluded.message_id,
-                    in_reply_to = excluded.in_reply_to,
-                    references_json = excluded.references_json,
-                    thread_id = excluded.thread_id,
-                    subject = excluded.subject,
-                    sender_name = excluded.sender_name,
-                    sender_email = excluded.sender_email,
-                    recipients_to_json = excluded.recipients_to_json,
-                    recipients_cc_json = excluded.recipients_cc_json,
-                    recipients_bcc_json = excluded.recipients_bcc_json,
-                    date_iso = excluded.date_iso,
-                    timestamp = excluded.timestamp,
-                    snippet = excluded.snippet,
-                    body_text = excluded.body_text,
-                    body_html = excluded.body_html,
-                    raw_headers_json = excluded.raw_headers_json,
-                    is_read = excluded.is_read,
-                    is_starred = excluded.is_starred,
-                    is_draft = excluded.is_draft,
-                    is_trashed = excluded.is_trashed,
-                    is_answered = excluded.is_answered,
-                    pgp_status = excluded.pgp_status,
-                    pgp_key_fingerprint = excluded.pgp_key_fingerprint,
-                    pgp_signer = excluded.pgp_signer,
-                    pgp_raw_payload = excluded.pgp_raw_payload,
-                    labels_json = excluded.labels_json
+                INSERT INTO attachments (
+                    id, message_id, filename, content_type, size_bytes,
+                    content_id, is_inline, data, local_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    att_id,
                     msg.id,
-                    msg.account_id,
-                    msg.folder,
-                    msg.uid,
-                    msg.message_id,
-                    msg.in_reply_to,
-                    json.dumps(msg.references),
-                    msg.thread_id,
-                    msg.subject,
-                    msg.sender_name,
-                    msg.sender_email,
-                    json.dumps(msg.recipients_to),
-                    json.dumps(msg.recipients_cc),
-                    json.dumps(msg.recipients_bcc),
-                    msg.date_iso,
-                    msg.timestamp,
-                    msg.snippet,
-                    msg.body_text,
-                    msg.body_html,
-                    json.dumps(msg.raw_headers),
-                    int(msg.is_read),
-                    int(msg.is_starred),
-                    int(msg.is_draft),
-                    int(msg.is_trashed),
-                    int(msg.is_answered),
-                    msg.pgp_status.value,
-                    msg.pgp_key_fingerprint,
-                    msg.pgp_signer,
-                    msg.pgp_raw_payload,
-                    json.dumps(msg.labels),
+                    att.filename,
+                    att.content_type,
+                    att.size_bytes or (len(att.data) if att.data else 0),
+                    att.content_id,
+                    int(att.is_inline),
+                    att.data,
+                    att.local_path,
                 ),
             )
 
-            # Save attachments
-            self._conn.execute("DELETE FROM attachments WHERE message_id = ?", (msg.id,))
-            for att in msg.attachments:
-                att_id = att.id or f"{msg.id}:att:{att.filename}"
-                self._conn.execute(
-                    """
-                    INSERT INTO attachments (
-                        id, message_id, filename, content_type, size_bytes,
-                        content_id, is_inline, data, local_path
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        att_id,
-                        msg.id,
-                        att.filename,
-                        att.content_type,
-                        att.size_bytes or (len(att.data) if att.data else 0),
-                        att.content_id,
-                        int(att.is_inline),
-                        att.data,
-                        att.local_path,
-                    ),
-                )
+        # Update FTS5 index
+        if self._fts_enabled:
+            self._conn.execute("DELETE FROM messages_fts WHERE msg_id = ?", (msg.id,))
+            recipients_flat = " ".join(msg.recipients_to + msg.recipients_cc)
+            self._conn.execute(
+                """
+                INSERT INTO messages_fts (
+                    msg_id, subject, sender_name, sender_email, recipients, body_text, folder
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    msg.id,
+                    msg.subject,
+                    msg.sender_name,
+                    msg.sender_email,
+                    recipients_flat,
+                    msg.body_text,
+                    msg.folder,
+                ),
+            )
 
-            # Update FTS5 index
-            if self._fts_enabled:
-                self._conn.execute("DELETE FROM messages_fts WHERE msg_id = ?", (msg.id,))
-                recipients_flat = " ".join(msg.recipients_to + msg.recipients_cc)
-                self._conn.execute(
-                    """
-                    INSERT INTO messages_fts (
-                        msg_id, subject, sender_name, sender_email, recipients, body_text, folder
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        msg.id,
-                        msg.subject,
-                        msg.sender_name,
-                        msg.sender_email,
-                        recipients_flat,
-                        msg.body_text,
-                        msg.folder,
-                    ),
-                )
+        if harvest_contacts and msg.sender_email:
+            self._harvest_contact(msg.sender_name, msg.sender_email)
 
-            if harvest_contacts and msg.sender_email:
-                self._harvest_contact(msg.sender_name, msg.sender_email)
-
+    def save_message(self, msg: EmailMessage, harvest_contacts: bool = True) -> None:
+        """Insert or update an EmailMessage and its attachments in the local store."""
+        with self._lock:
+            self._save_message_in_tx(msg, harvest_contacts=harvest_contacts)
             self._conn.commit()
+
+    def save_messages(self, messages: Sequence[EmailMessage], harvest_contacts: bool = True) -> int:
+        """Insert or update a batch of EmailMessages within a single transaction."""
+        if not messages:
+            return 0
+        with self._lock:
+            with self._conn:
+                for msg in messages:
+                    self._save_message_in_tx(msg, harvest_contacts=harvest_contacts)
+            return len(messages)
 
     def get_message(self, msg_id: str) -> EmailMessage | None:
         """Retrieve a single EmailMessage (including attachments) by ID."""
@@ -1019,9 +1050,23 @@ class LocalStore:
     def mark_read(self, msg_id: str, is_read: bool = True) -> None:
         """Set or unset the read status of a message."""
         with self._lock:
+            row = self._conn.execute(
+                "SELECT account_id, folder, is_read FROM messages WHERE id = ?",
+                (msg_id,),
+            ).fetchone()
+            if not row:
+                return
+            if bool(row["is_read"]) == is_read:
+                return
             self._conn.execute("UPDATE messages SET is_read = ? WHERE id = ?", (int(is_read), msg_id))
+            acc_id = row["account_id"]
+            fname = row["folder"]
+            diff = -1 if is_read else 1
+            self._conn.execute(
+                "UPDATE folders SET unread_count = MAX(0, unread_count + ?) WHERE account_id = ? AND name = ?",
+                (diff, acc_id, fname),
+            )
             self._conn.commit()
-            self.refresh_folder_counts()
 
     def toggle_star(self, msg_id: str) -> bool:
         """Toggle the starred flag on a message and return the new state."""
@@ -1032,7 +1077,6 @@ class LocalStore:
             new_val = 0 if row["is_starred"] else 1
             self._conn.execute("UPDATE messages SET is_starred = ? WHERE id = ?", (new_val, msg_id))
             self._conn.commit()
-            self.refresh_folder_counts()
             return bool(new_val)
 
     def move_to_folder(self, msg_id: str, target_folder: str) -> None:

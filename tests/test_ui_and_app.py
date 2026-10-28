@@ -2121,6 +2121,98 @@ class TestUIAndApp(unittest.TestCase):
         self.assertEqual(act_msg.item.id, "2")
 
 
+    def test_sync_responsiveness_and_message_navigation_optimization(self) -> None:
+        """Verify UI responsiveness during sync: non-interfering sync steps and fast navigation."""
+        from espressomail.models.entities import EmailMessage
+        from espressomail.ui.app import SyncProgressMsg
+
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.active_account_id = "acc_oss"
+        app.active_folder = "INBOX"
+        app.refresh_data()
+        self.assertGreater(len(app.message_rows), 0)
+
+        # 1. Test batch saving in LocalStore
+        batch = [
+            EmailMessage(
+                id=f"batch_msg_{i}",
+                account_id="acc_oss",
+                folder="Archive",
+                uid=2000 + i,
+                subject=f"Batch {i}",
+                sender_name="Archive Bot",
+                sender_email="bot@archive.org",
+                recipients_to=["me@oss.org"],
+                body_text="Archived",
+            )
+            for i in range(10)
+        ]
+        saved_count = self.store.save_messages(batch)
+        self.assertEqual(saved_count, 10)
+
+        # 2. Select first message, navigate down to second message
+        initial_msg_id = app.selected_message.id if app.selected_message else ""
+        app.focused_pane = "messages"
+        app, cmd = app.update(KeyMsg("down"))
+        self.assertEqual(app.message_cursor, 1)
+        cur_msg_id = app.selected_message.id if app.selected_message else ""
+        self.assertNotEqual(initial_msg_id, cur_msg_id)
+
+        # 3. Simulate background SyncProgressMsg for an unrelated folder ("Archive")
+        # Ensure active message list and viewport are NOT disrupted
+        cached_rows_ref = app.message_rows
+        sync_archive_msg = SyncProgressMsg(
+            account_id="acc_oss",
+            account_name="OSS",
+            action="synced_folder",
+            folder_name="Archive",
+            new_messages=5,
+            total_synced=5,
+            total_folders=3,
+            step_index=1,
+            total_steps=3,
+            remaining_steps=(("acc_oss", "sync_folder", "INBOX"),),
+        )
+        app, _ = app.update(sync_archive_msg)
+        # Message rows list for INBOX was not recomputed
+        self.assertIs(app.message_rows, cached_rows_ref)
+        self.assertEqual(app.message_cursor, 1)
+        self.assertEqual(app.selected_message.id if app.selected_message else "", cur_msg_id)
+
+        # 4. Simulate SyncProgressMsg for current folder ("INBOX") with new messages
+        # Message rows are updated, and message cursor stays pinned to the current message by ID
+        new_inbox_msg = EmailMessage(
+            id="inbox_top_new",
+            account_id="acc_oss",
+            folder="INBOX",
+            uid=9999,
+            subject="Urgent New Email",
+            sender_name="Boss",
+            sender_email="boss@oss.org",
+            recipients_to=["me@oss.org"],
+            body_text="Read this!",
+            timestamp=9999999999,
+        )
+        self.store.save_message(new_inbox_msg)
+
+        sync_inbox_msg = SyncProgressMsg(
+            account_id="acc_oss",
+            account_name="OSS",
+            action="synced_folder",
+            folder_name="INBOX",
+            new_messages=1,
+            total_synced=6,
+            total_folders=3,
+            step_index=2,
+            total_steps=3,
+            remaining_steps=(),
+        )
+        app, _ = app.update(sync_inbox_msg)
+        # User's selection was preserved on the message they were looking at, rather than shifting index
+        self.assertEqual(app.selected_message.id if app.selected_message else "", cur_msg_id)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -7,7 +7,7 @@ import logging
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -732,6 +732,7 @@ class EspressoMailApp(Model):
                 break
 
     def _rebuild_message_rows(self) -> None:
+        cur_id = self.selected_message.id if self.selected_message else None
         raw_msgs = self.store.list_messages(
             account_id=self.active_account_id,
             folder=self.active_folder,
@@ -769,6 +770,11 @@ class EspressoMailApp(Model):
 
         self.message_rows = rows
         if self.message_rows:
+            if cur_id:
+                for idx, r in enumerate(self.message_rows):
+                    if r.message.id == cur_id:
+                        self.message_cursor = idx
+                        return
             self.message_cursor = min(self.message_cursor, len(self.message_rows) - 1)
         else:
             self.message_cursor = 0
@@ -1068,7 +1074,31 @@ class EspressoMailApp(Model):
                 return self, tick(180.0, AutoSyncTickMsg())
 
             self.is_syncing = True
-            self.refresh_data()
+
+            # Only rebuild message rows and reader viewport if this synced folder affects the current view
+            folder_affects_view = False
+            if msg.new_messages > 0:
+                if self.active_account_id == "*":
+                    if self.active_folder == "INBOX" and msg.folder_name.upper() == "INBOX":
+                        folder_affects_view = True
+                    elif self.active_folder == "All Unread":
+                        folder_affects_view = True
+                    elif self.active_folder == msg.folder_name:
+                        folder_affects_view = True
+                elif self.active_account_id == msg.account_id and self.active_folder == msg.folder_name:
+                    folder_affects_view = True
+
+            if folder_affects_view:
+                cur_msg_id = self.selected_message.id if self.selected_message else None
+                self._rebuild_message_rows()
+                if cur_msg_id:
+                    for idx, r in enumerate(self.message_rows):
+                        if r.message.id == cur_msg_id:
+                            self.message_cursor = idx
+                            break
+                self._update_reader_viewport(force=False)
+
+            self._rebuild_folder_rows()
             next_step = msg.remaining_steps[0]
             remaining = msg.remaining_steps[1:]
             self.sync_progress_text = f"Syncing {msg.account_name} / {next_step[2] or 'folders'}"
@@ -1671,15 +1701,42 @@ class EspressoMailApp(Model):
 
         return _runner
 
+    def _decrement_folder_unread(self, account_id: str, folder_name: str, is_starred: bool = False) -> None:
+        """Fast in-memory decrement of folder and unified unread counts when a message is read."""
+        if not hasattr(self, "folder_tree"):
+            return
+
+        def _update_node(node: TreeNode) -> None:
+            r = node.value
+            if r and isinstance(r, FolderTreeRow):
+                if r.account_id == account_id and r.folder_name == folder_name:
+                    node.value = replace(r, unread_count=max(0, r.unread_count - 1))
+                elif r.account_id == "*":
+                    if r.folder_name == "All Unread":
+                        node.value = replace(
+                            r,
+                            unread_count=max(0, r.unread_count - 1),
+                            total_count=max(0, r.total_count - 1),
+                        )
+                    elif r.folder_name == "INBOX" and folder_name.upper() == "INBOX":
+                        node.value = replace(r, unread_count=max(0, r.unread_count - 1))
+                    elif r.folder_name == "Starred" and is_starred:
+                        node.value = replace(r, unread_count=max(0, r.unread_count - 1))
+            for child in node.children:
+                _update_node(child)
+
+        for top in self.folder_tree.nodes:
+            _update_node(top)
+
     def _on_message_selection_changed(self, mark_read: bool = True) -> Cmd | None:
         m = self.selected_message
         sync_cmd = None
         if mark_read and m and not m.is_read:
             self.store.mark_read(m.id, True)
             m.is_read = True
-            self._rebuild_folder_rows()
+            self._decrement_folder_unread(m.account_id, m.folder, m.is_starred)
             sync_cmd = self._make_flag_sync_cmd(m.account_id, m.folder, m.uid, r"\Seen", True)
-        self._update_reader_viewport(force=True)
+        self._update_reader_viewport(force=False)
         if m:
             pending = self._get_pending_image_urls(m)
             if pending:
@@ -2184,9 +2241,8 @@ class EspressoMailApp(Model):
                         before_uid=min_uid if min_uid > 0 else None,
                     )
                     if fetched:
-                        for m in fetched:
-                            self.store.save_message(m)
-                        self.store.refresh_folder_counts()
+                        self.store.save_messages(fetched)
+                        self.store.refresh_folder_counts(acc.id, target_folder)
                         total_fetched += len(fetched)
                 finally:
                     client.disconnect()

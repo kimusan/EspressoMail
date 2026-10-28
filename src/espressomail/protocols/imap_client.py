@@ -773,10 +773,9 @@ class IMAPClient:
         count = 0
         try:
             fetched = self.fetch_recent_messages(folder=folder_name, limit=limit)
-            for msg in fetched:
-                store.save_message(msg)
-                count += 1
-            store.refresh_folder_counts()
+            if fetched:
+                count = store.save_messages(fetched)
+            store.refresh_folder_counts(self.account.id, folder_name)
         except Exception:
             pass
         return count
