@@ -3303,6 +3303,177 @@ class TestUIAndApp(unittest.TestCase):
         self.assertNotIn("📅", cal_none)
         self.assertIn("Calendar Invitation", cal_none)
 
+    def test_unicode_envelope_and_subfolder_container_icons(self) -> None:
+        """Verify unicode All Unread icon alignment and distinct subfolder container glyphs."""
+        from espressomail.ui.icons import get_folder_icon
+        from espresso.crema import string_width
+
+        # 1. Verify get_folder_icon across modes
+        self.assertEqual(get_folder_icon("ALL_UNREAD", mode="unicode"), "✉ ")
+        self.assertEqual(get_folder_icon("UNREAD", mode="unicode"), "✉ ")
+        self.assertEqual(get_folder_icon("UNIFIED_UNREAD", mode="unicode"), "✉ ")
+        self.assertEqual(get_folder_icon("ALL_UNREAD", mode="emoji"), "✉️")
+        self.assertEqual(get_folder_icon("ALL_UNREAD", mode="none"), "")
+
+        # String width of unicode envelope matches unified inbox
+        self.assertEqual(string_width(get_folder_icon("ALL_UNREAD", mode="unicode")), 2)
+        self.assertEqual(string_width(get_folder_icon("UNIFIED_INBOX", mode="unicode")), 2)
+
+        # 2. Verify subfolder container icons (⊞ when closed, ⊟ when open)
+        self.assertEqual(get_folder_icon("CUSTOM", mode="unicode", has_children=True, is_expanded=False), "⊞ ")
+        self.assertEqual(get_folder_icon("CUSTOM", mode="unicode", has_children=True, is_expanded=True), "⊟ ")
+        self.assertEqual(get_folder_icon("CUSTOM", mode="unicode", has_children=False), "▸ ")
+
+        # 3. Verify folder pane rendering and alignment
+        acc = AccountConfig(
+            id="acc_icons",
+            name="Icons Corp",
+            email="icons@corp.org",
+            full_name="Icon User",
+            imap_host="imap.corp.org",
+        )
+        self.store.save_account(acc)
+        self.store.sync_remote_folders(
+            acc.id,
+            [
+                Folder(id="f_in", account_id=acc.id, name="INBOX", display_name="Inbox", folder_type=FolderType.INBOX),
+                Folder(id="f_arch", account_id=acc.id, name="Archives", display_name="Archives", folder_type=FolderType.CUSTOM),
+                Folder(id="f_arch_sub", account_id=acc.id, name="Archives/2026", display_name="2026", folder_type=FolderType.CUSTOM),
+            ],
+        )
+
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.icon_mode = "unicode"
+        app._rebuild_folder_rows()
+
+        rendered = app._render_folder_pane(40, 20)
+        self.assertIn("⤓  Unified Inbox", rendered)
+        self.assertIn("✉  All Unread", rendered)
+        self.assertIn("⊞  Archives", rendered)
+
+        # Toggle Archives open with Space
+        app.focused_pane = "folders"
+        for idx, r in enumerate(app.folder_rows):
+            if r.label == "Archives":
+                app.folder_cursor = idx
+                break
+        app, _ = app.update(KeyMsg(" "))
+        rendered_open = app._render_folder_pane(40, 20)
+        self.assertIn("⊟  Archives", rendered_open)
+        self.assertIn("▸  2026", rendered_open)
+
+    def test_desktop_notifications_for_genuinely_new_messages_only(self) -> None:
+        """Verify desktop notifications only trigger for messages synced for the first time."""
+        from espressomail.ui.app import SyncProgressMsg
+        from espressomail.protocols.imap_client import IMAPClient
+        from unittest.mock import patch
+
+        acc = AccountConfig(
+            id="acc_notify_test",
+            name="Notify Test",
+            email="notify@test.org",
+            full_name="Notify User",
+            imap_host="imap.test.org",
+            imap_password="test_secret_pass",
+        )
+        self.store.save_account(acc)
+
+        m_existing = EmailMessage(
+            id="acc_notify_test:INBOX:100",
+            account_id=acc.id,
+            folder="INBOX",
+            subject="Existing Unread Mail",
+            sender_name="Old Friend",
+            sender_email="old@friend.org",
+            recipients_to=["notify@test.org"],
+            body_text="Already stored in sqlite",
+            is_read=False,
+        )
+        # 1. Pre-populate SQLite with existing message
+        total, newly = self.store.save_messages_with_new([m_existing])
+        self.assertEqual(total, 1)
+        self.assertEqual(len(newly), 1)
+
+        # Saving same message again produces 0 new messages
+        total2, newly2 = self.store.save_messages_with_new([m_existing])
+        self.assertEqual(total2, 1)
+        self.assertEqual(len(newly2), 0)
+
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.desktop_notifications = True
+
+        # 2. Simulate sync step re-syncing existing message (e.g. newly_arrived_messages is empty)
+        with patch("espressomail.ui.app.notify_new_messages") as mock_notify:
+            sync_existing_msg = SyncProgressMsg(
+                account_id=acc.id,
+                account_name=acc.name,
+                action="synced_folder",
+                folder_name="INBOX",
+                new_messages=0,
+                newly_arrived_messages=(),
+                remaining_steps=(),
+                is_done=True,
+            )
+            app, _ = app.update(sync_existing_msg)
+            mock_notify.assert_not_called()
+
+        # 3. Simulate sync step with genuinely new incoming message
+        m_brand_new = EmailMessage(
+            id="acc_notify_test:INBOX:101",
+            account_id=acc.id,
+            folder="INBOX",
+            subject="Brand New Urgent Mail",
+            sender_name="New Client",
+            sender_email="client@corp.org",
+            recipients_to=["notify@test.org"],
+            body_text="Just arrived from IMAP!",
+            is_read=False,
+        )
+        total3, newly3 = self.store.save_messages_with_new([m_brand_new])
+        self.assertEqual(len(newly3), 1)
+
+        with patch("espressomail.ui.app.notify_new_messages") as mock_notify:
+            sync_new_msg = SyncProgressMsg(
+                account_id=acc.id,
+                account_name=acc.name,
+                action="synced_folder",
+                folder_name="INBOX",
+                new_messages=1,
+                newly_arrived_messages=tuple(newly3),
+                remaining_steps=(),
+                is_done=True,
+            )
+            app, _ = app.update(sync_new_msg)
+            mock_notify.assert_called_once()
+            called_msgs = mock_notify.call_args[0][0]
+            self.assertEqual(len(called_msgs), 1)
+            self.assertEqual(called_msgs[0].id, m_brand_new.id)
+
+        # 4. Verify IMAPClient.sync_single_folder records last_newly_arrived
+        with patch.object(IMAPClient, "fetch_recent_messages") as mock_fetch:
+            mock_fetch.return_value = [m_existing]  # already in database
+            client = IMAPClient(acc)
+            count = client.sync_single_folder(self.store, "INBOX")
+            self.assertEqual(count, 0)
+            self.assertEqual(client.last_newly_arrived, [])
+
+            m_second_new = EmailMessage(
+                id="acc_notify_test:INBOX:102",
+                account_id=acc.id,
+                folder="INBOX",
+                subject="Second New Mail",
+                sender_name="Another Client",
+                sender_email="client2@corp.org",
+                recipients_to=["notify@test.org"],
+                body_text="Brand new unread",
+                is_read=False,
+            )
+            mock_fetch.return_value = [m_existing, m_second_new]
+            count2 = client.sync_single_folder(self.store, "INBOX")
+            self.assertEqual(count2, 1)
+            self.assertEqual(len(client.last_newly_arrived), 1)
+            self.assertEqual(client.last_newly_arrived[0].id, m_second_new.id)
+
 
 if __name__ == "__main__":
     unittest.main()

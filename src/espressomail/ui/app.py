@@ -194,6 +194,7 @@ class SyncProgressMsg(Msg):
     action: str  # "discovered_folders", "synced_folder", "sync_done"
     folder_name: str = ""
     new_messages: int = 0
+    newly_arrived_messages: tuple[EmailMessage, ...] = ()
     total_synced: int = 0
     total_folders: int = 0
     step_index: int = 0
@@ -228,6 +229,7 @@ class ImapPushEventMsg(Msg):
     folder: str
     event_type: str  # "exists", "recent", "expunge", "timeout", "not_supported", "error"
     new_messages: int = 0
+    newly_arrived_messages: tuple[EmailMessage, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -674,12 +676,9 @@ class EspressoMailApp(Model):
         top_nodes: list[TreeNode] = []
         unified_counts = self.store.get_unified_counts()
 
-        unified_unread_icon = (
-            "✉" if self.icon_mode == "unicode" else ("" if self.icon_mode == "none" else "✉️")
-        )
         unified_defs = [
             ("INBOX", "Unified Inbox", get_folder_icon("UNIFIED_INBOX", mode=self.icon_mode)),
-            ("All Unread", "All Unread", unified_unread_icon),
+            ("All Unread", "All Unread", get_folder_icon("ALL_UNREAD", mode=self.icon_mode)),
             ("Starred", "All Starred", get_folder_icon("STARRED", mode=self.icon_mode)),
             ("Drafts", "All Drafts", get_folder_icon("DRAFTS", mode=self.icon_mode)),
             ("Sent", "All Sent", get_folder_icon("SENT", mode=self.icon_mode)),
@@ -1199,32 +1198,20 @@ class EspressoMailApp(Model):
 
         # 7. Background Sync progress & steps
         if isinstance(msg, SyncProgressMsg):
-            if msg.is_done or not msg.remaining_steps:
-                self.is_syncing = False
-                self.sync_progress_text = ""
-                err_suffix = f" (Warnings: {'; '.join(msg.errors)})" if msg.errors else ""
-                summary = (
-                    msg.summary
-                    or f"✔ Synchronized {msg.total_synced} message(s) across {msg.total_folders} folder(s).{err_suffix}"
-                )
-                self.status_message = summary
-                self.refresh_data()
-                if self.auto_sync_interval > 0:
-                    return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
-                return self, None
-
-            self.is_syncing = True
-
-            # Trigger desktop notification for newly arrived messages if enabled
-            if self.desktop_notifications and msg.new_messages > 0:
-                new_msgs = self.store.list_messages(
-                    account_id=msg.account_id,
-                    folder=msg.folder_name,
-                    limit=min(5, msg.new_messages),
-                )
-                if new_msgs:
+            # Trigger desktop notification ONLY for newly arrived messages if enabled
+            if self.desktop_notifications and (msg.newly_arrived_messages or msg.new_messages > 0):
+                if msg.newly_arrived_messages:
+                    to_notify = [m for m in msg.newly_arrived_messages if not m.is_read and not m.is_draft and not m.is_trashed][:5]
+                else:
+                    # Fallback for manual/mocked SyncProgressMsg with new_messages > 0
+                    to_notify = self.store.list_messages(
+                        account_id=msg.account_id,
+                        folder=msg.folder_name,
+                        limit=min(5, msg.new_messages),
+                    )
+                if to_notify:
                     notify_new_messages(
-                        new_msgs,
+                        to_notify,
                         account_name=msg.account_name,
                         folder_name=msg.folder_name,
                         sound=self.notification_sound,
@@ -1232,7 +1219,7 @@ class EspressoMailApp(Model):
 
             # Only rebuild message rows and reader viewport if this synced folder affects the current view
             folder_affects_view = False
-            if msg.new_messages > 0:
+            if msg.new_messages > 0 or msg.newly_arrived_messages:
                 if self.active_account_id == "*":
                     if self.active_folder == "INBOX" and msg.folder_name.upper() == "INBOX":
                         folder_affects_view = True
@@ -1254,6 +1241,22 @@ class EspressoMailApp(Model):
                 self._update_reader_viewport(force=False)
 
             self._rebuild_folder_rows()
+
+            if msg.is_done or not msg.remaining_steps:
+                self.is_syncing = False
+                self.sync_progress_text = ""
+                err_suffix = f" (Warnings: {'; '.join(msg.errors)})" if msg.errors else ""
+                summary = (
+                    msg.summary
+                    or f"✔ Synchronized {msg.total_synced} message(s) across {msg.total_folders} folder(s).{err_suffix}"
+                )
+                self.status_message = summary
+                self.refresh_data()
+                if self.auto_sync_interval > 0:
+                    return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
+                return self, None
+
+            self.is_syncing = True
             next_step = msg.remaining_steps[0]
             remaining = msg.remaining_steps[1:]
             self.sync_progress_text = f"Syncing {msg.account_name} / {next_step[2] or 'folders'}"
@@ -1310,14 +1313,17 @@ class EspressoMailApp(Model):
             if msg.new_messages > 0:
                 self.status_message = f"⚡ Instant Push: {msg.new_messages} new message(s) in {msg.account_name}/{msg.folder}"
                 if self.desktop_notifications:
-                    new_msgs = self.store.list_messages(
-                        account_id=msg.account_id,
-                        folder=msg.folder,
-                        limit=min(5, msg.new_messages),
-                    )
-                    if new_msgs:
+                    if msg.newly_arrived_messages:
+                        to_notify = [m for m in msg.newly_arrived_messages if not m.is_read and not m.is_draft and not m.is_trashed][:5]
+                    else:
+                        to_notify = self.store.list_messages(
+                            account_id=msg.account_id,
+                            folder=msg.folder,
+                            limit=min(5, msg.new_messages),
+                        )
+                    if to_notify:
                         notify_new_messages(
-                            new_msgs,
+                            to_notify,
                             account_name=msg.account_name,
                             folder_name=msg.folder,
                             sound=self.notification_sound,
@@ -2799,6 +2805,7 @@ class EspressoMailApp(Model):
                     )
 
                 elif action == "sync_folder":
+                    newly_arrived: tuple[EmailMessage, ...] = ()
                     try:
                         client = IMAPClient(acc, timeout=20.0)
                         client.connect()
@@ -2808,6 +2815,7 @@ class EspressoMailApp(Model):
                                 folder_name=folder_name,
                                 limit=self.fetch_batch_size,
                             )
+                            newly_arrived = tuple(getattr(client, "last_newly_arrived", []))
                         finally:
                             client.disconnect()
                     except Exception as exc:
@@ -2819,6 +2827,7 @@ class EspressoMailApp(Model):
                         action="synced_folder",
                         folder_name=folder_name,
                         new_messages=step_synced,
+                        newly_arrived_messages=newly_arrived,
                         total_synced=total_synced + step_synced,
                         total_folders=total_folders,
                         step_index=step_index,
@@ -2930,18 +2939,21 @@ class EspressoMailApp(Model):
                     timeout=25.0,
                 )
                 new_synced = 0
+                newly_arrived: tuple[EmailMessage, ...] = ()
                 if has_event and event_type in ("exists", "recent"):
                     new_synced = client.sync_single_folder(
                         self.store,
                         folder_name=folder_to_watch,
                         limit=self.fetch_batch_size,
                     )
+                    newly_arrived = tuple(getattr(client, "last_newly_arrived", []))
                 return ImapPushEventMsg(
                     account_id=target_acc.id,
                     account_name=target_acc.name,
                     folder=folder_to_watch,
                     event_type=event_type,
                     new_messages=new_synced,
+                    newly_arrived_messages=newly_arrived,
                 )
             except Exception as exc:
                 logger.debug("IMAP push error for %s: %s", target_acc.email, exc)
@@ -3095,7 +3107,7 @@ class EspressoMailApp(Model):
                 if self.icon_mode == "emoji":
                     folder_icon = "📂\ufe0f" if node.expanded else "🗂️"
                 elif self.icon_mode == "unicode":
-                    folder_icon = "▾ " if node.expanded else "▸ "
+                    folder_icon = "⊟ " if node.expanded else "⊞ "
                 else:
                     folder_icon = ""
             else:

@@ -955,15 +955,44 @@ class LocalStore:
             self._save_message_in_tx(msg, harvest_contacts=harvest_contacts)
             self._conn.commit()
 
-    def save_messages(self, messages: Sequence[EmailMessage], harvest_contacts: bool = True) -> int:
-        """Insert or update a batch of EmailMessages within a single transaction."""
+    def save_messages_with_new(
+        self,
+        messages: Sequence[EmailMessage],
+        harvest_contacts: bool = True,
+    ) -> tuple[int, list[EmailMessage]]:
+        """Insert or update a batch of EmailMessages within a single transaction.
+
+        Returns:
+            A tuple of (total_processed_count, newly_inserted_messages).
+            newly_inserted_messages contains only EmailMessage objects that were not
+            previously present in the local database.
+        """
         if not messages:
-            return 0
+            return 0, []
         with self._lock:
+            ids_to_check = [m.id for m in messages if m.id]
+            existing_ids: set[str] = set()
+            if ids_to_check:
+                for i in range(0, len(ids_to_check), 500):
+                    chunk = ids_to_check[i : i + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows = self._conn.execute(
+                        f"SELECT id FROM messages WHERE id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                    existing_ids.update(r[0] for r in rows)
+
+            new_messages = [m for m in messages if m.id not in existing_ids]
+
             with self._conn:
                 for msg in messages:
                     self._save_message_in_tx(msg, harvest_contacts=harvest_contacts)
-            return len(messages)
+            return len(messages), new_messages
+
+    def save_messages(self, messages: Sequence[EmailMessage], harvest_contacts: bool = True) -> int:
+        """Insert or update a batch of EmailMessages within a single transaction."""
+        total, _ = self.save_messages_with_new(messages, harvest_contacts=harvest_contacts)
+        return total
 
     def get_message(self, msg_id: str) -> EmailMessage | None:
         """Retrieve a single EmailMessage (including attachments) by ID."""

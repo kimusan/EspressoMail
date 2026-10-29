@@ -47,6 +47,8 @@ def get_folder_icon(
     if m == "emoji":
         if ft in ("UNIFIED", "UNIFIED_INBOX"):
             return "📥\ufe0f"
+        if ft in ("UNREAD", "ALL_UNREAD", "UNIFIED_UNREAD"):
+            return "✉️"
         if ft in ("INBOX",):
             return "📨\ufe0f"
         if ft in ("STARRED", "FLAGGED"):
@@ -64,11 +66,15 @@ def get_folder_icon(
         if ft in ("ACCOUNT", "ROOT"):
             return "☕\ufe0f"
         # Custom or regular folder
-        return "📂\ufe0f" if (has_children and is_expanded) else "📁\ufe0f"
+        if has_children:
+            return "📂\ufe0f" if is_expanded else "🗂️"
+        return "📁\ufe0f"
 
     # Unicode monochrome mode: clean geometric and dingbat symbols
     if ft in ("UNIFIED", "UNIFIED_INBOX"):
         return "⤓ "
+    if ft in ("UNREAD", "ALL_UNREAD", "UNIFIED_UNREAD"):
+        return "✉ "
     if ft in ("INBOX",):
         return "▼ "
     if ft in ("STARRED", "FLAGGED"):
@@ -85,7 +91,9 @@ def get_folder_icon(
         return "⊘ "
     if ft in ("ACCOUNT", "ROOT"):
         return "▪ "
-    return "▾ " if (has_children and is_expanded) else "▸ "
+    if has_children:
+        return "⊟ " if is_expanded else "⊞ "
+    return "▸ "
 
 
 def get_pane_title(pane: str, mode: str = "emoji", extra: str = "") -> str:

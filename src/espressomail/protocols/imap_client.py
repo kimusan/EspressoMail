@@ -957,13 +957,23 @@ class IMAPClient:
     ) -> int:
         """Fetch and persist recent messages for a single folder into LocalStore."""
         count = 0
+        self.last_newly_arrived: list[EmailMessage] = []
         try:
             fetched = self.fetch_recent_messages(folder=folder_name, limit=limit)
             if fetched:
-                count = store.save_messages(fetched)
+                if hasattr(store, "save_messages_with_new"):
+                    _, new_msgs = store.save_messages_with_new(fetched)
+                else:
+                    store.save_messages(fetched)
+                    new_msgs = fetched
+                self.last_newly_arrived = [
+                    m for m in new_msgs
+                    if not m.is_read and not m.is_draft and not m.is_trashed
+                ]
+                count = len(new_msgs)
             store.refresh_folder_counts(self.account.id, folder_name)
         except Exception:
-            pass
+            self.last_newly_arrived = []
         return count
 
     def search_uids_remote(
