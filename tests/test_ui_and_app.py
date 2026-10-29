@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 import tempfile
 import unittest
@@ -2840,9 +2841,10 @@ class TestUIAndApp(unittest.TestCase):
         self.assertEqual(km.get_display_key("compose"), "ctrl+k")
 
         # File persistence
-        with tempfile.NamedTemporaryFile(suffix=".json") as tmp:
-            km.save_to_file(tmp.name)
-            loaded_km = KeymapManager.load_from_file(tmp.name)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = Path(tmp_dir) / "keymap.json"
+            km.save_to_file(file_path)
+            loaded_km = KeymapManager.load_from_file(file_path)
             self.assertEqual(loaded_km.preset, "vim")
             self.assertEqual(loaded_km.resolve_key("ctrl+k"), "compose")
 
