@@ -112,7 +112,7 @@ class OnboardingWizard(Model):
     def __init__(
         self,
         theme: Theme,
-        allow_cancel: bool = False,
+        allow_cancel: bool = True,
         credential_validator: Callable[[AccountConfig], tuple[bool, str]] | None = None,
         store: Any | None = None,
     ) -> None:
@@ -208,67 +208,85 @@ class OnboardingWizard(Model):
             pos_x = max(0, (getattr(self, "last_width", 100) - card_w) // 2)
             pos_y = max(0, (getattr(self, "last_height", 30) - card_h) // 2)
 
-            if pos_y <= msg.y < pos_y + card_h and pos_x <= msg.x < pos_x + card_w:
-                rel_y = msg.y - pos_y
+            if not (pos_y <= msg.y < pos_y + card_h and pos_x <= msg.x < pos_x + card_w):
+                if (
+                    msg.action == MouseAction.PRESS
+                    and msg.button == MouseButton.LEFT
+                    and self.step == 1
+                    and self.allow_cancel
+                ):
+                    return self, lambda: OnboardingCompleteMsg(account=None, cancelled=True)
+                return self, None
 
-                if self.step == 1:
-                    if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
-                        delta = -1 if msg.button == MouseButton.WHEEL_UP else 1
-                        self.provider_prompt.cursor = max(
-                            0, min(len(PROVIDER_PRESETS) - 1, self.provider_prompt.cursor + delta)
-                        )
+            rel_y = msg.y - pos_y
+
+            if self.step == 1:
+                if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
+                    delta = -1 if msg.button == MouseButton.WHEEL_UP else 1
+                    self.provider_prompt.cursor = max(
+                        0, min(len(PROVIDER_PRESETS) - 1, self.provider_prompt.cursor + delta)
+                    )
+                    return self, None
+                if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
+                    # options start at rel_y = 6 (header, spacing, question line)
+                    opt_idx = rel_y - 6
+                    if 0 <= opt_idx < len(PROVIDER_PRESETS):
+                        self.provider_prompt.cursor = opt_idx
+                        return self._handle_preset_selected(opt_idx)
+
+            elif self.step == 2:
+                if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
+                    field_idx = rel_y - 5
+                    if 0 <= field_idx <= 4:
+                        self.step2_focus = field_idx
+                        self._sync_focus()
                         return self, None
-                    if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
-                        # options start at rel_y = 6 (header, spacing, question line)
-                        opt_idx = rel_y - 6
-                        if 0 <= opt_idx < len(PROVIDER_PRESETS):
-                            self.provider_prompt.cursor = opt_idx
-                            return self._handle_preset_selected(opt_idx)
 
-                elif self.step == 2:
-                    if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
-                        field_idx = rel_y - 5
-                        if 0 <= field_idx <= 4:
-                            self.step2_focus = field_idx
-                            self._sync_focus()
-                            return self, None
-
-                elif self.step == 3:
-                    if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
-                        row_idx = rel_y - 5
-                        if 0 <= row_idx <= 8:
-                            self.step3_focus = row_idx
-                            self._sync_focus()
-                            if row_idx == 2:
-                                cur_idx = SECURITY_CYCLE.index(self.imap_security)
-                                self.imap_security = SECURITY_CYCLE[(cur_idx + 1) % len(SECURITY_CYCLE)]
-                            elif row_idx == 5:
-                                cur_idx = SECURITY_CYCLE.index(self.smtp_security)
-                                self.smtp_security = SECURITY_CYCLE[(cur_idx + 1) % len(SECURITY_CYCLE)]
-                            return self, None
-                        elif row_idx >= 9:
-                            return self._finalize_account()
+            elif self.step == 3:
+                if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
+                    row_idx = rel_y - 5
+                    if 0 <= row_idx <= 8:
+                        self.step3_focus = row_idx
+                        self._sync_focus()
+                        if row_idx == 2:
+                            cur_idx = SECURITY_CYCLE.index(self.imap_security)
+                            self.imap_security = SECURITY_CYCLE[(cur_idx + 1) % len(SECURITY_CYCLE)]
+                        elif row_idx == 5:
+                            cur_idx = SECURITY_CYCLE.index(self.smtp_security)
+                            self.smtp_security = SECURITY_CYCLE[(cur_idx + 1) % len(SECURITY_CYCLE)]
+                        return self, None
+                    elif row_idx >= 9:
+                        return self._finalize_account()
 
             return self, None
 
         # 2. Keyboard Interaction
-        if isinstance(msg, KeyMsg) and str(msg.key) == "esc":
-            if self.step > 1:
-                self.step -= 1
-                self.error_msg = ""
-                self.status_msg = ""
-                if self.step == 1:
-                    # Reset provider_prompt so all options are visible and navigable again
-                    curr_idx = self.provider_prompt.cursor
-                    self.provider_prompt = SelectPrompt(
-                        question="Select your email server type or provider preset:",
-                        options=[p.label for p in PROVIDER_PRESETS],
-                        default_index=curr_idx,
-                    )
-                self._sync_focus()
+        if isinstance(msg, KeyMsg):
+            k = str(msg.key).lower()
+
+            # Clean exit shortcuts: Ctrl+Q / Ctrl+C anytime, or 'q' on Step 1 (no text input active)
+            if k in ("ctrl+q", "ctrl+c") or (self.step == 1 and k == "q"):
+                from espresso import quit_app
+                return self, quit_app
+
+            if k == "esc":
+                if self.step > 1:
+                    self.step -= 1
+                    self.error_msg = ""
+                    self.status_msg = ""
+                    if self.step == 1:
+                        # Reset provider_prompt so all options are visible and navigable again
+                        curr_idx = self.provider_prompt.cursor
+                        self.provider_prompt = SelectPrompt(
+                            question="Select your email server type or provider preset:",
+                            options=[p.label for p in PROVIDER_PRESETS],
+                            default_index=curr_idx,
+                        )
+                    self._sync_focus()
+                    return self, None
+                if self.allow_cancel:
+                    return self, lambda: OnboardingCompleteMsg(account=None, cancelled=True)
                 return self, None
-            if self.allow_cancel:
-                return self, lambda: OnboardingCompleteMsg(account=None, cancelled=True)
 
         if self.step == 1:
             self.provider_prompt, cmd = self.provider_prompt.update(msg)
@@ -521,6 +539,7 @@ class OnboardingWizard(Model):
         header_line = "  →  ".join(step_badges)
 
         if self.step == 1:
+            cancel_hint = "   [Esc] Skip to Client" if self.allow_cancel else ""
             body = join_vertical(
                 Align.LEFT,
                 Style()
@@ -532,8 +551,7 @@ class OnboardingWizard(Model):
                 Style()
                 .foreground(self.theme.fg_muted)
                 .render(
-                    "[↑/↓] Navigate   [Enter] Select Option"
-                    + ("   [Esc] Cancel" if self.allow_cancel else "")
+                    f"[↑/↓] Navigate   [Enter] Select Option{cancel_hint}   [q] Quit"
                 ),
             )
         elif self.step == 2:
@@ -554,7 +572,9 @@ class OnboardingWizard(Model):
                 "",
                 Style()
                 .foreground(self.theme.fg_muted)
-                .render("[Tab/↑/↓] Next/Prev Field   [Ctrl+R] Show/Hide Password   [Enter] Next   [Esc] Back"),
+                .render(
+                    "[Tab/↑/↓] Next/Prev Field   [Ctrl+R] Show/Hide Password   [Enter] Next   [Esc] Back   [Ctrl+Q] Quit"
+                ),
             )
         else:
             imap_sec_style = (
@@ -593,7 +613,7 @@ class OnboardingWizard(Model):
                 Style()
                 .foreground(self.theme.fg_muted)
                 .render(
-                    "[Tab/↑/↓] Field   [Space/←/→] Cycle TLS   [Ctrl+G] PGP   [Enter] Finish   [Esc] Back"
+                    "[Tab/↑/↓] Field   [Space/←/→] Cycle TLS   [Ctrl+G] PGP   [Enter] Finish   [Esc] Back   [Ctrl+Q] Quit"
                 ),
             )
 

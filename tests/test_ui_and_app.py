@@ -3073,6 +3073,85 @@ class TestUIAndApp(unittest.TestCase):
         app._execute_action("remote_search")
         self.assertIsInstance(app.active_modal, SearchModal)
 
+    def test_onboarding_wizard_exit_and_quit_options(self) -> None:
+        """Verify OnboardingWizard exits cleanly via q, ctrl+q, ctrl+c, and esc."""
+        from espresso import quit_app
+        from espressomail.ui.onboarding import OnboardingCompleteMsg, OnboardingWizard
+        from espressomail.themes.engine import THEMES
+
+        wiz = OnboardingWizard(theme=THEMES["espresso"], allow_cancel=True)
+
+        # 1. 'q' on Step 1 quits the application cleanly
+        self.assertEqual(wiz.step, 1)
+        _, cmd_q = wiz.update(KeyMsg("q"))
+        self.assertIs(cmd_q, quit_app)
+
+        # 2. 'ctrl+q' and 'ctrl+c' quit the application cleanly
+        _, cmd_ctrl_q = wiz.update(KeyMsg("ctrl+q"))
+        self.assertIs(cmd_ctrl_q, quit_app)
+        _, cmd_ctrl_c = wiz.update(KeyMsg("ctrl+c"))
+        self.assertIs(cmd_ctrl_c, quit_app)
+
+        # 3. 'esc' on Step 1 cancels / skips onboarding
+        wiz, cmd_esc = wiz.update(KeyMsg("esc"))
+        self.assertIsNotNone(cmd_esc)
+        assert cmd_esc is not None
+        res_esc = cmd_esc()
+        self.assertIsInstance(res_esc, OnboardingCompleteMsg)
+        self.assertTrue(res_esc.cancelled)
+        self.assertIsNone(res_esc.account)
+
+        # 4. Step 2 & Step 3 allow Ctrl+Q / Ctrl+C to quit, and Esc to step back
+        wiz = OnboardingWizard(theme=THEMES["espresso"], allow_cancel=True)
+        wiz, _ = wiz.update(KeyMsg("enter"))  # Advance to Step 2
+        self.assertEqual(wiz.step, 2)
+        _, cmd_s2_quit = wiz.update(KeyMsg("ctrl+q"))
+        self.assertIs(cmd_s2_quit, quit_app)
+
+        wiz, _ = wiz.update(KeyMsg("esc"))  # Back to Step 1
+        self.assertEqual(wiz.step, 1)
+
+        # 5. Mouse click outside modal card on Step 1 cancels/skips
+        wiz, cmd_click = wiz.update(MouseMsg(x=0, y=0, action=MouseAction.PRESS, button=MouseButton.LEFT))
+        self.assertIsNotNone(cmd_click)
+        assert cmd_click is not None
+        res_click = cmd_click()
+        self.assertIsInstance(res_click, OnboardingCompleteMsg)
+        self.assertTrue(res_click.cancelled)
+
+    def test_app_initial_onboarding_can_be_skipped_and_quit(self) -> None:
+        """Verify EspressoMailApp allows escaping and quitting initial onboarding on empty store."""
+        from espresso import quit_app
+        from espressomail.storage.database import LocalStore
+        from espressomail.ui.app import EspressoMailApp
+
+        store = LocalStore(":memory:")
+        app = EspressoMailApp(store, show_splash=False)
+        self.assertTrue(app.show_onboarding)
+
+        # Pressing 'q' on initial onboarding immediately quits cleanly
+        app, cmd_quit = app.update(KeyMsg("q"))
+        self.assertIs(cmd_quit, quit_app)
+
+        # Restart app with fresh store
+        app = EspressoMailApp(store, show_splash=False)
+        self.assertTrue(app.show_onboarding)
+
+        # Pressing 'esc' skips onboarding to the main client
+        app, cmd_skip = app.update(KeyMsg("esc"))
+        self.assertFalse(app.show_onboarding)
+        self.assertTrue(app.onboarding_skipped)
+        self.assertIn("Onboarding skipped", app.status_message)
+
+        # Verify main client view renders cleanly without errors
+        view_str = app.view()
+        self.assertIn("EspressoMail", view_str)
+
+        # Closing a modal afterwards does not re-trap in onboarding
+        from espressomail.ui.modals import ModalClosedMsg
+        app, _ = app.update(ModalClosedMsg("Closed test modal"))
+        self.assertFalse(app.show_onboarding)
+
 
 if __name__ == "__main__":
     unittest.main()

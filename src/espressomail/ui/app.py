@@ -280,9 +280,10 @@ class EspressoMailApp(Model):
         self.show_splash = show_splash
         self.splash = SplashScreen(self.theme)
         self.show_onboarding = False
+        self.onboarding_skipped = False
         self.onboarding = OnboardingWizard(
             self.theme,
-            allow_cancel=False,
+            allow_cancel=True,
             credential_validator=self.credential_validator,
             store=self.store,
         )
@@ -982,7 +983,7 @@ class EspressoMailApp(Model):
                     self.show_onboarding = True
                     self.onboarding = OnboardingWizard(
                         self.theme,
-                        allow_cancel=False,
+                        allow_cancel=True,
                         credential_validator=self.credential_validator,
                         store=self.store,
                     )
@@ -1001,6 +1002,7 @@ class EspressoMailApp(Model):
             if isinstance(msg, OnboardingCompleteMsg):
                 self.show_onboarding = False
                 if msg.account is not None:
+                    self.onboarding_skipped = False
                     if msg.generate_pgp:
                         k_info = self.pgp.generate_key(msg.account.full_name, msg.account.email)
                         msg.account.pgp_key_id = k_info.key_id
@@ -1022,11 +1024,21 @@ class EspressoMailApp(Model):
                     )
                     self.refresh_data()
                     return self, self._sync_accounts_cmd
+                else:
+                    self.onboarding_skipped = True
+                    if not self.store.list_accounts():
+                        self.status_message = "Onboarding skipped. Press 'O' to add an account, or 'q' to quit."
+                    else:
+                        self.status_message = "Onboarding cancelled."
                 self.refresh_data()
                 return self, None
             self.onboarding, cmd = self.onboarding.update(msg)
+            if cmd is quit_app:
+                return self, quit_app
             if cmd is not None and callable(cmd):
                 emitted = cmd()
+                if cmd is quit_app or (hasattr(emitted, "__class__") and emitted.__class__.__name__ == "QuitMsg"):
+                    return self, quit_app
                 if isinstance(emitted, OnboardingCompleteMsg):
                     return self.update(emitted)
             return self, cmd
@@ -1103,11 +1115,11 @@ class EspressoMailApp(Model):
                 if msg.status_note:
                     self.status_message = msg.status_note
                 self.refresh_data()
-                if not self.store.list_accounts():
+                if not self.onboarding_skipped and not self.store.list_accounts():
                     self.show_onboarding = True
                     self.onboarding = OnboardingWizard(
                         self.theme,
-                        allow_cancel=False,
+                        allow_cancel=True,
                         credential_validator=self.credential_validator,
                         store=self.store,
                     )
@@ -2043,6 +2055,7 @@ class EspressoMailApp(Model):
 
         if action_id == "new_account":
             self.show_onboarding = True
+            self.onboarding_skipped = False
             self.onboarding = OnboardingWizard(
                 self.theme,
                 allow_cancel=True,
