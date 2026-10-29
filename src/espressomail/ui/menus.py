@@ -112,6 +112,7 @@ DEFAULT_MENUS: tuple[MenuCategory, ...] = (
         hotkey="h",
         items=(
             MenuItem("show_shortcuts", "Keyboard & Mouse Shortcuts", "?"),
+            MenuItem("check_updates", "Check for Updates...", ""),
             MenuItem("replay_splash", "Show Startup Splash Screen", "F1"),
         ),
     ),

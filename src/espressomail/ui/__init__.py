@@ -10,6 +10,7 @@ from espressomail.ui.app import (
     MoreMessagesFetchedMsg,
     SyncCompletedMsg,
     SyncProgressMsg,
+    UpdateCheckCompletedMsg,
 )
 from espressomail.ui.formatter import (
     format_email_body,
@@ -46,6 +47,7 @@ from espressomail.ui.modals import (
     PreferencesSavedMsg,
     SearchModal,
     SieveModal,
+    UpdateNoticeModal,
 )
 from espressomail.ui.onboarding import OnboardingCompleteMsg, OnboardingWizard, PROVIDER_PRESETS
 from espressomail.ui.splash import SplashDoneMsg, SplashScreen, SplashTickMsg
@@ -89,6 +91,8 @@ __all__ = [
     "DownloadAttachmentsModal",
     "PreferencesModal",
     "PreferencesSavedMsg",
+    "UpdateNoticeModal",
+    "UpdateCheckCompletedMsg",
     "IconMode",
     "ICON_MODES",
     "ICON_MODE_LABELS",

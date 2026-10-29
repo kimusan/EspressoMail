@@ -26,6 +26,7 @@ from pathlib import Path
 
 # Paths
 REPO_ROOT = Path(__file__).resolve().parent.parent
+PYPROJECT_FILE = REPO_ROOT / "pyproject.toml"
 INIT_FILE = REPO_ROOT / "src" / "espressomail" / "__init__.py"
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.md"
 PKGBUILD_FILE = REPO_ROOT / "packaging" / "arch" / "PKGBUILD"
@@ -79,14 +80,18 @@ def run_cmd(
 
 
 def get_current_version() -> str:
-    """Read the current __version__ string from src/espressomail/__init__.py."""
-    if not INIT_FILE.is_file():
-        raise FileNotFoundError(f"Missing init file: {INIT_FILE}")
-    content = INIT_FILE.read_text(encoding="utf-8")
-    match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
-    if not match:
-        raise ValueError(f"Could not find __version__ in {INIT_FILE}")
-    return match.group(1).lstrip("v")
+    """Read the current version string from pyproject.toml (single source of truth)."""
+    if PYPROJECT_FILE.is_file():
+        content = PYPROJECT_FILE.read_text(encoding="utf-8")
+        match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
+        if match:
+            return match.group(1).lstrip("v")
+    if INIT_FILE.is_file():
+        content = INIT_FILE.read_text(encoding="utf-8")
+        match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
+        if match:
+            return match.group(1).lstrip("v")
+    raise ValueError(f"Could not find version in {PYPROJECT_FILE}")
 
 
 def calculate_next_version(current: str, bump_or_version: str) -> str:
@@ -211,17 +216,19 @@ def update_version_files(new_version: str, dry_run: bool = False) -> list[Path]:
     """Update version strings in source and packaging files."""
     changed_files: list[Path] = []
 
-    # 1. Update src/espressomail/__init__.py
-    init_content = INIT_FILE.read_text(encoding="utf-8")
-    new_init_content = re.sub(
-        r'__version__\s*=\s*["\'][^"\']+["\']',
-        f'__version__ = "{new_version}"',
-        init_content,
-    )
-    if new_init_content != init_content:
-        changed_files.append(INIT_FILE)
-        if not dry_run:
-            INIT_FILE.write_text(new_init_content, encoding="utf-8")
+    # 1. Update pyproject.toml (single source of truth)
+    if PYPROJECT_FILE.is_file():
+        pyproject_content = PYPROJECT_FILE.read_text(encoding="utf-8")
+        new_pyproject_content = re.sub(
+            r'^version\s*=\s*["\'][^"\']+["\']',
+            f'version = "{new_version}"',
+            pyproject_content,
+            flags=re.MULTILINE,
+        )
+        if new_pyproject_content != pyproject_content:
+            changed_files.append(PYPROJECT_FILE)
+            if not dry_run:
+                PYPROJECT_FILE.write_text(new_pyproject_content, encoding="utf-8")
 
     # 2. Update packaging/arch/PKGBUILD if exists
     if PKGBUILD_FILE.is_file():

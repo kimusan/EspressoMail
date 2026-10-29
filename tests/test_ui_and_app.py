@@ -18,6 +18,7 @@ try:
         DownloadAttachmentsModal,
         EspressoMailApp,
         ImageRenderBackend,
+        ModalClosedMsg,
         MoreMessagesFetchedMsg,
         OnboardingCompleteMsg,
         OnboardingWizard,
@@ -28,10 +29,19 @@ try:
         SplashScreen,
         SplashTickMsg,
         TerminalImageRenderer,
+        UpdateCheckCompletedMsg,
+        UpdateNoticeModal,
         format_message_for_reading_pane,
         html_to_terminal_text,
     )
+    from espressomail import __version__
     from espressomail.ui.formatter import _apply_inline_formatting
+    from espressomail.updater import (
+        ReleaseInfo,
+        check_github_release,
+        is_newer_version,
+        parse_version,
+    )
     from espressomail.themes import ThemeEngine
     HAS_ESPRESSO = True
 except ImportError:
@@ -3665,6 +3675,220 @@ class TestUIAndApp(unittest.TestCase):
             self.assertIsInstance(spam_res, FolderSyncedMsg)
             self.assertEqual(spam_res.folder, "Spam")
             self.assertIn("up to date", spam_res.message)
+
+    def test_single_point_version_and_updater_logic(self) -> None:
+        """Verify version resolution from pyproject.toml and semantic updater comparisons."""
+        import json
+        import tomllib
+        from pathlib import Path
+
+        pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        self.assertTrue(pyproject_path.exists())
+        with open(pyproject_path, "rb") as f:
+            pyproject_data = tomllib.load(f)
+        pyproject_ver = pyproject_data.get("project", {}).get("version")
+        self.assertEqual(pyproject_ver, __version__)
+
+        # Version parsing tests
+        self.assertEqual(parse_version("0.2.0"), (0, 2, 0))
+        self.assertEqual(parse_version("v0.3.1"), (0, 3, 1))
+        self.assertEqual(parse_version("v1.0.0-rc1"), (1, 0, 0))
+        self.assertEqual(parse_version("10.20.30"), (10, 20, 30))
+        self.assertEqual(parse_version("invalid"), (0,))
+
+        # Version comparison tests
+        self.assertTrue(is_newer_version("0.3.0", "0.2.0"))
+        self.assertTrue(is_newer_version("0.2.1", "0.2.0"))
+        self.assertTrue(is_newer_version("1.0.0", "0.9.9"))
+        self.assertTrue(is_newer_version("0.2.1", "0.2"))
+        self.assertFalse(is_newer_version("0.2.0", "0.2.0"))
+        self.assertFalse(is_newer_version("0.1.9", "0.2.0"))
+        self.assertFalse(is_newer_version("0.2", "0.2.0"))
+
+        # GitHub release checker with mocked responses
+        release_payload = json.dumps({
+            "tag_name": "v0.3.0",
+            "name": "EspressoMail 0.3.0",
+            "html_url": "https://github.com/kimusan/EspressoMail/releases/tag/v0.3.0",
+            "published_at": "2026-10-30T00:00:00Z",
+            "body": "- Added automated update checks\n- Improved folder rendering",
+        }).encode("utf-8")
+
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = release_payload
+        mock_resp.__enter__.return_value = mock_resp
+
+        with mock.patch("urllib.request.urlopen", return_value=mock_resp):
+            info = check_github_release(current_version="0.2.0")
+            self.assertIsNotNone(info)
+            assert info is not None
+            self.assertEqual(info.tag_name, "v0.3.0")
+            self.assertEqual(info.version, "0.3.0")
+            self.assertTrue(info.is_newer)
+            self.assertIn("update checks", info.body)
+
+        # Check when already up-to-date
+        with mock.patch("urllib.request.urlopen", return_value=mock_resp):
+            info = check_github_release(current_version="0.3.0")
+            self.assertIsNotNone(info)
+            assert info is not None
+            self.assertFalse(info.is_newer)
+
+        # Check offline / network error handling
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("Network unreachable")):
+            info_offline = check_github_release(current_version="0.2.0")
+            self.assertIsNone(info_offline)
+
+    def test_update_notice_modal_and_preferences(self) -> None:
+        """Verify UpdateNoticeModal rendering, key handling, and preferences update settings."""
+        theme = ThemeEngine("espresso").current
+        release = ReleaseInfo(
+            tag_name="v0.3.0",
+            version="0.3.0",
+            name="EspressoMail 0.3.0",
+            html_url="https://github.com/kimusan/EspressoMail/releases/tag/v0.3.0",
+            published_at="2026-10-30T00:00:00Z",
+            body="Exciting new update with release checker!",
+            is_newer=True,
+        )
+
+        modal = UpdateNoticeModal(theme=theme, release=release, installed_version="0.2.0")
+        view_text = modal.view(70, 18)
+        self.assertIn("v0.3.0", view_text)
+        self.assertIn("0.2.0", view_text)
+        self.assertIn("Exciting new update", view_text)
+        self.assertIn("github.com", view_text)
+
+        # Test dismissal via Enter, Esc, q, and Space
+        for key in ("enter", "esc", "q", " "):
+            _, cmd = modal.update(KeyMsg(key))
+            self.assertIsNotNone(cmd)
+            closed_msg = cmd() if callable(cmd) else None
+            self.assertIsInstance(closed_msg, ModalClosedMsg)
+
+        # Test dismissal via mouse click on close button
+        _, mouse_cmd = modal.update(MouseMsg(x=35, y=14, button=MouseButton.LEFT, action=MouseAction.PRESS))
+        self.assertIsNotNone(mouse_cmd)
+        self.assertIsInstance(mouse_cmd(), ModalClosedMsg)
+
+        # Test PreferencesModal Tab 4: Keys & System update settings
+        pref = PreferencesModal(self.store, current_theme=theme, download_dir="/tmp")
+        # Switch to Tab 4 (Keys & System) via KeyMsg("4")
+        pref, _ = pref.update(KeyMsg("4"))
+        self.assertEqual(pref.active_tab, 3)
+        # Select and toggle option 4 (check_updates_startup)
+        pref.focus_idx = 4
+        pref, _ = pref.update(KeyMsg("right"))
+        self.assertFalse(pref.check_updates_startup)
+        # Select and cycle option 5 (update_notice_mode)
+        pref.focus_idx = 5
+        self.assertEqual(pref.update_notice_mode, "toast")
+        pref, _ = pref.update(KeyMsg("right"))
+        self.assertEqual(pref.update_notice_mode, "dialog")
+        pref, _ = pref.update(KeyMsg("right"))
+        self.assertEqual(pref.update_notice_mode, "both")
+
+        # Save preferences via ctrl+s
+        pref, save_cmd = pref.update(KeyMsg("ctrl+s"))
+        self.assertIsNotNone(save_cmd)
+        saved_msg = save_cmd() if callable(save_cmd) else None
+        self.assertIsInstance(saved_msg, PreferencesSavedMsg)
+        assert isinstance(saved_msg, PreferencesSavedMsg)
+        self.assertFalse(saved_msg.check_updates_startup)
+        self.assertEqual(saved_msg.update_notice_mode, "both")
+        self.assertEqual(self.store.get_setting("check_updates_startup"), "0")
+        self.assertEqual(self.store.get_setting("update_notice_mode"), "both")
+
+    def test_app_update_checking_toast_and_dialog_integration(self) -> None:
+        """Verify EspressoMailApp startup check, toast overlay, modal notice, and manual checks."""
+        populate_test_store(self.store)
+        app = EspressoMailApp(self.store, show_splash=False)
+        self.assertTrue(app.check_updates_startup)
+        self.assertEqual(app.update_notice_mode, "toast")
+
+        # Startup init() produces update check command
+        init_cmd = app.init()
+        self.assertIsNotNone(init_cmd)
+
+        newer_release = ReleaseInfo(
+            tag_name="v0.3.0",
+            version="0.3.0",
+            name="EspressoMail 0.3.0",
+            html_url="https://github.com/kimusan/EspressoMail/releases/tag/v0.3.0",
+            published_at="2026-10-30T00:00:00Z",
+            body="New features",
+            is_newer=True,
+        )
+
+        # 1. Toast mode: UpdateCheckCompletedMsg adds toast notification and overlays in view()
+        app.update_notice_mode = "toast"
+        app, _ = app.update(UpdateCheckCompletedMsg(release=newer_release, manual=False))
+        self.assertIsNone(app.active_modal)
+        self.assertTrue(app.toasts.has_toasts)
+        view_rendered = app.view()
+        self.assertIn("v0.3.0", view_rendered)
+
+        # 2. Dialog mode: UpdateCheckCompletedMsg opens UpdateNoticeModal
+        app2 = EspressoMailApp(self.store, show_splash=False)
+        app2.update_notice_mode = "dialog"
+        app2, _ = app2.update(UpdateCheckCompletedMsg(release=newer_release, manual=False))
+        self.assertIsInstance(app2.active_modal, UpdateNoticeModal)
+        modal_view = app2.view()
+        self.assertIn("Update Available", modal_view)
+
+        # 3. Both mode: shows modal and adds toast
+        app3 = EspressoMailApp(self.store, show_splash=False)
+        app3.update_notice_mode = "both"
+        app3, _ = app3.update(UpdateCheckCompletedMsg(release=newer_release, manual=False))
+        self.assertIsInstance(app3.active_modal, UpdateNoticeModal)
+        self.assertTrue(app3.toasts.has_toasts)
+
+        # 4. Splash screen active: defers notice until SplashDoneMsg
+        app_splash = EspressoMailApp(self.store, show_splash=True)
+        app_splash.update_notice_mode = "dialog"
+        app_splash, _ = app_splash.update(UpdateCheckCompletedMsg(release=newer_release, manual=False))
+        # Modal should not be active during splash screen
+        self.assertIsNone(app_splash.active_modal)
+        self.assertEqual(app_splash.pending_update_release, newer_release)
+        # Splash finishes
+        app_splash, _ = app_splash.update(SplashDoneMsg())
+        self.assertFalse(app_splash.show_splash)
+        self.assertIsInstance(app_splash.active_modal, UpdateNoticeModal)
+        self.assertIsNone(app_splash.pending_update_release)
+
+        # 5. Manual update check via action 'check_updates'
+        app_manual = EspressoMailApp(self.store, show_splash=False)
+        app_manual, check_cmd = app_manual._execute_action("check_updates")
+        self.assertIsNotNone(check_cmd)
+        self.assertIn("Checking GitHub", app_manual.status_message)
+
+        # Execute check command when up to date
+        with mock.patch("espressomail.ui.app.check_github_release") as mock_check:
+            mock_check.return_value = ReleaseInfo(
+                tag_name=f"v{__version__}",
+                version=__version__,
+                name=f"EspressoMail {__version__}",
+                html_url="https://...",
+                is_newer=False,
+            )
+            msg = check_cmd()
+            self.assertIsInstance(msg, UpdateCheckCompletedMsg)
+            self.assertTrue(msg.manual)
+            self.assertFalse(msg.release.is_newer)
+            app_manual, _ = app_manual.update(msg)
+            self.assertIn("up to date", app_manual.status_message)
+            self.assertTrue(app_manual.toasts.has_toasts)
+
+        # 6. Check Menu bar and Command Palette entries
+        help_menu = next((m for m in app.menu_bar.categories if m.title == "Help"), None)
+        self.assertIsNotNone(help_menu)
+        check_item = next((item for item in help_menu.items if item.action_id == "check_updates"), None)
+        self.assertIsNotNone(check_item)
+        self.assertEqual(check_item.label, "Check for Updates...")
+
+        palette_item = next((item for item in app.command_palette.items if item.id == "check_updates"), None)
+        self.assertIsNotNone(palette_item)
+        self.assertIn("Check for Updates", palette_item.title)
 
 
 if __name__ == "__main__":

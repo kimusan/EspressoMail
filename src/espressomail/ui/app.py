@@ -52,6 +52,7 @@ from espresso.crema import (
     truncate_ansi,
 )
 
+from espressomail import __version__
 from espressomail.crypto.pgp import PGPManager
 from espressomail.keymaps import KeymapManager
 from espressomail.models.entities import (
@@ -118,9 +119,11 @@ from espressomail.ui.modals import (
     SearchRemoteMsg,
     SearchSelectMessageMsg,
     SieveModal,
+    UpdateNoticeModal,
 )
 from espressomail.ui.onboarding import OnboardingCompleteMsg, OnboardingWizard
 from espressomail.ui.splash import SplashDoneMsg, SplashScreen
+from espressomail.updater import ReleaseInfo, check_github_release, is_newer_version
 
 
 @dataclass(frozen=True)
@@ -130,6 +133,15 @@ class RemoteSearchDoneMsg(Msg):
     query: str
     found_count: int
     error: str = ""
+
+
+@dataclass(frozen=True)
+class UpdateCheckCompletedMsg(Msg):
+    """Emitted when background GitHub release update check completes."""
+
+    release: ReleaseInfo | None
+    error: str = ""
+    manual: bool = False
 
 
 @dataclass(frozen=True)
@@ -368,6 +380,12 @@ class EspressoMailApp(Model):
         # Command Palette (Ctrl+P)
         self.command_palette = self._build_command_palette()
 
+        # Update checker preferences and state
+        self.check_updates_startup: bool = self.store.get_setting("check_updates_startup", "1") == "1"
+        self.update_notice_mode: str = self.store.get_setting("update_notice_mode", "toast")
+        self.pending_update_release: ReleaseInfo | None = None
+        self.latest_checked_release: ReleaseInfo | None = None
+
         self.refresh_data()
         if not self.show_splash and not self.store.list_accounts():
             self.show_onboarding = True
@@ -528,6 +546,7 @@ class EspressoMailApp(Model):
             PaletteItem("toggle_auto_sync", "Accounts: Toggle Auto-Sync Timer", "Toggle periodic background email sync on or off", "", "Accounts"),
             PaletteItem("toggle_imap_push", "Accounts: Toggle IMAP Push (IDLE)", "Enable or disable instant real-time IMAP push notifications", "", "Accounts"),
             PaletteItem("empty_trash", "Mail: Empty Trash", "Permanently delete trashed messages", "X", "Mail"),
+            PaletteItem("check_updates", "Help: Check for Updates", "Check GitHub for newer releases of EspressoMail", "", "Help"),
             PaletteItem("show_shortcuts", "Help: Keyboard & Mouse Shortcuts", "Display full hotkey guide", "?", "Help"),
             PaletteItem("quit_app", "Application: Quit EspressoMail", "Exit cleanly", "q", "Application"),
         ]
@@ -541,9 +560,16 @@ class EspressoMailApp(Model):
         )
 
     def init(self) -> Cmd | None:
-        if self.show_splash:
-            return self.splash.init()
         cmds: list[Cmd] = []
+        if self.check_updates_startup:
+            cmds.append(self._make_check_update_cmd(manual=False))
+
+        if self.show_splash:
+            splash_cmd = self.splash.init()
+            if splash_cmd:
+                cmds.insert(0, splash_cmd)
+            return batch(*cmds) if cmds else None
+
         if any(acc.imap_password for acc in self.store.list_accounts(enabled_only=True)):
             self.status_message = "Synchronizing IMAP accounts..."
             cmds.append(self._sync_accounts_cmd)
@@ -1012,10 +1038,44 @@ class EspressoMailApp(Model):
         # 2. Toast notifications auto-dismiss
         self.toasts, _ = self.toasts.update(msg)
 
+        # Update check completions from background command
+        if isinstance(msg, UpdateCheckCompletedMsg):
+            if msg.release:
+                self.latest_checked_release = msg.release
+            if msg.release and msg.release.is_newer:
+                if self.show_splash or self.show_onboarding or self.active_modal is not None:
+                    self.pending_update_release = msg.release
+                    if self.update_notice_mode in ("toast", "both") and not self.show_splash:
+                        self.toasts.add(
+                            f"New version {msg.release.tag_name} available! (current: v{__version__})",
+                            level=ToastLevel.INFO,
+                        )
+                else:
+                    return self._trigger_update_notice(
+                        msg.release,
+                        force_dialog=msg.manual and (self.update_notice_mode == "dialog"),
+                    )
+            elif msg.manual:
+                if msg.error:
+                    self.status_message = f"⚠ Update check failed: {msg.error}"
+                    self.toasts.add(f"Update check failed: {msg.error}", level=ToastLevel.WARNING)
+                else:
+                    cur_ver = f"v{__version__}"
+                    self.status_message = f"✔ EspressoMail is up to date ({cur_ver})."
+                    self.toasts.add(f"EspressoMail is up to date ({cur_ver})", level=ToastLevel.INFO)
+            return self, None
+
         # 3. Splash screen lifecycle
         if self.show_splash:
             if isinstance(msg, SplashDoneMsg):
                 self.show_splash = False
+                cmds: list[Cmd] = []
+                if self.pending_update_release and self.pending_update_release.is_newer:
+                    rel = self.pending_update_release
+                    self.pending_update_release = None
+                    _, u_cmd = self._trigger_update_notice(rel)
+                    if u_cmd:
+                        cmds.append(u_cmd)
                 if not self.store.list_accounts():
                     self.show_onboarding = True
                     self.onboarding = OnboardingWizard(
@@ -1024,13 +1084,13 @@ class EspressoMailApp(Model):
                         credential_validator=self.credential_validator,
                         store=self.store,
                     )
-                    return self, None
+                    return self, batch(*cmds) if cmds else None
                 if any(acc.imap_password for acc in self.store.list_accounts(enabled_only=True)):
                     self.is_syncing = True
                     self.sync_progress_text = "Starting sync..."
                     self.status_message = "⟳ Synchronizing IMAP accounts in background..."
-                    return self, self._sync_accounts_cmd
-                return self, None
+                    cmds.append(self._sync_accounts_cmd)
+                return self, batch(*cmds) if cmds else None
             self.splash, cmd = self.splash.update(msg)
             return self, cmd
 
@@ -1107,6 +1167,8 @@ class EspressoMailApp(Model):
             self.fetch_batch_size = msg.fetch_batch_size
             self.desktop_notifications = msg.desktop_notifications
             self.notification_sound = msg.notification_sound
+            self.check_updates_startup = getattr(msg, "check_updates_startup", True)
+            self.update_notice_mode = getattr(msg, "update_notice_mode", "toast")
             old_sync_interval = self.auto_sync_interval
             self.auto_sync_interval = msg.auto_sync_interval
             old_push = self.imap_push_enabled
@@ -1155,6 +1217,10 @@ class EspressoMailApp(Model):
                 if msg.status_note:
                     self.status_message = msg.status_note
                 self.refresh_data()
+                if self.pending_update_release and self.pending_update_release.is_newer:
+                    rel = self.pending_update_release
+                    self.pending_update_release = None
+                    return self._trigger_update_notice(rel)
                 if not self.onboarding_skipped and not self.store.list_accounts():
                     self.show_onboarding = True
                     self.onboarding = OnboardingWizard(
@@ -2516,6 +2582,45 @@ class EspressoMailApp(Model):
                 self.status_message = "IMAP Push (IDLE) disabled: relying on periodic auto-sync timer."
                 return self, None
 
+        if action_id == "check_updates":
+            self.status_message = "Checking GitHub for newer releases..."
+            return self, self._make_check_update_cmd(manual=True)
+
+        return self, None
+
+    def _make_check_update_cmd(self, manual: bool = False) -> Cmd:
+        def _check() -> Msg:
+            try:
+                rel = check_github_release(current_version=__version__)
+                if rel is None:
+                    return UpdateCheckCompletedMsg(release=None, error="Unable to contact GitHub releases server", manual=manual)
+                return UpdateCheckCompletedMsg(release=rel, manual=manual)
+            except Exception as e:
+                logger.warning("Failed to check for updates: %s", e)
+                return UpdateCheckCompletedMsg(release=None, error=str(e), manual=manual)
+
+        return _check
+
+    def _trigger_update_notice(
+        self, release: ReleaseInfo, force_dialog: bool = False
+    ) -> tuple[EspressoMailApp, Cmd | None]:
+        show_dialog = force_dialog or (self.update_notice_mode in ("dialog", "both"))
+        show_toast = (self.update_notice_mode in ("toast", "both"))
+
+        if show_toast:
+            self.toasts.add(
+                f"New version {release.tag_name} available! (current: v{__version__})",
+                level=ToastLevel.INFO,
+            )
+        self.status_message = (
+            f"Notice: EspressoMail {release.tag_name} is available (installed: v{__version__})."
+        )
+        if show_dialog:
+            self.active_modal = UpdateNoticeModal(
+                theme=self.theme,
+                release=release,
+                installed_version=__version__,
+            )
         return self, None
 
     def _open_reply_or_forward(
@@ -3146,6 +3251,15 @@ class EspressoMailApp(Model):
                 center=True,
                 dim_backdrop=True,
             )
+
+        # 9. Overlay Toasts (if active)
+        if self.toasts.has_toasts:
+            toast_v = self.toasts.view()
+            if toast_v.strip():
+                toast_lines = toast_v.split("\n")
+                toast_w = max((string_width(l) for l in toast_lines), default=0)
+                tx = max(0, self.width - toast_w - 3)
+                screen = place_overlay(screen, toast_v, x=tx, y=1)
 
         # Clamp total screen height to self.height to prevent terminal emulator scrolling
         screen_lines = screen.replace("\r\n", "\n").replace("\r", "\n").split("\n")

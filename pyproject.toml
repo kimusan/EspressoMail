@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "espressomail"
-dynamic = ["version"]
+version = "0.2.0"
 description = "A modern, multi-account terminal email client built on the Espresso TUI framework (The Elm Architecture)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -70,9 +70,6 @@ Documentation = "https://github.com/kimusan/EspressoMail/tree/main/docs"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.dynamic]
-version = { attr = "espressomail.__version__" }
 
 [tool.mypy]
 python_version = "3.10"

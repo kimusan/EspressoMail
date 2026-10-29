@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from espresso import Cmd, KeyMsg, Model, MouseAction, MouseButton, MouseMsg, Msg
 from espresso.beans import (
@@ -52,8 +52,8 @@ from espressomail.protocols.sieve import (
 from espressomail.protocols.smtp_client import validate_account_credentials
 from espressomail.search.fuzzy import FuzzySearchEngine, SearchResult
 from espressomail.storage.database import LocalStore
-from espressomail.themes.engine import COLOR_MODES, THEME_FAMILIES, THEMES, Theme
-from espressomail.ui.formatter import format_email_body
+from espressomail.themes.engine import COLOR_MODES, THEME_FAMILIES, THEMES, Theme, ThemeEngine
+from espressomail.ui.formatter import format_email_body, sanitize_terminal_text
 
 
 def pad_cell(text: str, target_width: int) -> str:
@@ -149,6 +149,8 @@ class PreferencesSavedMsg(Msg):
     keymap_preset: str = "default"
     external_editor: str = "auto"
     icon_mode: str = "emoji"
+    check_updates_startup: bool = True
+    update_notice_mode: str = "toast"
 
 
 
@@ -2173,6 +2175,12 @@ class PreferencesModal(Model):
         1800: "30 minutes",
         3600: "60 minutes",
     }
+    UPDATE_NOTICE_MODES: tuple[str, ...] = ("toast", "dialog", "both")
+    UPDATE_NOTICE_LABELS: dict[str, str] = {
+        "toast": "Toast Notice",
+        "dialog": "Dialog Modal",
+        "both": "Both (Toast & Dialog)",
+    }
 
     def __init__(
         self,
@@ -2283,7 +2291,21 @@ class PreferencesModal(Model):
             else 0
         )
 
+        self.check_updates_startup: bool = (
+            self.store.get_setting("check_updates_startup", "1") == "1"
+        )
+        cur_unm = self.store.get_setting("update_notice_mode", "toast")
+        self.update_notice_mode_idx: int = (
+            self.UPDATE_NOTICE_MODES.index(cur_unm)
+            if cur_unm in self.UPDATE_NOTICE_MODES
+            else 0
+        )
+
         self._sync_focus()
+
+    @property
+    def update_notice_mode(self) -> str:
+        return self.UPDATE_NOTICE_MODES[self.update_notice_mode_idx]
 
     def _get_active_theme_key(self) -> str:
         fam = THEME_FAMILIES[self.theme_idx]
@@ -2355,6 +2377,10 @@ class PreferencesModal(Model):
                 self.desktop_notifications = not self.desktop_notifications
             elif row_idx in (3, 11):
                 self.notification_sound = not self.notification_sound
+            elif row_idx == 4:
+                self.check_updates_startup = not self.check_updates_startup
+            elif row_idx == 5:
+                self.update_notice_mode_idx = (self.update_notice_mode_idx + delta) % len(self.UPDATE_NOTICE_MODES)
 
         # Direct legacy row compatibility regardless of active tab
         if row_idx == 7:
@@ -2467,7 +2493,7 @@ class PreferencesModal(Model):
                 self._sync_focus()
                 return self, None
 
-            tab_max = {0: 6, 1: 4, 2: 4, 3: 3}.get(self.active_tab, 4)
+            tab_max = {0: 6, 1: 4, 2: 4, 3: 5}.get(self.active_tab, 4)
 
             if k in ("tab", "down"):
                 if self.focus_idx == 0:
@@ -2553,6 +2579,9 @@ class PreferencesModal(Model):
         ext_ed_val = self.EXTERNAL_EDITORS[self.external_editor_idx]
         self.store.set_setting("external_editor", ext_ed_val)
         self.store.set_setting("icon_mode", icon_mode_val)
+        self.store.set_setting("check_updates_startup", "1" if self.check_updates_startup else "0")
+        unm_val = self.UPDATE_NOTICE_MODES[self.update_notice_mode_idx]
+        self.store.set_setting("update_notice_mode", unm_val)
 
         return self, lambda: PreferencesSavedMsg(
             download_dir=str(p),
@@ -2571,6 +2600,8 @@ class PreferencesModal(Model):
             keymap_preset=keymap_val,
             external_editor=ext_ed_val,
             icon_mode=icon_mode_val,
+            check_updates_startup=self.check_updates_startup,
+            update_notice_mode=unm_val,
         )
 
     def view(self, width: int = 80, height: int = 24) -> str:
@@ -2749,8 +2780,12 @@ class PreferencesModal(Model):
             sound_val = "[x] Enabled" if self.notification_sound else "[ ] Disabled"
             rows.append(f"Notification Sound:    {_opt_style(3, sound_val)}")
 
-            rows.append("")
-            rows.append("")
+            updates_val = "[x] Enabled (On Startup)" if self.check_updates_startup else "[ ] Disabled"
+            rows.append(f"Check For Updates:     {_opt_style(4, updates_val)}")
+
+            unm_label = self.UPDATE_NOTICE_LABELS.get(self.UPDATE_NOTICE_MODES[self.update_notice_mode_idx], "Toast")
+            rows.append(f"Update Notice Mode:    ◀ {_opt_style(5, unm_label)} ▶")
+
             rows.append("")
             rows.append("")
             rows.append(
@@ -3208,3 +3243,95 @@ class MoveFolderModal(Model):
         self.last_pos_x = max(0, (width - self.last_modal_w) // 2)
         self.last_pos_y = max(0, (height - self.last_modal_h) // 2)
         return rendered
+
+
+class UpdateNoticeModal(Model):
+    """Modal dialog displaying notice of a new EspressoMail release."""
+
+    def __init__(
+        self,
+        current_version: str = "",
+        latest_version: str = "",
+        release_url: str = "",
+        theme: Theme | None = None,
+        release_name: str = "",
+        release_body: str = "",
+        icon_mode: str = "emoji",
+        *,
+        release: Any | None = None,
+        installed_version: str = "",
+    ) -> None:
+        if release is not None:
+            latest_version = getattr(release, "tag_name", getattr(release, "version", latest_version))
+            release_url = getattr(release, "html_url", release_url)
+            release_name = getattr(release, "name", release_name)
+            release_body = getattr(release, "body", release_body)
+        if installed_version:
+            current_version = installed_version
+
+        self.current_version = current_version
+        self.latest_version = latest_version
+        self.release_url = release_url
+        self.theme = theme if theme is not None else ThemeEngine().current
+        self.release_name = release_name
+        self.release_body = release_body
+        self.icon_mode = icon_mode
+        self.last_pos_x = 0
+        self.last_pos_y = 0
+        self.last_modal_w = 0
+        self.last_modal_h = 0
+
+    def init(self) -> Cmd | None:
+        return None
+
+    def update(self, msg: Msg) -> tuple[UpdateNoticeModal, Cmd | None]:
+        if isinstance(msg, KeyMsg):
+            k = str(msg.key).lower()
+            if k in ("enter", "esc", "space", " ", "q"):
+                return self, lambda: ModalClosedMsg("Update notice dismissed.")
+        if isinstance(msg, MouseMsg) and msg.action == MouseAction.PRESS:
+            return self, lambda: ModalClosedMsg("Update notice dismissed.")
+        return self, None
+
+    def view(self, width: int = 80, height: int = 24) -> str:
+        modal_w = min(68, max(46, width - 6))
+        inner_w = max(38, modal_w - 4)
+
+        title_icon = "📦" if self.icon_mode == "emoji" else ("⊞" if self.icon_mode == "unicode" else "")
+        title_str = f"{title_icon} Update Available" if title_icon else "Update Available"
+
+        rows = [
+            Style().bold(True).foreground(self.theme.accent_secondary).render("  A newer version of EspressoMail has been released!"),
+            "",
+            f"  Installed version: {Style().bold(True).render(self.current_version)}",
+            f"  Latest release:    {Style().bold(True).foreground(self.theme.accent_primary).render(self.latest_version)}",
+        ]
+        if self.release_name and self.release_name.strip() not in (f"v{self.latest_version}", self.latest_version):
+            clean_name = sanitize_terminal_text(self.release_name, multiline=False)
+            rows.append(f"  Release name:      {Style().foreground(self.theme.fg_primary).render(truncate_ansi(clean_name, inner_w - 20))}")
+
+        rows.append("")
+        rows.append("  Download & Changelog:")
+        rows.append(f"  {Style().foreground(self.theme.accent_secondary).render(truncate_ansi(self.release_url, inner_w - 4))}")
+
+        if self.release_body:
+            body_lines = [l.strip() for l in self.release_body.splitlines() if l.strip() and not l.strip().startswith("#")]
+            if body_lines:
+                rows.append("")
+                rows.append(Style().foreground(self.theme.fg_muted).render("  Highlights:"))
+                for bl in body_lines[:3]:
+                    rows.append(f"    {Style().foreground(self.theme.fg_secondary).render(truncate_ansi(bl, inner_w - 6))}")
+
+        rows.append("")
+        ok_btn = Style().bold(True).background(self.theme.accent_primary).foreground(self.theme.bg_primary).render(" [ OK (Enter / Esc) ] ")
+        rows.append(f"  {ok_btn}")
+        rows.append("")
+
+        rendered = self.theme.modal_style(modal_w, title_str).render("\n".join(rows))
+        modal_lines = rendered.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        self.last_modal_h = len(modal_lines)
+        self.last_modal_w = max((string_width(l) for l in modal_lines), default=modal_w)
+        self.last_pos_x = max(0, (width - self.last_modal_w) // 2)
+        self.last_pos_y = max(0, (height - self.last_modal_h) // 2)
+        return rendered
+
