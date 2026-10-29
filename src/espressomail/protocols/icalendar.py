@@ -522,9 +522,9 @@ def build_rsvp_mime_message(
     mime_msg["From"] = sender_formatted
     mime_msg["To"] = recipient
     mime_msg["Subject"] = subject
-    mime_msg["Date"] = email.utils.format_datetime(now)
-    mime_msg["Message-ID"] = msg_id
-    mime_msg["User-Agent"] = "EspressoMail/0.1.0 (Espresso TUI - iMIP)"
+    from espressomail import __version__
+
+    mime_msg["User-Agent"] = f"EspressoMail/{__version__} (Espresso TUI - iMIP)"
 
     if orig_msg.message_id:
         mime_msg["In-Reply-To"] = orig_msg.message_id

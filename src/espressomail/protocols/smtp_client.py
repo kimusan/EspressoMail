@@ -49,8 +49,9 @@ def build_mime_message(
         mime_msg["Cc"] = ", ".join(recipients_cc)
     mime_msg["Subject"] = subject
     mime_msg["Date"] = email.utils.format_datetime(now)
-    mime_msg["Message-ID"] = msg_id
-    mime_msg["User-Agent"] = "EspressoMail/0.1.0 (Espresso TUI)"
+    from espressomail import __version__
+
+    mime_msg["User-Agent"] = f"EspressoMail/{__version__} (Espresso TUI)"
 
     if in_reply_to:
         mime_msg["In-Reply-To"] = in_reply_to

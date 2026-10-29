@@ -17,22 +17,30 @@
 
 ### 🖥️ UI & Interaction
 * **Responsive 3-Pane Layout**:
-  1. **Mailboxes Pane**: Unified Mailboxes (`Unified Inbox`, `All Starred`, `All Drafts`, `All Sent`, `All Archive`, `All Trash`) plus per-account IMAP folder trees with live unread/total badges.
-  2. **Message & Thread List**: Conversation threading (`├`, `╰─`) with message counts (`[3]`), unread indicators (`●`), stars (`★`), attachment icons (`📎`), and PGP badges (`🔒`).
-  3. **Reading Pane**: Formatted headers, color-coded multi-depth reply quote bars (`│`), syntax-highlighted code blocks, HTML-to-terminal conversion, PGP security banners, and inline image rendering.
+  1. **Mailboxes Pane**: Unified Mailboxes (`Unified Inbox`, `All Starred`, `All Drafts`, `All Sent`, `All Archive`, `All Trash`) plus per-account IMAP folder trees with live unread/total badges. Adjust splitter width with `{` / `}` or mouse dragging.
+  2. **Message & Thread List**: Conversation threading (`├`, `╰─`) with message counts (`[3]`), unread indicators (`●`), stars (`★`), attachment icons (`📎`), and PGP badges (`🔒`). Adjust reading pane splitter with `[` / `]`.
+  3. **Reading Pane**: Formatted headers, color-coded multi-depth reply quote bars (`│`), syntax-highlighted code blocks, HTML-to-terminal conversion, PGP security banners, iCalendar invite cards, and inline image rendering.
+* **Single-Key Inbox Triaging & Batch Actions**: Rapidly triage incoming mail with archive (`e`), trash (`d`), spam (`J`), move to folder (`v`), star (`s`), read/unread (`u`), or multi-select (`x`) to batch apply actions.
+* **Unread-Only Folder Filter (`Ctrl+U` / `V`)**: Instant single-key filter to isolate unread messages in any folder.
 * **Animated Startup Splash Screen**: Steaming espresso cup art, TrueColor linear gradients, progress bar, and instant key/mouse skip.
 * **Interactive Drop-Down Menus**: Full top menu bar (**File**, **Mail**, **View**, **Tools**, **Help**) accessible via mouse click/hover or `F10` / `m`.
-* **Full Mouse & Keyboard Support**: Click panes to focus, click folders/messages to open, scroll any pane with the mouse wheel, or drive the entire client via Vim/Mutt-inspired keyboard shortcuts and `Ctrl+P` Command Palette.
+* **Full Mouse & Keyboard Support**: Click panes to focus, click folders/messages to open, scroll any pane with the mouse wheel, or drive the entire client via keyboard shortcuts and `Ctrl+P` Command Palette.
+* **Configurable Keymaps**: Choose from built-in presets (**Default**, **Gmail**, **Vim**, **Pine/Mutt**) or define custom keybindings in the Preferences modal (`P`).
 * **Terminal Image Rendering**: View inline image attachments directly in the reading pane using **`chafa`**, **DEC Sixel** (`img2sixel` or native Sixel encoder), **Kitty Graphics Protocol**, **24-bit Unicode Half-Blocks (`▀`)**, or **Braille (`⣿`)** — cycleable on the fly with `i`.
-* **Theme Engine**: Swap between 6 built-in TrueColor themes at runtime (`T`): **Espresso Dark**, **Catppuccin Mocha**, **Dracula**, **Nord Arctic**, **Gruvbox Dark**, and **Solarized Light**.
+* **Theme Engine & Dark/Light Modes**: 6 TrueColor theme families with both Dark and Light variants (**Espresso**, **Catppuccin**, **Dracula**, **Nord**, **Gruvbox**, and **Solarized**), switchable via `T` or Preferences (`P`).
 
 ### 📬 Core Email & Advanced Features
 * **Multi-Account IMAP & SMTP**: Connect multiple work and personal accounts simultaneously over SSL/TLS or STARTTLS.
-* **Guided Onboarding Wizard (`O`)**: Interactive 3-step setup flow with **Custom IMAP / SMTP Server** as the default first option alongside presets for **Fastmail**, **Gmail**, **Outlook / Microsoft 365**, **ProtonMail Bridge**, and **iCloud**, validating IMAP and SMTP credentials before completing setup.
+* **Real-Time IMAP Push (RFC 2177 IDLE) & Auto-Sync**: Instant delivery of incoming emails via background IMAP IDLE connections, supplemented by a configurable periodic auto-sync timer (1m, 5m, 15m, etc.).
+* **Desktop Notifications & Sound Alerts**: Cross-platform system notifications via `notify-send`, macOS `osascript`, and Windows PowerShell toast, with optional audio bell cues.
+* **Full-Text SQLite FTS5 & Remote IMAP Search (`/`)**: Blazing fast local search powered by SQLite FTS5 with BM25 ranking, snippet highlighting, and structured operators (`from:`, `to:`, `subject:`, `folder:`, `has:attachment`, `is:unread`), plus remote IMAP server search (`Ctrl+R` / `F5`) supporting MULTISEARCH and ESEARCH.
+* **Markdown Email Composing & Live Preview**: Write outgoing messages in Markdown with side-by-side or toggled live terminal preview (`F4`), automatically generating dual-part plain text and styled HTML MIME emails (`Ctrl+M`).
+* **External Editor Integration (`Ctrl+O`)**: Seamlessly edit drafts in your preferred terminal editor (`$EDITOR` / `$VISUAL`, nano, vim, nvim, micro, emacs) with automatic terminal mode suspension and resumption.
+* **RFC 5545 iCalendar & RFC 6047 iMIP RSVP (`1`/`2`/`3`)**: Inline calendar invite rendering displaying event date, time, location, organizer, and attendees, with 1-key RSVP responses (`1` Accept, `2` Tentative, `3` Decline) sent via SMTP.
+* **Guided Onboarding Wizard (`O`)**: Interactive 3-step setup with **Custom IMAP / SMTP Server** as the default alongside presets for **Fastmail**, **Gmail**, **Outlook / Microsoft 365**, **ProtonMail Bridge**, and **iCloud**, with credential verification, backdrop dismiss, and clean exit shortcuts (`Esc` to skip, `q` or `Ctrl+Q` to quit).
 * **Account Settings Editor (`A`)**: Modify existing account settings at any time (password, login username, IMAP/SMTP hosts, ports, SSL/TLS or STARTTLS security, display name, signature, or account deletion) with live connection testing (`Ctrl+T`).
-* **Local SQLite Store & Offline Access**: WAL-mode SQLite database caching accounts, folders, messages, MIME attachments, drafts, contacts, and Sieve scripts.
-* **Instant Fuzzy Search (`/`)**: Typo-tolerant multi-field fuzzy ranking combined with structured search operators (`from:`, `to:`, `subject:`, `folder:`, `has:attachment`, `is:unread`, `is:starred`, `is:pgp`).
 * **ManageSieve Filter Manager (`F`)**: Visual rule builder, RFC 5228 Sieve compiler, static syntax validator, local rule runner, and RFC 5804 ManageSieve uploader.
+* **CardDAV Address Book & Contact Autocomplete (`B`)**: Address book synchronization, sender contact harvesting, and autocomplete inside the email composer.
 * **GPG / OpenPGP Integration (`G`)**: Cleartext signing, signature verification, recipient encryption, decryption, and Ed25519 key generation.
 
 ---
@@ -110,32 +118,51 @@ espressomail --db ~/mail/custom_store.db
 | **`f`** | Forward selected message |
 | **`s`** | Toggle Star / Flag (`★`) on selected message |
 | **`u`** | Toggle Read / Unread (`●`) status |
-| **`e`** | Archive selected message (or Edit Account Settings when Mailboxes pane is focused) |
-| **`d` / `Delete`** | Move message to Trash (or permanently delete if already in Trash) |
+| **`Ctrl+U` / `V`** | Toggle Unread-only filter in active folder |
+| **`x`** | Toggle message multi-selection for batch actions |
+| **`e` / `y`** | Archive selected message(s) (or edit account if Mailboxes focused) |
+| **`d` / `Delete`** | Move selected message(s) to Trash (or delete permanently if in Trash) |
+| **`J`** | Move selected message(s) to Spam / Junk |
+| **`v`** | Move selected message to specific folder modal |
+| **`1` / `2` / `3`** | RSVP to calendar invitation (`1` Accept, `2` Tentative, `3` Decline) |
 | **`X`** | Empty Trash permanently |
 | **`w`** | Download / save incoming attachments from selected email to disk |
-| **`/`** | Open Instant Fuzzy Search across local SQLite database |
+| **`/`** | Open Full-Text Search modal (SQLite FTS5 with BM25 ranking and snippets) |
 | **`t`** | Toggle conversation threading view (`Threaded` vs `Flat`) |
-| **`T`** | Cycle active color scheme (`Espresso`, `Catppuccin`, `Dracula`, `Nord`, `Gruvbox`, `Solarized`) |
+| **`T`** | Cycle active theme (`Espresso`, `Catppuccin`, `Dracula`, `Nord`, `Gruvbox`, `Solarized`) |
 | **`i`** | Cycle terminal image renderer (`Auto`, `Chafa`, `Sixel`, `Kitty`, `Half-Block`, `Braille`, `Off`) |
+| **`[` / `]`** | Widen Reading Pane (`[`) or widen Message List (`]`) |
+| **`{` / `}`** | Narrow (`{`) or widen (`}`) Folder List pane |
 | **`H`** | Toggle full RFC 5322 headers in Reading Pane |
 | **`U`** | Jump directly to Unified Inbox |
 | **`B`** | Open Local Address Book & Contacts Manager |
 | **`F`** | Open Sieve Filter Rules & RFC 5228 Script Manager |
 | **`G`** | Open GPG / OpenPGP Keyring & Security Manager |
 | **`A`** | Edit Existing Account Settings (Password, IMAP/SMTP hosts, ports, TLS) |
+| **`P` / `p`** | Open Preferences & Configuration modal |
 | **`O`** | Launch Guided Account Onboarding Wizard (Add New Account) |
-| **`S`** | Synchronize all enabled IMAP accounts |
+| **`S`** | Synchronize all enabled IMAP accounts in background |
 | **`?`** | Show Keyboard & Mouse Shortcuts Help Modal |
 | **`q`** | Quit EspressoMail |
+
+### Inside the Search Modal (`/`)
+* **`Type query`**: Instant FTS5 full-text match with BM25 ranking and snippets
+* **`↑` / `↓`**: Navigate search result list
+* **`Enter`**: Open selected email in the main reading view
+* **`Ctrl+R` / `F5`**: Perform remote IMAP server search (MULTISEARCH / ESEARCH)
+* **`Esc`**: Close search modal
 
 ### Inside the Compose Modal (`c` / `r` / `f`)
 * **`Tab` / `Shift+Tab`**: Move between `From` account selector, `To`, `Cc`, `Subject`, and `Body` editor
 * **`Ctrl+A`**: Open interactive `FilePicker` to attach files
+* **`Ctrl+M`**: Toggle Markdown to HTML rendering on send
+* **`F4` / `Ctrl+V`**: Toggle Markdown live terminal preview
+* **`Ctrl+O` / `F6`**: Open draft in external editor (`$EDITOR` / nano / vim / emacs)
 * **`Ctrl+G`**: Toggle OpenPGP Cleartext Signature (`[x] PGP Sign`)
 * **`Ctrl+E`**: Toggle OpenPGP Encryption (`[x] PGP Encrypt`)
 * **`Ctrl+S`**: Save message to `Drafts`
-* **`F5` / `Ctrl+X`**: Send message via SMTP (and archive to `Sent`)
+* **`F5` / `Ctrl+Enter` / `Ctrl+X`**: Send message via SMTP (and archive to `Sent`)
+* **`Esc`**: Close composer (prompts to save draft if modified)
 
 ---
 
