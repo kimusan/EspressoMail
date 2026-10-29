@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-29
+
+
+> EspressoMail 0.2.0: Full-text search, external editor, keymaps, iCalendar RSVP, and real-time push
+
+### Summary
+EspressoMail 0.2.0 introduces a major set of features, performance improvements, and usability enhancements across search, composing, inbox triaging, notifications, calendar interactions, and keyboard navigation.
+
+### Added
+- SQLite FTS5 Full-Text Search: Blazing fast message searching with BM25 relevance ranking, contextual snippet highlighting, and structured search operators (from, to, subject, body, att, folder, has:attachment, is:unread, is:starred, is:pgp).
+- Remote IMAP Search: Query remote mail servers directly from the search modal using RFC 7377 MULTISEARCH and RFC 4731 ESEARCH fallbacks (Ctrl+R / F5).
+- External Editor Integration: Suspend terminal raw mode and edit draft messages seamlessly in your preferred system editor ($EDITOR / $VISUAL, nano, vim, nvim, micro, emacs) via Ctrl+O or F6.
+- Configurable Keymaps: Built-in presets for Default (Espresso), Gmail, Vim, and Pine/Mutt, with custom keybinding overrides and persistence via Preferences (P).
+- Markdown Email Composing & Live Preview: Write emails using Markdown with live terminal preview (F4 / Ctrl+V) and automatic generation of multipart HTML emails upon send (Ctrl+M).
+- Single-Key Inbox Triaging & Batch Selection: Archive (e), move to trash (d), mark as spam (J), or move to folder (v). Multi-select messages (x) to perform bulk triage actions in a single step.
+- Unread-Only Folder Filter: Single-key toggle (Ctrl+U / V) to filter the current folder to unread messages only.
+- RFC 5545 iCalendar & RFC 6047 iMIP RSVP: Inline calendar invitation rendering with event title, organizer, dates, and location. Quick one-key RSVP responses (1 Accept, 2 Tentative, 3 Decline) dispatched via SMTP.
+- Real-Time IMAP Push (RFC 2177 IDLE): Instant incoming email notifications via persistent background IMAP IDLE connections.
+- Configurable Auto-Sync & Desktop Notifications: Configurable periodic background sync interval timer, plus native cross-platform desktop notifications (notify-send, osascript, PowerShell) and audible bell cues.
+- Adjustable Pane Splitters: Adjust folder list width ({ / }) and message list / reading pane widths ([ / ]) or resize splitters via mouse dragging.
+- Dark and Light Modes: Full Dark and Light mode variants for all six TrueColor theme palettes (Espresso, Catppuccin, Dracula, Nord, Gruvbox, Solarized).
+
+### Changed & Improved
+- Upgraded espressoTUI dependency to 1.3.0 and integrated upstream beans bridge.
+- Onboarding Wizard: Added ability to skip onboarding on first run via Esc or backdrop click, and exit cleanly via q or Ctrl+Q.
+- Folder sync performance: Optimized batch fetching and ensured background operations do not block message navigation.
+- Unicode and visual cell width alignment: Fixed border alignments across 3-pane layouts and modal dialogs when rendering emojis and multibyte characters.
+
+### Fixed
+- IMAP Client: Resolved discover_folders method attribute error and ensured subscription states synchronize cleanly.
+- Mouse hit-testing: Corrected row alignment and coordinates in Preferences modal.
+- Keymap test portability: Handled Windows temporary directory path differences in test suite.
 ## [0.1.1] - 2026-10-28
 
 
@@ -44,6 +76,7 @@ A massive shoutout to the Espresso TUI framework (espressoTUI) and The Elm Archi
 - Modals and Dialogs: Full-screen and modal overlays for Compose, Preferences, Account Setup & Editing, Attachment Downloader, and Exit Confirmation.
 - Packaging and CI/CD: Standalone single-binary executables (Linux x86_64 and Windows x86_64.exe), native Linux packages (Debian .deb, RPM, Arch Linux), PyPI publication, and automated release management.
 
-[Unreleased]: https://github.com/kimusan/EspressoMail/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/kimusan/EspressoMail/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kimusan/EspressoMail/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/kimusan/EspressoMail/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kimusan/EspressoMail/releases/tag/v0.1.0
