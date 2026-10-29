@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field, replace
@@ -622,7 +623,7 @@ class EspressoMailApp(Model):
                     ).icon
             else:
                 label = node.segment
-                icon = ("📂" if is_expanded else "📁") if has_children else "📁"
+                icon = ("📂\ufe0f" if is_expanded else "📁\ufe0f") if has_children else "📁\ufe0f"
 
             folder_name = node.folder.name if node.folder is not None else "/".join(node.path_parts)
             selectable_mailbox = node.folder is not None and node.folder.selectable
@@ -669,12 +670,12 @@ class EspressoMailApp(Model):
         unified_counts = self.store.get_unified_counts()
 
         unified_defs = [
-            ("INBOX", "Unified Inbox", "📥"),
+            ("INBOX", "Unified Inbox", "📥\ufe0f"),
             ("All Unread", "All Unread", "✉️"),
-            ("Starred", "All Starred", "⭐"),
-            ("Drafts", "All Drafts", "📝"),
-            ("Sent", "All Sent", "📤"),
-            ("Archive", "All Archive", "📦"),
+            ("Starred", "All Starred", "⭐\ufe0f"),
+            ("Drafts", "All Drafts", "📝\ufe0f"),
+            ("Sent", "All Sent", "📤\ufe0f"),
+            ("Archive", "All Archive", "📦\ufe0f"),
             ("Trash", "All Trash", "🗑️"),
         ]
         unified_children: list[TreeNode] = []
@@ -707,7 +708,7 @@ class EspressoMailApp(Model):
                     account_id="*",
                     folder_name="",
                     label="UNIFIED MAILBOXES",
-                    icon="🌐",
+                    icon="🌐\ufe0f",
                     is_header=True,
                     has_children=True,
                     is_expanded=is_unified_expanded,
@@ -731,7 +732,7 @@ class EspressoMailApp(Model):
                         account_id=acc.id,
                         folder_name="",
                         label=acc.name.upper(),
-                        icon="☕",
+                        icon="☕\ufe0f",
                         is_header=True,
                         badge_color=acc.color_badge,
                         has_children=bool(acc_tree_children),
@@ -3060,11 +3061,11 @@ class EspressoMailApp(Model):
 
             # Folders with subfolders use 🗂️ when closed, 📂 when open; leaf folders use their own icon
             if not node.is_leaf:
-                folder_icon = "📂" if node.expanded else "🗂️"
+                folder_icon = "📂\ufe0f" if node.expanded else "🗂️"
             else:
                 folder_icon = row.icon
 
-            unsub_badge = " 🔕" if (not getattr(row, "subscribed", True) and row.account_id != "*") else ""
+            unsub_badge = " 🔕\ufe0f" if (not getattr(row, "subscribed", True) and row.account_id != "*") else ""
             lbl_raw = f" {tree_prefix}{folder_icon} {row.label}{unsub_badge}"
             lbl_display = f" {branch_prefix}{folder_icon} {row.label}{unsub_badge}"
 
@@ -3121,7 +3122,7 @@ class EspressoMailApp(Model):
             focused=(self.focused_pane == "folders"),
             width=width,
             height=height,
-            title="📁 Mailboxes",
+            title="📁\ufe0f Mailboxes",
         ).render("\n".join(lines))
 
     def _render_message_list_pane(self, width: int, height: int) -> str:
@@ -3161,8 +3162,8 @@ class EspressoMailApp(Model):
                 else:
                     unread_ch = "●" if not m.is_read else " "
                 star_ch = "★" if m.is_starred else " "
-                att_ch = "📎 " if m.has_attachments else ""
-                pgp_ch = "🔒 " if m.pgp_status != PGPStatus.NONE else ""
+                att_ch = "📎\ufe0f " if m.has_attachments else ""
+                pgp_ch = "🔒\ufe0f " if m.pgp_status != PGPStatus.NONE else ""
 
                 tree_prefix = ""
                 if self.threading_enabled and row.depth > 0:
@@ -3310,10 +3311,10 @@ class EspressoMailApp(Model):
             Style().background(self.theme.bg_primary).foreground(self.theme.fg_primary)
         )
         m = self.selected_message
-        title = "📖 Reading Pane"
+        title = "📖\ufe0f Reading Pane"
         if m:
             scroll_pct = int(self.reader_viewport.scroll_percent * 100)
-            title = f"📖 Reading Pane ({scroll_pct}%)"
+            title = f"📖\ufe0f Reading Pane ({scroll_pct}%)"
 
         return self.theme.pane_style(
             focused=(self.focused_pane == "reader"),

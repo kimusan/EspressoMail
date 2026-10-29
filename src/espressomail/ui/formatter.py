@@ -471,7 +471,7 @@ def format_message_for_reading_pane(
         att_chips: list[str] = []
         for idx, att in enumerate(display_attachments, start=1):
             is_ics = att.filename.lower().endswith(".ics") or "calendar" in att.content_type.lower()
-            icon = "🖼️" if att.is_image else ("📅" if is_ics else "📎")
+            icon = "🖼️" if att.is_image else ("📅\ufe0f" if is_ics else "📎\ufe0f")
             saved_mark = " ✔saved" if att.local_path else ""
             chip = (
                 Style()
@@ -548,7 +548,7 @@ def format_message_for_reading_pane(
                 Style()
                 .bold(True)
                 .foreground(theme.fg_secondary)
-                .render(f"╭─ 💬 {prev.sender_short} ({prev.short_date}) wrote:")
+                .render(f"╭─ 💬\ufe0f {prev.sender_short} ({prev.short_date}) wrote:")
             )
             prev_body_raw = prev.body_text or html_to_terminal_text(prev.body_html)
             prev_formatted = format_email_body(prev_body_raw, theme, max(24, inner_w - 4))
@@ -605,13 +605,13 @@ def _render_pgp_banner(msg: EmailMessage, theme: Theme, width: int) -> str:
         badge = f"✔ PGP VERIFIED SIGNATURE — Signed by {signer} [{fp_short}]"
     elif msg.pgp_status == PGPStatus.DECRYPTED_VERIFIED:
         color = theme.pgp_verified_fg
-        badge = f"🔒 PGP DECRYPTED & VERIFIED — Signed by {signer} [{fp_short}]"
+        badge = f"🔒\ufe0f PGP DECRYPTED & VERIFIED — Signed by {signer} [{fp_short}]"
     elif msg.pgp_status == PGPStatus.DECRYPTED:
         color = theme.pgp_verified_fg
-        badge = "🔒 PGP DECRYPTED MESSAGE — Confidentiality verified"
+        badge = "🔒\ufe0f PGP DECRYPTED MESSAGE — Confidentiality verified"
     elif msg.pgp_status == PGPStatus.ENCRYPTED:
         color = theme.pgp_warning_fg
-        badge = "🔐 PGP ENCRYPTED PAYLOAD — Press [x] to decrypt with local keyring"
+        badge = "🔐\ufe0f PGP ENCRYPTED PAYLOAD — Press [x] to decrypt with local keyring"
     elif msg.pgp_status == PGPStatus.SIGNED_UNVERIFIED:
         color = theme.pgp_warning_fg
         badge = f"⚠ PGP SIGNATURE UNVERIFIED — Signer key [{fp_short}] not in trusted ring (Press [v] to verify)"
@@ -631,7 +631,7 @@ def _render_calendar_banner(event: CalendarEvent, theme: Theme, width: int) -> s
     """Render a visual, interactive iCalendar event invitation / cancellation banner."""
     box_w = max(24, width)
     b_color = theme.accent_primary
-    title_icon = "📅"
+    title_icon = "📅\ufe0f"
     title_text = "Calendar Event"
 
     is_cancelled = event.method == "CANCEL" or event.status == "CANCELLED"
@@ -639,15 +639,15 @@ def _render_calendar_banner(event: CalendarEvent, theme: Theme, width: int) -> s
 
     if is_cancelled:
         b_color = theme.pgp_error_fg
-        title_icon = "🚫"
+        title_icon = "🚫\ufe0f"
         title_text = "Event Cancelled"
     elif is_reply:
         b_color = theme.accent_secondary
-        title_icon = "📨"
+        title_icon = "📨\ufe0f"
         title_text = "Event RSVP Response"
     elif event.method in ("REQUEST", "PUBLISH"):
         b_color = theme.accent_primary
-        title_icon = "📅"
+        title_icon = "📅\ufe0f"
         title_text = "Calendar Invitation"
 
     lbl_style = Style().bold(True).foreground(theme.accent_primary)

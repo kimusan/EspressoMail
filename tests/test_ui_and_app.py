@@ -850,7 +850,7 @@ class TestUIAndApp(unittest.TestCase):
         app.folder_cursor = work_idx
         app, _ = app.update(KeyMsg(key="right"))
         expanded_view = app._render_folder_pane(30, 20)
-        self.assertIn("📂 Work", expanded_view)
+        self.assertIn("📂\ufe0f Work", expanded_view)
         self.assertIn("Clients", expanded_view)
 
         # 3. Account collapsing: account header displays indicator '▼' when unfolded

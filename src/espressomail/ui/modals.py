@@ -1444,7 +1444,7 @@ class PGPModal(Model):
             status_line,
             footer,
         )
-        return self.theme.modal_style(modal_w, "🔐 OpenPGP / GnuPG Keyring Manager").render(content)
+        return self.theme.modal_style(modal_w, "🔐\ufe0f OpenPGP / GnuPG Keyring Manager").render(content)
 
 
 # ---------------------------------------------------------------------------
@@ -2780,7 +2780,7 @@ class RSVPModal(Model):
             )
         )
 
-        rendered = self.theme.modal_style(modal_w, "📅 RSVP to Calendar Invitation").render("\n".join(rows))
+        rendered = self.theme.modal_style(modal_w, "📅\ufe0f RSVP to Calendar Invitation").render("\n".join(rows))
         modal_lines = rendered.replace("\r\n", "\n").replace("\r", "\n").split("\n")
         self.last_modal_h = len(modal_lines)
         self.last_modal_w = max((string_width(l) for l in modal_lines), default=modal_w)
@@ -2950,7 +2950,7 @@ class MoveFolderModal(Model):
         rows.append("")
         rows.append(Style().foreground(self.theme.fg_muted).render("  [↑/↓/j/k] Navigate  [Type] Filter  [Enter] Move  [Esc] Cancel"))
 
-        rendered = self.theme.modal_style(modal_w, "📁 Move Message to Folder").render("\n".join(rows))
+        rendered = self.theme.modal_style(modal_w, "📁\ufe0f Move Message to Folder").render("\n".join(rows))
         modal_lines = rendered.replace("\r\n", "\n").replace("\r", "\n").split("\n")
         self.last_modal_h = len(modal_lines)
         self.last_modal_w = max((string_width(l) for l in modal_lines), default=modal_w)

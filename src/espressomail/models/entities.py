@@ -262,17 +262,17 @@ class Folder:
     def icon(self) -> str:
         """Return an icon representing the folder type."""
         icons = {
-            FolderType.UNIFIED: "📥",
-            FolderType.INBOX: "📨",
-            FolderType.STARRED: "⭐",
-            FolderType.SENT: "📤",
-            FolderType.DRAFTS: "📝",
-            FolderType.ARCHIVE: "📦",
+            FolderType.UNIFIED: "📥\ufe0f",
+            FolderType.INBOX: "📨\ufe0f",
+            FolderType.STARRED: "⭐\ufe0f",
+            FolderType.SENT: "📤\ufe0f",
+            FolderType.DRAFTS: "📝\ufe0f",
+            FolderType.ARCHIVE: "📦\ufe0f",
             FolderType.TRASH: "🗑️",
-            FolderType.SPAM: "🚫",
-            FolderType.CUSTOM: "📁",
+            FolderType.SPAM: "🚫\ufe0f",
+            FolderType.CUSTOM: "📁\ufe0f",
         }
-        return icons.get(self.folder_type, "📁")
+        return icons.get(self.folder_type, "📁\ufe0f")
 
 
 def detect_image_mime_type(data: bytes | None) -> str:
