@@ -10,6 +10,7 @@ from espresso.crema import (
     ROUNDED_BORDER,
     Border,
     Style,
+    truncate_ansi,
 )
 
 
@@ -84,8 +85,12 @@ class Theme:
         return s
 
     def modal_style(self, width: int, title: str = "", bg: str | None = None) -> Style:
-        """Build a bordered Crema Style for floating modal dialogs."""
+        """Build a bordered Crema Style for floating modal dialogs with target total outer width."""
         modal_bg = bg or self.bg_secondary
+        # Crema Style.width() specifies inner content width. Double border (+2)
+        # and horizontal padding (2 left, 2 right = +4) add 6 cells to total width.
+        # To make the outer dialog exactly match `width`, inner content width is width - 6.
+        inner_content_w = max(18, width - 6)
         s = (
             Style()
             .border(DOUBLE_BORDER)
@@ -94,15 +99,17 @@ class Theme:
             .background(modal_bg)
             .foreground(self.fg_primary)
             .padding(1, 2)
-            .width(max(24, width))
+            .width(inner_content_w)
         )
         if title:
+            title_w = max(10, width - 6)
+            title_cut = truncate_ansi(title, title_w)
             header = (
                 Style()
                 .bold(True)
                 .foreground(self.accent_secondary)
                 .background(modal_bg)
-                .render(f" {title} ")
+                .render(f" {title_cut} ")
             )
             s = s.border_title(header)
         return s

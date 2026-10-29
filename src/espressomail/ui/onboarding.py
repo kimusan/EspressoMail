@@ -588,12 +588,12 @@ class OnboardingWizard(Model):
                 "",
                 Style()
                 .foreground(self.theme.pgp_verified_fg if self.generate_pgp else self.theme.fg_muted)
-                .render(f"{pgp_mark} Auto-generate Ed25519 OpenPGP Key Pair for this account (Ctrl+G to toggle)"),
+                .render(f"{pgp_mark} Generate Ed25519 OpenPGP key pair (Ctrl+G)"),
                 "",
                 Style()
                 .foreground(self.theme.fg_muted)
                 .render(
-                    "[Tab/↑/↓] Field   [Space/←/→] Cycle TLS   [Ctrl+G] PGP   [Enter] Validate & Finish   [Esc] Back"
+                    "[Tab/↑/↓] Field   [Space/←/→] Cycle TLS   [Ctrl+G] PGP   [Enter] Finish   [Esc] Back"
                 ),
             )
 
@@ -609,6 +609,7 @@ class OnboardingWizard(Model):
         )
 
         card_content = f"{header_line}\n\n{body}{err_block}{ok_block}"
+        card_width = min(82, max(58, width - 6))
         card = (
             Style()
             .border(DOUBLE_BORDER)
@@ -621,11 +622,11 @@ class OnboardingWizard(Model):
                 .bold(True)
                 .foreground(self.theme.accent_secondary)
                 .background(self.theme.bg_secondary)
-                .render(" [ ☕ EspressoMail Account Onboarding ] "),
+                .render(" [ EspressoMail Account Onboarding ] "),
                 align=Align.CENTER,
             )
             .padding(1, 3)
-            .width(min(82, max(58, width - 6)))
+            .width(card_width - 8)
             .render(card_content)
         )
 

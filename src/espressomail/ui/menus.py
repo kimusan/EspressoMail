@@ -130,8 +130,8 @@ class MenuBar(Model):
 
     def _compute_bounds(self) -> None:
         self._cat_bounds = []
-        # Brand prefix " ☕ EspressoMail │ " is 18 cells wide
-        x = 18
+        brand_prefix = " ☕\ufe0f EspressoMail │ "
+        x = string_width(brand_prefix)
         for cat in self.categories:
             label = f" {cat.title} ▾ "
             w = string_width(label)
@@ -234,7 +234,7 @@ class MenuBar(Model):
             .bold(True)
             .foreground(theme.bg_primary)
             .background(theme.accent_primary)
-            .render(" ☕ EspressoMail ")
+            .render(" ☕\ufe0f EspressoMail ")
         )
         sep = Style().foreground(theme.fg_muted).background(theme.bg_menubar).render("│ ")
 
@@ -277,12 +277,12 @@ class MenuBar(Model):
     def view_dropdown(self, theme: Theme) -> tuple[str, int, int]:
         """Render the currently open drop-down menu box and return (box_str, x, y)."""
         cat = self.categories[self.active_cat_idx]
-        drop_x = self._cat_bounds[self.active_cat_idx][0] if self._cat_bounds else 18
+        drop_x = self._cat_bounds[self.active_cat_idx][0] if self._cat_bounds else string_width(" ☕\ufe0f EspressoMail │ ")
         inner_w = 34
         rows: list[str] = []
         for idx, item in enumerate(cat.items):
             sc = f"[{item.shortcut}]" if item.shortcut else ""
-            lbl_pad = max(1, inner_w - len(item.label) - len(sc) - 2)
+            lbl_pad = max(1, inner_w - string_width(item.label) - string_width(sc) - 2)
             line_txt = f" {item.label}{' ' * lbl_pad}{sc} "
             if idx == self.active_item_idx:
                 rows.append(
@@ -327,7 +327,7 @@ class MenuBar(Model):
 def to_core_menubar(
     categories: tuple[MenuCategory, ...] = DEFAULT_MENUS,
     width: int = 80,
-    brand: str = " ☕ EspressoMail ",
+    brand: str = " ☕\ufe0f EspressoMail ",
     right_status: str = "",
 ) -> CoreMenuBar | None:
     """Convert EspressoMail menu categories into an upstream espresso.beans.MenuBar instance."""

@@ -9,6 +9,7 @@ from html.parser import HTMLParser
 
 from espresso.beans import CodeViewer, THEME_DRACULA, THEME_ESPRESSO
 from espresso.crema import (
+    ROUNDED_BORDER,
     Style,
     string_width,
     truncate_ansi,
@@ -447,7 +448,7 @@ def format_message_for_reading_pane(
         for hk, hv in list(msg.raw_headers.items())[:12]:
             header_rows.append(f"{muted_style.render(f'{hk}:')} {hv}")
 
-    sections.append("\n".join(header_rows))
+    sections.append("\n".join(truncate_ansi(row, inner_w) for row in header_rows))
 
     # 2. Calendar Event / Invitation Banner
     cal_event = find_calendar_event(msg)
@@ -487,14 +488,11 @@ def format_message_for_reading_pane(
                 .render(f"🖼️ {len(html_img_tags)} embedded HTML image(s)")
             )
             att_chips.append(chip)
-        att_bar = (
-            f"{lbl_style.render('Media:   ')} "
-            + "  ".join(att_chips)
-            + "\n"
-            + muted_style.render(
-                f"          [w] Save attachments to disk   [i] Image mode: {image_renderer.label}"
-            )
+        media_line = f"{lbl_style.render('Media:   ')} " + "  ".join(att_chips)
+        actions_line = muted_style.render(
+            f"          [w] Save attachments to disk   [i] Image mode: {image_renderer.label}"
         )
+        att_bar = f"{truncate_ansi(media_line, inner_w)}\n{truncate_ansi(actions_line, inner_w)}"
         sections.append(att_bar)
 
     sections.append(Style().foreground(theme.border_unfocused).render("━" * inner_w))
@@ -631,7 +629,7 @@ def _render_pgp_banner(msg: EmailMessage, theme: Theme, width: int) -> str:
 
 def _render_calendar_banner(event: CalendarEvent, theme: Theme, width: int) -> str:
     """Render a visual, interactive iCalendar event invitation / cancellation banner."""
-    inner_w = max(28, width - 4)
+    box_w = max(24, width)
     b_color = theme.accent_primary
     title_icon = "📅"
     title_text = "Calendar Event"
@@ -652,16 +650,12 @@ def _render_calendar_banner(event: CalendarEvent, theme: Theme, width: int) -> s
         title_icon = "📅"
         title_text = "Calendar Invitation"
 
-    border_style = Style().foreground(b_color)
     lbl_style = Style().bold(True).foreground(theme.accent_primary)
     val_style = Style().foreground(theme.fg_primary)
     muted_style = Style().foreground(theme.fg_muted)
 
     top_title = f" {title_icon} {title_text}: {event.summary} "
-    top_title_cut = truncate_ansi(top_title, inner_w - 6)
-    rem_bar = max(2, inner_w - string_width(top_title_cut) - 2)
-    top_border = border_style.render(f"╭─{top_title_cut}{'─' * rem_bar}╮")
-    bottom_border = border_style.render(f"╰{'─' * (inner_w + 2)}╯")
+    top_title_cut = truncate_ansi(top_title, box_w - 6)
 
     rows: list[str] = []
 
@@ -716,13 +710,18 @@ def _render_calendar_banner(event: CalendarEvent, theme: Theme, width: int) -> s
         btn_tentative = Style().bold(True).foreground(theme.starred_fg).render("[2] Tentative")
         btn_decline = Style().bold(True).foreground(theme.pgp_error_fg).render("[3] Decline")
         hint = muted_style.render("(Press '1', '2', or '3' to respond)")
-        rows.append(f"{btn_accept}   {btn_tentative}   {btn_decline}   {hint}")
+        rows.append(f"{btn_accept}   {btn_tentative}   {btn_decline}")
+        rows.append(hint)
 
-    content_lines: list[str] = [top_border]
-    v_bar = border_style.render("│ ")
-    for r in rows:
-        content_lines.append(f"{v_bar}{r}")
-    content_lines.append(bottom_border)
-
-    return "\n".join(content_lines)
+    inner_content_w = max(20, box_w - 4)
+    content = "\n".join(truncate_ansi(r, inner_content_w) for r in rows)
+    banner_style = (
+        Style()
+        .border(ROUNDED_BORDER)
+        .border_foreground(b_color)
+        .border_title(top_title_cut)
+        .width(inner_content_w)
+        .padding(0, 1)
+    )
+    return banner_style.render(content)
 

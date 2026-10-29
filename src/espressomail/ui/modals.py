@@ -56,6 +56,13 @@ from espressomail.themes.engine import COLOR_MODES, THEME_FAMILIES, THEMES, Them
 from espressomail.ui.formatter import format_email_body
 
 
+def pad_cell(text: str, target_width: int) -> str:
+    """Safely truncate and pad text with spaces to exact visual cell width."""
+    cut = truncate_ansi(text, target_width)
+    w = string_width(cut)
+    return cut + (" " * max(0, target_width - w))
+
+
 # ---------------------------------------------------------------------------
 # Modal Messages
 # ---------------------------------------------------------------------------
@@ -394,10 +401,14 @@ class ComposeModal(Model):
         )
 
     def view(self, width: int = 80, height: int = 30) -> str:
-        modal_w = min(114, max(72, width - 4))
-        self.editor.width = max(50, modal_w - 6)
+        modal_w = min(114, max(68, width - 4))
+        content_w = max(50, modal_w - 6)
+        self.editor.width = content_w
         self.editor.height = max(12, min(28, height - 14))
-        self.file_picker.width = max(50, modal_w - 6)
+        self.file_picker.width = content_w
+        self.input_to.width = content_w
+        self.input_cc.width = content_w
+        self.input_subject.width = content_w
 
         if self.show_file_picker:
             picker_content = join_vertical(
@@ -411,7 +422,7 @@ class ComposeModal(Model):
                 "",
                 Style()
                 .foreground(self.theme.fg_muted)
-                .render("[↑/↓] Navigate   [Enter] Select File / Open Dir   [Backspace] Parent   [Esc] Cancel"),
+                .render(truncate_ansi("[↑/↓] Navigate   [Enter] Select File / Open Dir   [Backspace] Parent   [Esc] Cancel", content_w)),
             )
             return self.theme.modal_style(modal_w, "Attach File").render(picker_content)
 
@@ -422,28 +433,29 @@ class ComposeModal(Model):
             if self.focus_idx == 0
             else Style().foreground(self.theme.fg_primary)
         )
-        from_row = f"From:    ◀ {from_style.render(acc_label)} ▶"
+        from_row = truncate_ansi(f"From:    ◀ {from_style.render(acc_label)} ▶", content_w)
 
         sign_badge = (
-            Style().bold(True).foreground(self.theme.pgp_verified_fg).render("[x] PGP Sign (Ctrl+G)")
+            Style().bold(True).foreground(self.theme.pgp_verified_fg).render("[x] Sign (Ctrl+G)")
             if self.pgp_sign
-            else Style().foreground(self.theme.fg_muted).render("[ ] PGP Sign (Ctrl+G)")
+            else Style().foreground(self.theme.fg_muted).render("[ ] Sign (Ctrl+G)")
         )
         enc_badge = (
-            Style().bold(True).foreground(self.theme.pgp_warning_fg).render("[x] PGP Encrypt (Ctrl+E)")
+            Style().bold(True).foreground(self.theme.pgp_warning_fg).render("[x] Encrypt (Ctrl+E)")
             if self.pgp_encrypt
-            else Style().foreground(self.theme.fg_muted).render("[ ] PGP Encrypt (Ctrl+E)")
+            else Style().foreground(self.theme.fg_muted).render("[ ] Encrypt (Ctrl+E)")
         )
         md_badge = (
-            Style().bold(True).foreground(self.theme.accent_primary).render("[x] Markdown (Ctrl+M)")
+            Style().bold(True).foreground(self.theme.accent_primary).render("[x] MD (Ctrl+M)")
             if self.render_markdown
-            else Style().foreground(self.theme.fg_muted).render("[ ] Markdown (Ctrl+M)")
+            else Style().foreground(self.theme.fg_muted).render("[ ] MD (Ctrl+M)")
         )
         preview_badge = (
             Style().bold(True).foreground(self.theme.accent_secondary).render("[F4] Preview: ON")
             if self.preview_mode
             else Style().foreground(self.theme.fg_muted).render("[F4] Preview: OFF")
         )
+        ext_badge = Style().bold(True).foreground(self.theme.accent_secondary).render("[Ctrl+O] Editor ($EDITOR)")
 
         att_names: list[str] = []
         for p_str in self.attachments:
@@ -451,9 +463,9 @@ class ComposeModal(Model):
             sz = format_file_size(p.stat().st_size) if p.exists() else "0 B"
             att_names.append(f"📎 {p.name} ({sz})")
         att_line = (
-            Style().foreground(self.theme.attachment_fg).render("  ".join(att_names))
+            Style().foreground(self.theme.attachment_fg).render(truncate_ansi("  ".join(att_names), max(20, content_w - 9)))
             if att_names
-            else Style().foreground(self.theme.fg_muted).render("(No attachments — Ctrl+A to attach file)")
+            else Style().foreground(self.theme.fg_muted).render("(No attachments — Ctrl+A to attach)")
         )
 
         to_view = self.input_to.view()
@@ -468,7 +480,10 @@ class ComposeModal(Model):
                 else:
                     chip = Style().foreground(self.theme.fg_secondary).render(f"[{disp}]")
                 chips.append(chip)
-            sugg_str = Style().foreground(self.theme.fg_muted).render("         Suggestions (Tab/Enter): ") + " ".join(chips)
+            sugg_str = truncate_ansi(
+                Style().foreground(self.theme.fg_muted).render("         Suggestions (Tab/Enter): ") + " ".join(chips),
+                content_w,
+            )
             if self.focus_idx == 1:
                 to_view = f"{to_view}\n{sugg_str}"
             elif self.focus_idx == 2:
@@ -478,7 +493,7 @@ class ComposeModal(Model):
             self.theme.border_focused if self.focus_idx == 4 else self.theme.border_unfocused
         )
         if self.preview_mode:
-            preview_rendered = format_email_body(self.editor.value or "(Empty body)", self.theme, modal_w - 10)
+            preview_rendered = format_email_body(self.editor.value or "(Empty body)", self.theme, content_w - 4)
             editor_box = (
                 Style()
                 .border(ROUNDED_BORDER)
@@ -486,7 +501,7 @@ class ComposeModal(Model):
                 .border_background(self.theme.bg_primary)
                 .background(self.theme.bg_primary)
                 .border_title(" 👁 Markdown Live Preview (F4 to edit) ", align=Align.LEFT)
-                .width(modal_w - 6)
+                .width(content_w)
                 .render(preview_rendered)
             )
         else:
@@ -497,34 +512,34 @@ class ComposeModal(Model):
                 .border_background(self.theme.bg_primary)
                 .background(self.theme.bg_primary)
                 .border_title(" Message Body (Markdown supported) ", align=Align.LEFT)
-                .width(modal_w - 6)
+                .width(content_w)
                 .render(self.editor.view())
             )
 
-        ext_badge = Style().bold(True).foreground(self.theme.accent_secondary).render("[Ctrl+O] Editor ($EDITOR)")
+        footer_text = "[F5] Send  [Ctrl+S] Draft  [Ctrl+O] Editor  [Ctrl+M] MD  [F4] Preview  [Ctrl+A] Attach  [Esc] Close"
+        footer = Style().foreground(self.theme.fg_muted).render(truncate_ansi(footer_text, content_w))
 
-        footer = (
-            Style()
-            .foreground(self.theme.fg_muted)
-            .render(
-                "[F5/Ctrl+X] Send  [Ctrl+S] Draft  [Ctrl+O] $EDITOR  [Ctrl+M] MD  [F4] Preview  [Ctrl+A] Attach  [Esc] Close"
-            )
-        )
+        badge_line_1 = f"{sign_badge}   {enc_badge}   {md_badge}"
+        badge_line_2 = f"{preview_badge}   {ext_badge}"
+        if string_width(f"{badge_line_1}   {badge_line_2}") <= content_w:
+            badges_row = [f"{badge_line_1}   {badge_line_2}"]
+        else:
+            badges_row = [badge_line_1, badge_line_2]
 
         content_rows = [
             from_row,
             to_view,
             cc_view,
             self.input_subject.view(),
-            f"{sign_badge}    {enc_badge}    {md_badge}    {preview_badge}    {ext_badge}",
+            *badges_row,
             f"Files:   {att_line}",
         ]
         if self.editor_status_msg:
-            content_rows.append(Style().foreground(self.theme.accent_secondary).render(self.editor_status_msg))
+            content_rows.append(Style().foreground(self.theme.accent_secondary).render(truncate_ansi(self.editor_status_msg, content_w)))
         content_rows.extend([editor_box, footer])
 
         content = join_vertical(Align.LEFT, *content_rows)
-        return self.theme.modal_style(modal_w, "✉ Compose Email").render(content)
+        return self.theme.modal_style(modal_w, "✉️ Compose Email").render(content)
 
 
 # ---------------------------------------------------------------------------
@@ -591,12 +606,16 @@ class SearchModal(Model):
     def view(self, width: int = 80) -> str:
         modal_w = min(82, max(58, width - 6))
         inner_w = modal_w - 6
+        self.query_input.width = inner_w
 
-        tips = (
-            Style()
-            .foreground(self.theme.fg_muted)
-            .render("Operators: from:<name>  to:<addr>  subject:<word>  body:<text>  att:<file>  has:attachment  is:unread")
-        )
+        tips_raw = "Operators: from:<name>  to:<addr>  subject:<word>  body:<text>  att:<file>  has:attachment  is:unread"
+        if inner_w >= string_width(tips_raw):
+            tips_content = tips_raw
+        else:
+            tips_line_1 = truncate_ansi("Operators: from:<name>  to:<addr>  subject:<word>  body:<text>", inner_w)
+            tips_line_2 = truncate_ansi("           att:<file>  has:attachment  is:unread", inner_w)
+            tips_content = f"{tips_line_1}\n{tips_line_2}"
+        tips = Style().foreground(self.theme.fg_muted).render(tips_content)
 
         rows: list[str] = []
         visible_slice = self.results[:10]
@@ -612,8 +631,15 @@ class SearchModal(Model):
                 m = hit.message
                 marker = "▸ " if idx == self.cursor else "  "
                 score_badge = f"[{int(hit.score)}%]"
-                fields_str = ",".join(hit.matched_fields[:2])
-                line = f"{marker}{m.short_date:<6} │ {m.sender_short[:16]:<16} │ {m.subject[:32]:<32} {score_badge} ({fields_str})"
+                fields_str = f"({','.join(hit.matched_fields[:2])})" if hit.matched_fields else ""
+                meta_suffix = f"{score_badge} {fields_str}".strip()
+
+                date_cell = pad_cell(m.short_date, 6)
+                sender_cell = pad_cell(m.sender_short, 16)
+                avail_subj = max(8, inner_w - 2 - 6 - 3 - 16 - 3 - string_width(meta_suffix) - 1)
+                subj_cell = pad_cell(m.subject, avail_subj)
+
+                line = f"{marker}{date_cell} │ {sender_cell} │ {subj_cell} {meta_suffix}".rstrip()
                 truncated = truncate_ansi(line, inner_w)
                 if idx == self.cursor:
                     rows.append(
@@ -638,14 +664,13 @@ class SearchModal(Model):
         if self.status_msg:
             rows.append("")
             rows.append(
-                Style().bold(True).foreground(self.theme.accent_secondary).render(self.status_msg)
+                Style().bold(True).foreground(self.theme.accent_secondary).render(
+                    truncate_ansi(self.status_msg, inner_w)
+                )
             )
 
-        footer = (
-            Style()
-            .foreground(self.theme.fg_muted)
-            .render(f"{len(self.results)} matches [FTS5]   [Ctrl+R] Remote IMAP   [↑/↓] Navigate   [Enter] Open   [Esc] Close")
-        )
+        footer_text = f"{len(self.results)} matches [FTS5]   [Ctrl+R] Remote IMAP   [↑/↓] Navigate   [Enter] Open   [Esc] Close"
+        footer = Style().foreground(self.theme.fg_muted).render(truncate_ansi(footer_text, inner_w))
 
         content = join_vertical(
             Align.LEFT,
@@ -837,7 +862,10 @@ class AddressBookModal(Model):
             abs_idx = self.scroll + rel_idx
             fav = "★ " if c.favorite else "  "
             pgp_badge = "🔑PGP" if c.pgp_fingerprint else "     "
-            line = f" {fav}{c.name[:20]:<20} │ {c.email[:26]:<26} │ {c.organization[:14]:<14} {pgp_badge}"
+            col_name = pad_cell(c.name, 20)
+            col_email = pad_cell(c.email, 24)
+            col_org = pad_cell(c.organization, 12)
+            line = f" {fav}{col_name} │ {col_email} │ {col_org} {pgp_badge}"
             truncated = truncate_ansi(line, inner_w)
             if abs_idx == self.cursor:
                 rows.append(
@@ -864,12 +892,12 @@ class AddressBookModal(Model):
             "[↑/↓/PgUp/PgDn] Scroll   [s] Sync CardDAV   [Enter/c] Compose   [a] Add   [d] Delete   [Esc] Close"
         )
         footer_elements = [
-            Style().foreground(self.theme.fg_muted).render(footer_text)
+            Style().foreground(self.theme.fg_muted).render(truncate_ansi(footer_text, inner_w))
         ]
         if self.status_msg:
-            footer_elements.insert(0, Style().bold(True).foreground(self.theme.pgp_verified_fg).render(self.status_msg))
+            footer_elements.insert(0, Style().bold(True).foreground(self.theme.pgp_verified_fg).render(truncate_ansi(self.status_msg, inner_w)))
         if scroll_indicator:
-            footer_elements.insert(0, Style().foreground(self.theme.accent_secondary).render(scroll_indicator))
+            footer_elements.insert(0, Style().foreground(self.theme.accent_secondary).render(truncate_ansi(scroll_indicator, inner_w)))
 
         title = f"📇 Local Address Book ({len(self.contacts)} contacts)" if self.contacts else "📇 Local Address Book"
         content = join_vertical(Align.LEFT, "\n".join(rows), "", *footer_elements)
@@ -1222,8 +1250,8 @@ class SieveModal(Model):
     def view(self, width: int = 80, height: int = 24) -> str:
         self._adjust_scroll()
         target_outer_w = min(114, max(68, width - 4))
-        modal_w = target_outer_w - 6
-        inner_w = modal_w
+        modal_w = target_outer_w
+        inner_w = modal_w - 6
         content_editor_w = max(20, inner_w - 4)
         self.script_editor.width = content_editor_w
 
@@ -1254,7 +1282,7 @@ class SieveModal(Model):
         for rel_idx, r in enumerate(visible_rules):
             abs_idx = self.scroll + rel_idx
             chk = "[x]" if r.enabled else "[ ]"
-            desc = f"{chk} {r.name:<24} │ if {r.field} {r.comparator} \"{r.pattern}\" → {r.action} \"{r.action_arg}\""
+            desc = f"{chk} {pad_cell(r.name, 24)} │ if {r.field} {r.comparator} \"{r.pattern}\" → {r.action} \"{r.action_arg}\""
             truncated = truncate_ansi(desc, inner_w)
             if abs_idx == self.cursor and not self.editor_focused:
                 rule_rows.append(
@@ -1386,7 +1414,9 @@ class PGPModal(Model):
         rows: list[str] = []
         for idx, k in enumerate(self.keys[:8]):
             kind = "🔐 SEC/PUB" if k.has_secret else "🔑 PUB    "
-            line = f" {kind} │ {k.key_id:<18} │ {k.uid[:28]:<28} │ {k.algorithm}"
+            col_key = pad_cell(k.key_id, 18)
+            col_uid = pad_cell(k.uid, 28)
+            line = f" {kind} │ {col_key} │ {col_uid} │ {k.algorithm}"
             truncated = truncate_ansi(line, inner_w)
             if idx == self.cursor:
                 rows.append(
@@ -1401,13 +1431,10 @@ class PGPModal(Model):
                 rows.append(Style().foreground(self.theme.fg_primary).render(truncated))
 
         selected_fp = self.keys[self.cursor].fingerprint if self.keys else "None"
-        fp_line = Style().foreground(self.theme.accent_secondary).render(f"Fingerprint: {selected_fp}")
-        status_line = Style().bold(True).foreground(self.theme.pgp_verified_fg).render(self.status_note)
-        footer = (
-            Style()
-            .foreground(self.theme.fg_muted)
-            .render("[g] Generate Key   [v] Verify Active Email   [x] Decrypt Active Email   [Esc] Close")
-        )
+        fp_line = Style().foreground(self.theme.accent_secondary).render(truncate_ansi(f"Fingerprint: {selected_fp}", inner_w))
+        status_line = Style().bold(True).foreground(self.theme.pgp_verified_fg).render(truncate_ansi(self.status_note, inner_w))
+        footer_text = "[g] Generate Key   [v] Verify Email   [x] Decrypt Email   [Esc] Close"
+        footer = Style().foreground(self.theme.fg_muted).render(truncate_ansi(footer_text, inner_w))
 
         content = join_vertical(
             Align.LEFT,
@@ -1842,6 +1869,7 @@ class HelpModal(Model):
 
     def view(self, width: int = 80) -> str:
         modal_w = min(78, max(54, width - 8))
+        inner_w = modal_w - 6
         h_style = Style().bold(True).foreground(self.theme.accent_secondary)
         k_style = Style().bold(True).foreground(self.theme.accent_primary)
 
@@ -1856,11 +1884,11 @@ class HelpModal(Model):
 
         lines = [
             h_style.render("Navigation & Layout"),
-            f"  {k_style.render('Tab / Shift+Tab')}   Cycle focus across Folders, Message List, and Reading Pane",
+            f"  {k_style.render('Tab / Shift+Tab')}   Cycle focus across Folders, List, and Reader",
             f"  {k_style.render('j / k / ↑ / ↓')}     Navigate folders, threads, or scroll reading pane",
-            f"  {k_style.render('Enter / Space')}     Select folder, open message, or expand/collapse thread",
-            f"  {k_style.render('[ / ]')}             Resize splitter (widen reading pane / message list; or drag with mouse)",
-            f"  {k_style.render(_k('unified_inbox', 'U'))}                 Jump directly to Unified Inbox (all accounts)",
+            f"  {k_style.render('Enter / Space')}     Select folder, open message, or toggle thread",
+            f"  {k_style.render('[ / ]')}             Resize splitter (widen reading pane / list)",
+            f"  {k_style.render(_k('unified_inbox', 'U'))}                 Jump directly to Unified Inbox",
             f"  {k_style.render('F10 / m')}           Open interactive top drop-down Menu Bar",
             "",
             h_style.render("Inbox Zero & Single-Key Triaging"),
@@ -1876,18 +1904,18 @@ class HelpModal(Model):
             f"  {k_style.render(_k('sync_all', 'S'))}  Sync all accounts     {k_style.render(_k('empty_trash', 'X'))}      Empty Trash",
             "",
             h_style.render("Accounts, Search, Security, Filters & Settings"),
-            f"  {k_style.render(_k('account_settings', 'A'))}      Edit Account Settings (Password, IMAP/SMTP hosts, ports, TLS)",
+            f"  {k_style.render(_k('account_settings', 'A'))}      Edit Account Settings (Hosts, ports, TLS, auth)",
             f"  {k_style.render(_k('new_account', 'O'))}      Add New Account (Onboarding Wizard)",
-            f"  {k_style.render(_k('preferences', 'p'))}      General Preferences (Keymaps, Downloads, theme, dark/light)",
+            f"  {k_style.render(_k('preferences', 'p'))}      General Preferences (Keymaps, themes, storage)",
             f"  {k_style.render(_k('fuzzy_search', '/'))}      Instant Fuzzy Search across local SQLite store",
             f"  {k_style.render(_k('toggle_threading', 't'))}      Toggle Conversation Threading view",
-            f"  {k_style.render(_k('cycle_image_mode', 'i'))}      Cycle Terminal Image Renderer (Chafa / Sixel / Kitty / Half-Block)",
+            f"  {k_style.render(_k('cycle_image_mode', 'i'))}      Cycle Image Renderer (Chafa / Sixel / Half-Block)",
             f"  {k_style.render(_k('address_book', 'B'))}      Local Address Book    {k_style.render(_k('sieve_filters', 'F'))}  ManageSieve Filters",
             f"  {k_style.render(_k('pgp_manager', 'G'))}      GPG/PGP Keyring       {k_style.render('Ctrl+P')} Command Palette",
             f"  {k_style.render(_k('quit_app', 'q'))}      Quit EspressoMail",
         ]
         return self.theme.modal_style(modal_w, f"⌨️ EspressoMail Shortcuts{preset_str}").render(
-            "\n".join(lines)
+            "\n".join(truncate_ansi(l, inner_w) for l in lines)
         )
 
 

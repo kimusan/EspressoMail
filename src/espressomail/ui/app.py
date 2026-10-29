@@ -3068,8 +3068,9 @@ class EspressoMailApp(Model):
             lbl_raw = f" {tree_prefix}{folder_icon} {row.label}{unsub_badge}"
             lbl_display = f" {branch_prefix}{folder_icon} {row.label}{unsub_badge}"
 
-            pad = max(1, inner_w - string_width(lbl_display) - len(count_badge) - 1)
-            line_str = truncate_ansi(f"{lbl_raw}{' ' * pad}{count_badge} ", inner_w)
+            pad = max(1, inner_w - string_width(lbl_display) - string_width(count_badge) - 1)
+            line_str_cut = truncate_ansi(f"{lbl_raw}{' ' * pad}{count_badge} ", inner_w)
+            line_str = line_str_cut + (" " * max(0, inner_w - string_width(line_str_cut)))
 
             if is_selected and self.focused_pane == "folders":
                 lines.append(
@@ -3184,27 +3185,29 @@ class EspressoMailApp(Model):
                     )
                     acc_short = (acc.name if acc else m.account_id)[:6]
                     acc_prefix = Style().bold(True).foreground(b_color).render(f"[{acc_short}] ")
-                    acc_prefix_len = len(f"[{acc_short}] ")
+                    acc_prefix_len = string_width(f"[{acc_short}] ")
 
                 right_meta = f"{thread_cnt}{att_ch}{pgp_ch}{m.short_date}".strip()
                 right_w = string_width(right_meta)
 
-                fixed_left_w = 3 + acc_prefix_len + len(tree_prefix)
+                fixed_left_w = 3 + acc_prefix_len + string_width(tree_prefix)
                 avail_sender = max(6, inner_w - right_w - fixed_left_w - 1)
                 sender_txt = truncate_ansi(m.sender_short, avail_sender)
                 left_line = f"{unread_ch}{star_ch} {acc_prefix}{tree_prefix}{sender_txt}"
 
                 space_count = max(1, inner_w - string_width(left_line) - right_w)
                 line1_raw = f"{left_line}{' ' * space_count}{right_meta}"
-                line1 = truncate_ansi(line1_raw, inner_w)
+                line1_cut = truncate_ansi(line1_raw, inner_w)
+                line1 = line1_cut + (" " * max(0, inner_w - string_width(line1_cut)))
 
                 # Line 2: Subject indented cleanly with maximum available width
                 tree_indent = " " * min(4, row.depth * 2) if self.threading_enabled else ""
                 subj_indent = f"   {tree_indent}"
-                subj_avail = max(6, inner_w - len(subj_indent))
+                subj_avail = max(6, inner_w - string_width(subj_indent))
                 subj_txt = truncate_ansi(m.subject or "(No Subject)", subj_avail)
                 line2_raw = f"{subj_indent}{subj_txt}"
-                line2 = truncate_ansi(line2_raw, inner_w)
+                line2_cut = truncate_ansi(line2_raw, inner_w)
+                line2 = line2_cut + (" " * max(0, inner_w - string_width(line2_cut)))
 
                 if is_sel and self.focused_pane == "messages":
                     lines.append(

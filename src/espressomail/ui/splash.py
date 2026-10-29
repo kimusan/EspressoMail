@@ -157,7 +157,7 @@ class SplashScreen(Model):
         stage_line = (
             Style()
             .foreground(self.theme.fg_primary)
-            .render(f"☕ {self.current_stage_text}")
+            .render(f"• {self.current_stage_text}")
         )
 
         badges = (
@@ -183,7 +183,7 @@ class SplashScreen(Model):
             badges,
         )
 
-        card_width = min(max(74, bar_width + 20), max(74, width - 6))
+        card_width = min(max(70, bar_width + 16), max(70, width - 8))
         card = (
             Style()
             .border(DOUBLE_BORDER)
@@ -192,11 +192,11 @@ class SplashScreen(Model):
                 Style()
                 .bold(True)
                 .foreground(self.theme.accent_secondary)
-                .render(" [ ☕ EspressoMail TUI ] "),
+                .render(" [ EspressoMail TUI ] "),
                 align=Align.CENTER,
             )
             .padding(1, 3)
-            .width(card_width)
+            .width(card_width - 8)
             .align(Align.CENTER)
             .render(inner)
         )
