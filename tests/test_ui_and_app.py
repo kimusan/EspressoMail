@@ -2985,12 +2985,13 @@ class TestUIAndApp(unittest.TestCase):
             current_theme=app.theme,
             download_dir=Path("/tmp/downloads"),
         )
+        pref_modal, _ = pref_modal.update(KeyMsg("2"))
         pref_view = pref_modal.view(80, 24)
         self.assertIn("External Editor:", pref_view)
         self.assertIn("AUTO", pref_view)
 
-        # Focus row 15 (External Editor) and cycle right
-        pref_modal.focus_idx = 15
+        # Focus row 4 (External Editor in Tab 2) and cycle right
+        pref_modal.focus_idx = 4
         pref_modal, _ = pref_modal.update(KeyMsg("right"))
         expected_editor = COMMON_EDITORS[1]
         self.assertEqual(COMMON_EDITORS[pref_modal.external_editor_idx], expected_editor)
@@ -3151,6 +3152,156 @@ class TestUIAndApp(unittest.TestCase):
         from espressomail.ui.modals import ModalClosedMsg
         app, _ = app.update(ModalClosedMsg("Closed test modal"))
         self.assertFalse(app.show_onboarding)
+
+    def test_preferences_modal_tab_navigation_and_cycling(self) -> None:
+        """Verify PreferencesModal tabs can be switched via numbers, brackets, and mouse clicks."""
+        from espressomail.themes.engine import THEMES
+
+        modal = PreferencesModal(
+            store=self.store,
+            current_theme=THEMES["espresso"],
+            download_dir=Path("/tmp/downloads"),
+        )
+        self.assertEqual(modal.active_tab, 0)
+        view0 = modal.view(80, 24)
+        self.assertIn("1. Appearance", view0)
+        self.assertIn("Icons & Emojis:", view0)
+
+        # Switch to tab 2 (Mail & View) with key "2"
+        modal, _ = modal.update(KeyMsg("2"))
+        self.assertEqual(modal.active_tab, 1)
+        view1 = modal.view(80, 24)
+        self.assertIn("2. Mail & View", view1)
+        self.assertIn("Download Folder:", view1)
+
+        # Switch to tab 3 (Sync & Network) with key "3"
+        modal, _ = modal.update(KeyMsg("3"))
+        self.assertEqual(modal.active_tab, 2)
+        view2 = modal.view(80, 24)
+        self.assertIn("3. Sync & Network", view2)
+        self.assertIn("Auto-Sync Interval:", view2)
+
+        # Switch to tab 4 (Keys & System) with key "4"
+        modal, _ = modal.update(KeyMsg("4"))
+        self.assertEqual(modal.active_tab, 3)
+        view3 = modal.view(80, 24)
+        self.assertIn("4. Keys & System", view3)
+        self.assertIn("Keyboard Shortcuts:", view3)
+
+        # Cycle forward with "]"
+        modal, _ = modal.update(KeyMsg("]"))
+        self.assertEqual(modal.active_tab, 0)
+
+        # Cycle backward with "["
+        modal, _ = modal.update(KeyMsg("["))
+        self.assertEqual(modal.active_tab, 3)
+
+        # Test mouse clicks on tab bar (row 0 = pos_y + 2)
+        pos_y = modal.last_pos_y
+        tab_y = pos_y + 2
+        # Click Tab 0 (Appearance)
+        modal, _ = modal.update(MouseMsg(x=10, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
+        self.assertEqual(modal.active_tab, 0)
+
+        # Click Tab 1 (Mail & View)
+        modal, _ = modal.update(MouseMsg(x=28, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
+        self.assertEqual(modal.active_tab, 1)
+
+        # Click Tab 2 (Sync & Network)
+        modal, _ = modal.update(MouseMsg(x=48, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
+        self.assertEqual(modal.active_tab, 2)
+
+        # Click Tab 3 (Keys & System)
+        modal, _ = modal.update(MouseMsg(x=68, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
+        self.assertEqual(modal.active_tab, 3)
+
+    def test_preferences_icon_mode_cycling_persistence_and_propagation(self) -> None:
+        """Verify icon_mode cycles between emoji/unicode/none, saves to store, and applies to app."""
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        modal = PreferencesModal(
+            store=self.store,
+            current_theme=app.theme,
+            download_dir=Path("/tmp/downloads"),
+            icon_mode="emoji",
+        )
+        self.assertEqual(modal.ICON_MODES[modal.icon_mode_idx], "emoji")
+
+        # Focus row 5 (Icons & Emojis on Tab 0) and cycle to unicode
+        modal.focus_idx = 5
+        modal, _ = modal.update(KeyMsg("right"))
+        self.assertEqual(modal.ICON_MODES[modal.icon_mode_idx], "unicode")
+
+        # Cycle right to none
+        modal, _ = modal.update(KeyMsg("right"))
+        self.assertEqual(modal.ICON_MODES[modal.icon_mode_idx], "none")
+
+        # Save preferences
+        modal, cmd = modal.update(KeyMsg("enter"))
+        self.assertIsNotNone(cmd)
+        saved_msg = cmd()
+        self.assertIsInstance(saved_msg, PreferencesSavedMsg)
+        self.assertEqual(saved_msg.icon_mode, "none")
+        self.assertEqual(self.store.get_setting("icon_mode"), "none")
+
+        # Propagate to app
+        app, _ = app.update(saved_msg)
+        self.assertEqual(app.icon_mode, "none")
+        self.assertEqual(app.menu_bar.icon_mode, "none")
+
+    def test_ui_icon_modes_emoji_unicode_none_rendering(self) -> None:
+        """Verify all UI panes and banners render correctly in emoji, unicode, and none modes."""
+        from espressomail.ui.formatter import _render_calendar_banner, _render_pgp_banner
+        from espressomail.protocols.icalendar import CalendarEvent
+
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+
+        # 1. Emoji Mode (default)
+        app.icon_mode = "emoji"
+        app.menu_bar.set_icon_mode("emoji")
+        app._rebuild_folder_rows()
+        bar_emoji = app.menu_bar.view_bar(100, app.theme)
+        self.assertIn("☕\ufe0f", bar_emoji)
+        folders_emoji = app._render_folder_pane(30, 20)
+        self.assertIn("📁\ufe0f Mailboxes", folders_emoji)
+        msgs_emoji = app._render_message_list_pane(40, 20)
+        self.assertIn("✉️", msgs_emoji)
+
+        # 2. Unicode Mode (monochrome)
+        app.icon_mode = "unicode"
+        app.menu_bar.set_icon_mode("unicode")
+        app._rebuild_folder_rows()
+        bar_unicode = app.menu_bar.view_bar(100, app.theme)
+        self.assertIn("☕︎", bar_unicode)
+        self.assertNotIn("☕\ufe0f", bar_unicode)
+        folders_unicode = app._render_folder_pane(30, 20)
+        self.assertIn("▪ Mailboxes", folders_unicode)
+        self.assertNotIn("📁\ufe0f", folders_unicode)
+        msgs_unicode = app._render_message_list_pane(40, 20)
+        self.assertIn("✉", msgs_unicode)
+
+        # 3. None Mode (clean plain text, no emoji/icons)
+        app.icon_mode = "none"
+        app.menu_bar.set_icon_mode("none")
+        app._rebuild_folder_rows()
+        bar_none = app.menu_bar.view_bar(100, app.theme)
+        self.assertNotIn("☕", bar_none)
+        self.assertIn("EspressoMail", bar_none)
+        folders_none = app._render_folder_pane(30, 20)
+        self.assertNotIn("📁", folders_none)
+        self.assertIn("Mailboxes", folders_none)
+
+        # Check reading pane PGP and calendar banners in 'none' mode
+        test_msg = app.message_rows[0].message
+        pgp_none = _render_pgp_banner(test_msg, app.theme, 60, icon_mode="none")
+        self.assertNotIn("🔒", pgp_none)
+        self.assertNotIn("🔐", pgp_none)
+
+        cal_event = CalendarEvent(uid="event_123", summary="Team Sync", dtstart_raw="Tomorrow 10:00 AM")
+        cal_none = _render_calendar_banner(cal_event, app.theme, 60, icon_mode="none")
+        self.assertNotIn("📅", cal_none)
+        self.assertIn("Calendar Invitation", cal_none)
 
 
 if __name__ == "__main__":

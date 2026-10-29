@@ -391,8 +391,12 @@ def format_message_for_reading_pane(
     show_raw_headers: bool = False,
     account: AccountConfig | None = None,
     allow_blocking_fetch: bool = False,
+    icon_mode: str = "emoji",
 ) -> str:
     """Format a complete EmailMessage (or multi-message thread) for the Reading Pane viewport."""
+    from espressomail.ui.icons import get_badge, normalize_icon_mode
+
+    m_mode = normalize_icon_mode(icon_mode)
     inner_w = max(30, width - 4)
     sections: list[str] = []
 
@@ -410,7 +414,11 @@ def format_message_for_reading_pane(
     val_style = Style().foreground(theme.fg_primary)
     muted_style = Style().foreground(theme.fg_muted)
 
-    star_badge = Style().foreground(theme.starred_fg).bold(True).render("★ ") if msg.is_starred else ""
+    star_badge = (
+        Style().foreground(theme.starred_fg).bold(True).render(get_badge("star", m_mode))
+        if msg.is_starred
+        else ""
+    )
     subj_rendered = (
         Style()
         .bold(True)
@@ -453,11 +461,11 @@ def format_message_for_reading_pane(
     # 2. Calendar Event / Invitation Banner
     cal_event = find_calendar_event(msg)
     if cal_event:
-        sections.append(_render_calendar_banner(cal_event, theme, inner_w))
+        sections.append(_render_calendar_banner(cal_event, theme, inner_w, icon_mode=m_mode))
 
     # 3. Cryptographic PGP Status Banner
     if msg.pgp_status != PGPStatus.NONE:
-        sections.append(_render_pgp_banner(msg, theme, inner_w))
+        sections.append(_render_pgp_banner(msg, theme, inner_w, icon_mode=m_mode))
 
     # 4. Attachments & Images Bar
     display_attachments = list(msg.attachments)
@@ -471,7 +479,12 @@ def format_message_for_reading_pane(
         att_chips: list[str] = []
         for idx, att in enumerate(display_attachments, start=1):
             is_ics = att.filename.lower().endswith(".ics") or "calendar" in att.content_type.lower()
-            icon = "🖼️" if att.is_image else ("📅\ufe0f" if is_ics else "📎\ufe0f")
+            if m_mode == "emoji":
+                icon = "🖼️" if att.is_image else ("📅\ufe0f" if is_ics else "📎\ufe0f")
+            elif m_mode == "unicode":
+                icon = "▣" if att.is_image else ("📅" if is_ics else "@")
+            else:
+                icon = "[img]" if att.is_image else ("[cal]" if is_ics else "@")
             saved_mark = " ✔saved" if att.local_path else ""
             chip = (
                 Style()
@@ -481,11 +494,12 @@ def format_message_for_reading_pane(
             )
             att_chips.append(chip)
         if not att_chips and html_img_tags:
+            img_prefix = "🖼️ " if m_mode == "emoji" else ("▣ " if m_mode == "unicode" else "")
             chip = (
                 Style()
                 .bold(True)
                 .foreground(theme.attachment_fg)
-                .render(f"🖼️ {len(html_img_tags)} embedded HTML image(s)")
+                .render(f"{img_prefix}{len(html_img_tags)} embedded HTML image(s)")
             )
             att_chips.append(chip)
         media_line = f"{lbl_style.render('Media:   ')} " + "  ".join(att_chips)
@@ -544,11 +558,12 @@ def format_message_for_reading_pane(
     if thread and thread.message_count > 1:
         earlier = [m for m in thread.messages if m.id != msg.id and m.timestamp <= msg.timestamp]
         for prev in earlier:
+            q_icon = "💬\ufe0f " if m_mode == "emoji" else ("» " if m_mode == "unicode" else "")
             prev_hdr = (
                 Style()
                 .bold(True)
                 .foreground(theme.fg_secondary)
-                .render(f"╭─ 💬\ufe0f {prev.sender_short} ({prev.short_date}) wrote:")
+                .render(f"╭─ {q_icon}{prev.sender_short} ({prev.short_date}) wrote:")
             )
             prev_body_raw = prev.body_text or html_to_terminal_text(prev.body_html)
             prev_formatted = format_email_body(prev_body_raw, theme, max(24, inner_w - 4))
@@ -595,66 +610,107 @@ def format_message_for_reading_pane(
     return "\n\n".join(sections)
 
 
-def _render_pgp_banner(msg: EmailMessage, theme: Theme, width: int) -> str:
+def _render_pgp_banner(msg: EmailMessage, theme: Theme, width: int, icon_mode: str = "emoji") -> str:
     """Render a color-coded OpenPGP verification/encryption banner."""
+    from espressomail.ui.icons import normalize_icon_mode
+
+    m = normalize_icon_mode(icon_mode)
     fp_short = msg.pgp_key_fingerprint[-19:] if msg.pgp_key_fingerprint else "Unknown Key"
     signer = msg.pgp_signer or msg.sender_display
 
+    if m == "emoji":
+        lock_icon = "🔒\ufe0f "
+        key_icon = "🔐\ufe0f "
+        warn_icon = "⚠ "
+        err_icon = "✖ "
+        ok_icon = "✔ "
+    elif m == "unicode":
+        lock_icon = "§ "
+        key_icon = "§ "
+        warn_icon = "! "
+        err_icon = "✕ "
+        ok_icon = "✓ "
+    else:
+        lock_icon = ""
+        key_icon = ""
+        warn_icon = ""
+        err_icon = ""
+        ok_icon = ""
+
     if msg.pgp_status == PGPStatus.SIGNED_VERIFIED:
         color = theme.pgp_verified_fg
-        badge = f"✔ PGP VERIFIED SIGNATURE — Signed by {signer} [{fp_short}]"
+        badge = f"{ok_icon}PGP VERIFIED SIGNATURE — Signed by {signer} [{fp_short}]"
     elif msg.pgp_status == PGPStatus.DECRYPTED_VERIFIED:
         color = theme.pgp_verified_fg
-        badge = f"🔒\ufe0f PGP DECRYPTED & VERIFIED — Signed by {signer} [{fp_short}]"
+        badge = f"{lock_icon}PGP DECRYPTED & VERIFIED — Signed by {signer} [{fp_short}]"
     elif msg.pgp_status == PGPStatus.DECRYPTED:
         color = theme.pgp_verified_fg
-        badge = "🔒\ufe0f PGP DECRYPTED MESSAGE — Confidentiality verified"
+        badge = f"{lock_icon}PGP DECRYPTED MESSAGE — Confidentiality verified"
     elif msg.pgp_status == PGPStatus.ENCRYPTED:
         color = theme.pgp_warning_fg
-        badge = "🔐\ufe0f PGP ENCRYPTED PAYLOAD — Press [x] to decrypt with local keyring"
+        badge = f"{key_icon}PGP ENCRYPTED PAYLOAD — Press [x] to decrypt with local keyring"
     elif msg.pgp_status == PGPStatus.SIGNED_UNVERIFIED:
         color = theme.pgp_warning_fg
-        badge = f"⚠ PGP SIGNATURE UNVERIFIED — Signer key [{fp_short}] not in trusted ring (Press [v] to verify)"
+        badge = f"{warn_icon}PGP SIGNATURE UNVERIFIED — Signer key [{fp_short}] not in trusted ring (Press [v] to verify)"
     else:
         color = theme.pgp_error_fg
-        badge = "✖ PGP INVALID SIGNATURE — Warning: Message may have been tampered with!"
+        badge = f"{err_icon}PGP INVALID SIGNATURE — Warning: Message may have been tampered with!"
 
     return (
         Style()
         .bold(True)
         .foreground(color)
-        .render(truncate_ansi(badge, max(20, width)))
+        .render(truncate_ansi(badge.strip(), max(20, width)))
     )
 
 
-def _render_calendar_banner(event: CalendarEvent, theme: Theme, width: int) -> str:
+def _render_calendar_banner(event: CalendarEvent, theme: Theme, width: int, icon_mode: str = "emoji") -> str:
     """Render a visual, interactive iCalendar event invitation / cancellation banner."""
+    from espressomail.ui.icons import normalize_icon_mode
+
+    m = normalize_icon_mode(icon_mode)
     box_w = max(24, width)
     b_color = theme.accent_primary
-    title_icon = "📅\ufe0f"
-    title_text = "Calendar Event"
+
+    if m == "emoji":
+        title_icon = "📅\ufe0f "
+        cancel_icon = "🚫\ufe0f "
+        reply_icon = "📨\ufe0f "
+    elif m == "unicode":
+        title_icon = "📅 "
+        cancel_icon = "✕ "
+        reply_icon = "▲ "
+    else:
+        title_icon = ""
+        cancel_icon = ""
+        reply_icon = ""
 
     is_cancelled = event.method == "CANCEL" or event.status == "CANCELLED"
     is_reply = event.method == "REPLY"
 
     if is_cancelled:
         b_color = theme.pgp_error_fg
-        title_icon = "🚫\ufe0f"
+        icon = cancel_icon
         title_text = "Event Cancelled"
     elif is_reply:
         b_color = theme.accent_secondary
-        title_icon = "📨\ufe0f"
+        icon = reply_icon
         title_text = "Event RSVP Response"
     elif event.method in ("REQUEST", "PUBLISH"):
         b_color = theme.accent_primary
-        title_icon = "📅\ufe0f"
+        icon = title_icon
         title_text = "Calendar Invitation"
+    else:
+        b_color = theme.accent_primary
+        icon = title_icon
+        title_text = "Calendar Event"
 
     lbl_style = Style().bold(True).foreground(theme.accent_primary)
     val_style = Style().foreground(theme.fg_primary)
     muted_style = Style().foreground(theme.fg_muted)
 
-    top_title = f" {title_icon} {title_text}: {event.summary} "
+    lead = f"{icon}" if icon else ""
+    top_title = f" {lead}{title_text}: {event.summary} "
     top_title_cut = truncate_ansi(top_title, box_w - 6)
 
     rows: list[str] = []

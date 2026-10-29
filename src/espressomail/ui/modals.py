@@ -148,6 +148,7 @@ class PreferencesSavedMsg(Msg):
     imap_push_enabled: bool = True
     keymap_preset: str = "default"
     external_editor: str = "auto"
+    icon_mode: str = "emoji"
 
 
 
@@ -2146,6 +2147,18 @@ class PreferencesModal(Model):
     FOLDER_COUNT_MODES: tuple[str, ...] = ("unread_only", "unread_and_total")
     FETCH_BATCH_SIZES: tuple[int, ...] = (25, 50, 100, 200)
     AUTO_SYNC_INTERVALS: tuple[int, ...] = (0, 60, 120, 180, 300, 600, 900, 1800, 3600)
+    TABS: tuple[str, ...] = (
+        "1. Appearance",
+        "2. Mail & View",
+        "3. Sync & Network",
+        "4. Keys & System",
+    )
+    ICON_MODES: tuple[str, ...] = ("emoji", "unicode", "none")
+    ICON_MODE_LABELS: dict[str, str] = {
+        "emoji": "Emoji (Color)",
+        "unicode": "Unicode (Monochrome)",
+        "none": "None (Plain Text)",
+    }
     KEYMAP_PRESETS: tuple[str, ...] = KEYMAP_PRESETS
     EXTERNAL_EDITORS: tuple[str, ...] = COMMON_EDITORS
     AUTO_SYNC_LABELS: dict[int, str] = {
@@ -2168,10 +2181,12 @@ class PreferencesModal(Model):
         current_image_backend: str = "auto",
         threading_enabled: bool = True,
         show_raw_headers: bool = False,
+        icon_mode: str = "",
     ) -> None:
         self.store = store
         self.current_theme = current_theme
-        self.focus_idx = 0  # 0=download_dir, 1=image_backend, 2=theme, 3=color_mode, 4=threading, 5=raw_headers, 6=sync_startup, 7=remote_imgs, 8=count_mode, 9=batch_size, 10=notifications, 11=sound, 12=auto_sync, 13=imap_push, 14=keymap_preset, 15=external_editor, 16=buttons
+        self.active_tab = 0  # 0=Appearance, 1=Mail & View, 2=Sync & Network, 3=Keys & System
+        self.focus_idx = 0  # 0=tabs bar, 1..6=settings, 16/17=buttons
         self.status_msg = ""
         self.error_msg = ""
 
@@ -2203,6 +2218,13 @@ class PreferencesModal(Model):
         if fam not in THEME_FAMILIES:
             fam = "solarized" if fam == "light" else "espresso"
         self.theme_idx = THEME_FAMILIES.index(fam)
+
+        cur_icon_mode = icon_mode or self.store.get_setting("icon_mode", "emoji")
+        self.icon_mode_idx = (
+            self.ICON_MODES.index(cur_icon_mode)
+            if cur_icon_mode in self.ICON_MODES
+            else 0
+        )
 
         backend_clean = current_image_backend.lower()
         self.backend_idx = (
@@ -2276,7 +2298,7 @@ class PreferencesModal(Model):
         self.input_download_dir.prompt_style = styles["prompt_style"]
 
     def _sync_focus(self) -> None:
-        if self.focus_idx == 0:
+        if (self.active_tab == 1 and self.focus_idx == 1) or (self.focus_idx == 0 and self.active_tab == 1):
             self.input_download_dir.focus()
         else:
             self.input_download_dir.blur()
@@ -2284,23 +2306,57 @@ class PreferencesModal(Model):
     def _cycle_row(self, row_idx: int, delta: int = 1) -> None:
         """Cycle or toggle the setting on a specific row."""
         if row_idx == 0:
-            self.focus_idx = 0
+            self.active_tab = (self.active_tab + delta) % len(self.TABS)
             self._sync_focus()
-        elif row_idx == 1:
-            self.backend_idx = (self.backend_idx + delta) % len(self.IMAGE_BACKENDS)
-        elif row_idx == 2:
-            self.theme_idx = (self.theme_idx + delta) % len(self.THEME_FAMILIES)
-            self._apply_theme_to_inputs()
-        elif row_idx == 3:
-            self.color_mode_idx = (self.color_mode_idx + delta) % len(self.COLOR_MODES)
-            self._apply_theme_to_inputs()
-        elif row_idx == 4:
-            self.threading_enabled = not self.threading_enabled
-        elif row_idx == 5:
-            self.show_raw_headers = not self.show_raw_headers
-        elif row_idx == 6:
-            self.sync_on_startup = not self.sync_on_startup
-        elif row_idx == 7:
+            return
+
+        if self.active_tab == 0:
+            if row_idx == 1:
+                self.backend_idx = (self.backend_idx + delta) % len(self.IMAGE_BACKENDS)
+            elif row_idx == 2:
+                self.theme_idx = (self.theme_idx + delta) % len(self.THEME_FAMILIES)
+                self._apply_theme_to_inputs()
+            elif row_idx == 3:
+                self.color_mode_idx = (self.color_mode_idx + delta) % len(self.COLOR_MODES)
+                self._apply_theme_to_inputs()
+            elif row_idx == 4:
+                self.threading_enabled = not self.threading_enabled
+            elif row_idx == 5:
+                self.icon_mode_idx = (self.icon_mode_idx + delta) % len(self.ICON_MODES)
+            elif row_idx in (6, 7):
+                self.allow_remote_images = not self.allow_remote_images
+
+        elif self.active_tab == 1:
+            if row_idx == 1:
+                self.focus_idx = 1
+                self._sync_focus()
+            elif row_idx in (2, 5):
+                self.show_raw_headers = not self.show_raw_headers
+            elif row_idx in (3, 8):
+                self.count_mode_idx = (self.count_mode_idx + delta) % len(self.FOLDER_COUNT_MODES)
+            elif row_idx in (4, 15):
+                self.external_editor_idx = (self.external_editor_idx + delta) % len(self.EXTERNAL_EDITORS)
+
+        elif self.active_tab == 2:
+            if row_idx in (1, 6):
+                self.sync_on_startup = not self.sync_on_startup
+            elif row_idx in (2, 13):
+                self.imap_push_enabled = not self.imap_push_enabled
+            elif row_idx in (3, 12):
+                self.sync_interval_idx = (self.sync_interval_idx + delta) % len(self.AUTO_SYNC_INTERVALS)
+            elif row_idx in (4, 9):
+                self.batch_idx = (self.batch_idx + delta) % len(self.FETCH_BATCH_SIZES)
+
+        elif self.active_tab == 3:
+            if row_idx in (1, 14):
+                self.keymap_preset_idx = (self.keymap_preset_idx + delta) % len(self.KEYMAP_PRESETS)
+            elif row_idx in (2, 10):
+                self.desktop_notifications = not self.desktop_notifications
+            elif row_idx in (3, 11):
+                self.notification_sound = not self.notification_sound
+
+        # Direct legacy row compatibility regardless of active tab
+        if row_idx == 7:
             self.allow_remote_images = not self.allow_remote_images
         elif row_idx == 8:
             self.count_mode_idx = (self.count_mode_idx + delta) % len(self.FOLDER_COUNT_MODES)
@@ -2328,7 +2384,7 @@ class PreferencesModal(Model):
             app_w = getattr(self, "last_app_w", 80)
             app_h = getattr(self, "last_app_h", 24)
             modal_w = getattr(self, "last_modal_w", min(74, max(56, app_w - 8)))
-            modal_h = getattr(self, "last_modal_h", 22)
+            modal_h = getattr(self, "last_modal_h", 24)
             pos_x = getattr(self, "last_pos_x", max(0, (app_w - modal_w) // 2))
             pos_y = getattr(self, "last_pos_y", max(0, (app_h - modal_h) // 2))
 
@@ -2357,11 +2413,24 @@ class PreferencesModal(Model):
                         else:
                             return self, lambda: ModalClosedMsg("Closed preferences.")
 
-                    # Check setting rows (0 to 15)
-                    if 0 <= row_idx <= 15:
+                    # Check tab bar click (row 0)
+                    if row_idx == 0:
+                        if rel_x < 20:
+                            self.active_tab = 0
+                        elif rel_x < 39:
+                            self.active_tab = 1
+                        elif rel_x < 59:
+                            self.active_tab = 2
+                        else:
+                            self.active_tab = 3
+                        self.focus_idx = 1
+                        self._sync_focus()
+                        return self, None
+
+                    # Check setting rows (1 to 15)
+                    if 1 <= row_idx <= 15:
                         self.focus_idx = row_idx
                         self._sync_focus()
-                        # If clicked on left arrow or left side of option value, cycle backwards; else forwards
                         delta = -1 if rel_x < 28 else 1
                         self._cycle_row(row_idx, delta)
                         return self, None
@@ -2370,31 +2439,73 @@ class PreferencesModal(Model):
 
         # 2. Keyboard Interaction
         if isinstance(msg, KeyMsg):
-            k = str(msg.key)
+            k = str(msg.key).lower()
             if k == "esc":
                 return self, lambda: ModalClosedMsg("Closed preferences.")
 
             if k in ("enter", "ctrl+s"):
-                if self.focus_idx == 16:
-                    return self._save_preferences()
                 return self._save_preferences()
 
-            if k in ("tab", "down"):
-                self.focus_idx = (self.focus_idx + 1) % 17
+            # Direct tab switching via 1, 2, 3, 4
+            if k in ("1", "2", "3", "4"):
+                self.active_tab = int(k) - 1
+                self.focus_idx = 1
                 self._sync_focus()
                 return self, None
+
+            # Tab cycling with [ and ]
+            if k in ("[", "alt+left"):
+                self.active_tab = (self.active_tab - 1) % len(self.TABS)
+                self.focus_idx = 1
+                self._sync_focus()
+                return self, None
+
+            if k in ("]", "alt+right"):
+                self.active_tab = (self.active_tab + 1) % len(self.TABS)
+                self.focus_idx = 1
+                self._sync_focus()
+                return self, None
+
+            tab_max = {0: 6, 1: 4, 2: 4, 3: 3}.get(self.active_tab, 4)
+
+            if k in ("tab", "down"):
+                if self.focus_idx == 0:
+                    self.focus_idx = 1
+                elif 1 <= self.focus_idx < tab_max:
+                    self.focus_idx += 1
+                elif self.focus_idx == tab_max:
+                    self.focus_idx = 17
+                elif self.focus_idx in (16, 17):
+                    self.focus_idx = 0
+                else:
+                    self.focus_idx = 1
+                self._sync_focus()
+                return self, None
+
             if k in ("shift+tab", "up"):
-                self.focus_idx = (self.focus_idx - 1) % 17
+                if self.focus_idx in (16, 17):
+                    self.focus_idx = tab_max
+                elif self.focus_idx > 1:
+                    self.focus_idx -= 1
+                elif self.focus_idx == 1:
+                    self.focus_idx = 0
+                elif self.focus_idx == 0:
+                    self.focus_idx = 17
                 self._sync_focus()
                 return self, None
 
             # Cycling / toggling options via arrows / space / h / l
-            if 1 <= self.focus_idx <= 15 and k in ("left", "right", "h", "l", " ", "space"):
+            if k in ("left", "right", "h", "l", " ", "space"):
                 delta = 1 if k in ("right", "l", " ", "space") else -1
-                self._cycle_row(self.focus_idx, delta)
-                return self, None
+                if self.focus_idx == 0:
+                    self.active_tab = (self.active_tab + delta) % len(self.TABS)
+                    self._sync_focus()
+                    return self, None
+                if not (self.active_tab == 1 and self.focus_idx in (0, 1)):
+                    self._cycle_row(self.focus_idx, delta)
+                    return self, None
 
-        if self.focus_idx == 0:
+        if (self.active_tab == 1 and self.focus_idx in (0, 1)) or self.focus_idx == 0:
             self.input_download_dir, cmd = self.input_download_dir.update(msg)
             return self, cmd
 
@@ -2420,6 +2531,7 @@ class PreferencesModal(Model):
         count_mode_val = self.FOLDER_COUNT_MODES[self.count_mode_idx]
         batch_val = self.FETCH_BATCH_SIZES[self.batch_idx]
         keymap_val = self.KEYMAP_PRESETS[self.keymap_preset_idx]
+        icon_mode_val = self.ICON_MODES[self.icon_mode_idx]
 
         self.store.set_setting("download_dir", str(p))
         self.store.set_setting("image_backend", backend_val)
@@ -2439,6 +2551,7 @@ class PreferencesModal(Model):
         self.store.set_setting("keymap_preset", keymap_val)
         ext_ed_val = self.EXTERNAL_EDITORS[self.external_editor_idx]
         self.store.set_setting("external_editor", ext_ed_val)
+        self.store.set_setting("icon_mode", icon_mode_val)
 
         return self, lambda: PreferencesSavedMsg(
             download_dir=str(p),
@@ -2456,6 +2569,7 @@ class PreferencesModal(Model):
             imap_push_enabled=self.imap_push_enabled,
             keymap_preset=keymap_val,
             external_editor=ext_ed_val,
+            icon_mode=icon_mode_val,
         )
 
     def view(self, width: int = 80, height: int = 24) -> str:
@@ -2466,86 +2580,219 @@ class PreferencesModal(Model):
 
         rows: list[str] = []
 
+        # Row 0: Tabs Bar
+        tab_buttons: list[str] = []
+        for idx, tab_name in enumerate(self.TABS):
+            if idx == self.active_tab:
+                btn = (
+                    Style()
+                    .bold(True)
+                    .background(self.current_theme.accent_primary)
+                    .foreground(self.current_theme.bg_primary)
+                    .render(f" {tab_name} ")
+                )
+            else:
+                btn = (
+                    Style()
+                    .background(self.current_theme.bg_highlight)
+                    .foreground(self.current_theme.fg_muted)
+                    .render(f" {tab_name} ")
+                )
+            tab_buttons.append(btn)
+        rows.append(" ".join(tab_buttons))
+
         def _opt_style(idx: int, text: str) -> str:
             if idx == self.focus_idx:
                 return Style().bold(True).foreground(self.current_theme.accent_primary).render(text)
             return Style().foreground(self.current_theme.fg_primary).render(text)
 
-        # Row 0: Download folder
-        rows.append(self.input_download_dir.view())
+        if self.active_tab == 0:
+            # Tab 0: Appearance
+            cur_b = self.IMAGE_BACKENDS[self.backend_idx].upper()
+            rows.append(f"Image Rendering Mode: ◀ {_opt_style(1, cur_b)} ▶")
 
-        # Row 1: Image Rendering Backend
-        cur_b = self.IMAGE_BACKENDS[self.backend_idx].upper()
-        rows.append(f"Image Rendering Mode: ◀ {_opt_style(1, cur_b)} ▶")
+            cur_fam_label = self.THEME_FAMILIES[self.theme_idx].title()
+            rows.append(f"Color Theme:          ◀ {_opt_style(2, cur_fam_label)} ▶")
 
-        # Row 2: Theme family
-        cur_fam_label = self.THEME_FAMILIES[self.theme_idx].title()
-        rows.append(f"Color Theme:          ◀ {_opt_style(2, cur_fam_label)} ▶")
+            cur_mode_str = "Dark" if self.COLOR_MODES[self.color_mode_idx] == "dark" else "Light"
+            rows.append(f"Color Mode:           ◀ {_opt_style(3, cur_mode_str)} ▶")
 
-        # Row 3: Color Mode
-        cur_mode_str = "Dark" if self.COLOR_MODES[self.color_mode_idx] == "dark" else "Light"
-        rows.append(f"Color Mode:           ◀ {_opt_style(3, cur_mode_str)} ▶")
+            th_val = "[x] Enabled" if self.threading_enabled else "[ ] Disabled"
+            rows.append(f"Message Threading:    {_opt_style(4, th_val)}")
 
-        # Row 4: Message Threading
-        th_val = "[x] Enabled" if self.threading_enabled else "[ ] Disabled"
-        rows.append(f"Message Threading:    {_opt_style(4, th_val)}")
+            cur_im = self.ICON_MODE_LABELS.get(self.ICON_MODES[self.icon_mode_idx], "Emoji")
+            rows.append(f"Icons & Emojis:       ◀ {_opt_style(5, cur_im)} ▶")
 
-        # Row 5: Show Raw RFC Headers
-        rh_val = "[x] Enabled" if self.show_raw_headers else "[ ] Disabled"
-        rows.append(f"Show Raw RFC Headers: {_opt_style(5, rh_val)}")
+            ri_val = "[x] Allowed" if self.allow_remote_images else "[ ] Blocked"
+            rows.append(f"Remote Image Fetch:   {_opt_style(6, ri_val)}")
 
-        # Row 6: Sync On Startup
-        su_val = "[x] Enabled" if self.sync_on_startup else "[ ] Disabled"
-        rows.append(f"Sync On Startup:      {_opt_style(6, su_val)}")
-
-        # Row 7: Remote Image Fetch
-        ri_val = "[x] Allowed" if self.allow_remote_images else "[ ] Blocked"
-        rows.append(f"Remote Image Fetch:   {_opt_style(7, ri_val)}")
-
-        # Row 8: Folder Email Counts Mode
-        cur_cm = "Unread Only" if self.FOLDER_COUNT_MODES[self.count_mode_idx] == "unread_only" else "Unread & Total"
-        rows.append(f"Folder Email Counts:  ◀ {_opt_style(8, cur_cm)} ▶")
-
-        # Row 9: Fetch Batch Size
-        cur_bs = f"{self.FETCH_BATCH_SIZES[self.batch_idx]} emails"
-        rows.append(f"Fetch Batch Size:     ◀ {_opt_style(9, cur_bs)} ▶")
-
-        # Row 10: Desktop Notifications
-        notif_val = "[x] Enabled" if self.desktop_notifications else "[ ] Disabled"
-        rows.append(f"Desktop Notifications: {_opt_style(10, notif_val)}")
-
-        # Row 11: Notification Sound
-        sound_val = "[x] Enabled" if self.notification_sound else "[ ] Disabled"
-        rows.append(f"Notification Sound:    {_opt_style(11, sound_val)}")
-
-        # Row 12: Auto-Sync Interval
-        cur_asi = self.AUTO_SYNC_INTERVALS[self.sync_interval_idx]
-        cur_asi_label = self.AUTO_SYNC_LABELS.get(cur_asi, f"{cur_asi}s")
-        rows.append(f"Auto-Sync Interval:    ◀ {_opt_style(12, cur_asi_label)} ▶")
-
-        # Row 13: IMAP Push (IDLE)
-        push_val = "[x] Enabled (Real-time)" if self.imap_push_enabled else "[ ] Disabled"
-        rows.append(f"IMAP Push (IDLE):     {_opt_style(13, push_val)}")
-
-        # Row 14: Keyboard Shortcuts Preset
-        cur_kp = self.KEYMAP_PRESETS[self.keymap_preset_idx].upper()
-        rows.append(f"Keyboard Shortcuts:    ◀ {_opt_style(14, cur_kp)} ▶")
-
-        # Row 15: External Editor
-        cur_ee = self.EXTERNAL_EDITORS[self.external_editor_idx].upper()
-        rows.append(f"External Editor:       ◀ {_opt_style(15, cur_ee)} ▶")
-
-        if self.error_msg:
             rows.append("")
             rows.append(
-                Style().bold(True).foreground(self.current_theme.pgp_error_fg).render(f"⚠ {self.error_msg}")
+                Style()
+                .foreground(self.current_theme.fg_secondary)
+                .render("  💡 Theme & Display Settings:")
             )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • Themes apply TrueColor palettes across all panes and dialogs.")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • Icon mode selects between Color Emoji, Monochrome Unicode, or Plain Text.")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • Sixel and Chafa render inline image attachments in terminal.")
+            )
+            rows.append("")
+            rows.append("")
+            rows.append("")
+            rows.append("")
+            rows.append("")
 
-        rows.append("")
-        self.buttons_row_offset = len(rows)
+        elif self.active_tab == 1:
+            # Tab 1: Mail & Reading
+            rows.append(self.input_download_dir.view())
 
-        # Row 16: Buttons row
-        save_focused = (self.focus_idx == 16)
+            rh_val = "[x] Enabled" if self.show_raw_headers else "[ ] Disabled"
+            rows.append(f"Show Raw RFC Headers: {_opt_style(2, rh_val)}")
+
+            cur_cm = "Unread Only" if self.FOLDER_COUNT_MODES[self.count_mode_idx] == "unread_only" else "Unread & Total"
+            rows.append(f"Folder Email Counts:  ◀ {_opt_style(3, cur_cm)} ▶")
+
+            cur_ee = self.EXTERNAL_EDITORS[self.external_editor_idx].upper()
+            rows.append(f"External Editor:       ◀ {_opt_style(4, cur_ee)} ▶")
+
+            rows.append("")
+            rows.append("")
+            rows.append("")
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_secondary)
+                .render("  💡 Mail & Reading Settings:")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • Press Ctrl+O in Compose to edit with your external terminal editor.")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • Raw RFC 5322 headers can be toggled with 'H' in the reading pane.")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • Download folder sets the target path when saving attachments ('w').")
+            )
+            rows.append("")
+            rows.append("")
+            rows.append("")
+            rows.append("")
+
+        elif self.active_tab == 2:
+            # Tab 2: Sync & Network
+            su_val = "[x] Enabled" if self.sync_on_startup else "[ ] Disabled"
+            rows.append(f"Sync On Startup:      {_opt_style(1, su_val)}")
+
+            push_val = "[x] Enabled (Real-time)" if self.imap_push_enabled else "[ ] Disabled"
+            rows.append(f"IMAP Push (IDLE):     {_opt_style(2, push_val)}")
+
+            cur_asi = self.AUTO_SYNC_INTERVALS[self.sync_interval_idx]
+            cur_asi_label = self.AUTO_SYNC_LABELS.get(cur_asi, f"{cur_asi}s")
+            rows.append(f"Auto-Sync Interval:    ◀ {_opt_style(3, cur_asi_label)} ▶")
+
+            cur_bs = f"{self.FETCH_BATCH_SIZES[self.batch_idx]} emails"
+            rows.append(f"Fetch Batch Size:     ◀ {_opt_style(4, cur_bs)} ▶")
+
+            rows.append("")
+            rows.append("")
+            rows.append("")
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_secondary)
+                .render("  💡 Sync & Network Settings:")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • IMAP IDLE maintains real-time push for instant email delivery.")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • Auto-sync periodically polls subscribed folders in background.")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • Fetch batch size controls messages fetched per IMAP page.")
+            )
+            rows.append("")
+            rows.append("")
+            rows.append("")
+            rows.append("")
+
+        else:
+            # Tab 3: Keys & System
+            cur_kp = self.KEYMAP_PRESETS[self.keymap_preset_idx].upper()
+            rows.append(f"Keyboard Shortcuts:    ◀ {_opt_style(1, cur_kp)} ▶")
+
+            notif_val = "[x] Enabled" if self.desktop_notifications else "[ ] Disabled"
+            rows.append(f"Desktop Notifications: {_opt_style(2, notif_val)}")
+
+            sound_val = "[x] Enabled" if self.notification_sound else "[ ] Disabled"
+            rows.append(f"Notification Sound:    {_opt_style(3, sound_val)}")
+
+            rows.append("")
+            rows.append("")
+            rows.append("")
+            rows.append("")
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_secondary)
+                .render("  💡 Shortcuts & System Alerts:")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • Keymap presets configure Vim, Gmail, Pine, or Default bindings.")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • System notifications dispatch via notify-send, osascript, or PowerShell.")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • Sound alerts trigger terminal bell cues on newly arrived messages.")
+            )
+            rows.append("")
+            rows.append("")
+            rows.append("")
+            rows.append("")
+
+        if self.error_msg:
+            err_line = Style().bold(True).foreground(self.current_theme.pgp_error_fg).render(f"⚠ {self.error_msg}")
+            if len(rows) > 0 and rows[-1] == "":
+                rows[-1] = err_line
+            else:
+                rows.append(err_line)
+
+        while len(rows) < 17:
+            rows.append("")
+        if len(rows) > 17:
+            rows = rows[:17]
+
+        self.buttons_row_offset = 17
+
+        # Row 17: Buttons row
+        save_focused = (self.focus_idx in (16, 17))
         save_btn = (
             Style().bold(True).background(self.current_theme.accent_primary).foreground(self.current_theme.bg_primary).render(" [ Save Preferences (Enter) ] ")
             if save_focused
@@ -2559,11 +2806,14 @@ class PreferencesModal(Model):
             Style()
             .foreground(self.current_theme.fg_muted)
             .render(
-                "[Tab/Arrows] Navigate  [Space/Click] Toggle/Cycle  [Enter] Save  [Esc] Cancel"
+                "[1-4 / [/]] Tabs  [Tab/↑/↓] Navigate  [Space/Click] Toggle  [Enter] Save  [Esc] Cancel"
             )
         )
 
-        rendered = self.current_theme.modal_style(modal_w, "⚙️ General Preferences").render("\n".join(rows))
+        from espressomail.ui.icons import get_modal_title
+
+        modal_title = get_modal_title("preferences", self.ICON_MODES[self.icon_mode_idx])
+        rendered = self.current_theme.modal_style(modal_w, modal_title).render("\n".join(rows))
         modal_lines = rendered.replace("\r\n", "\n").replace("\r", "\n").split("\n")
         self.last_modal_h = len(modal_lines)
         self.last_modal_w = max((string_width(l) for l in modal_lines), default=modal_w)

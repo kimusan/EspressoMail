@@ -258,21 +258,26 @@ class Folder:
         """Return decoded hierarchy path segments for this folder."""
         return tuple(split_folder_hierarchy(self.name))
 
+    def get_icon(
+        self,
+        mode: str = "emoji",
+        is_expanded: bool = False,
+        has_children: bool = False,
+    ) -> str:
+        """Return an icon representing the folder type according to icon mode."""
+        from espressomail.ui.icons import get_folder_icon
+
+        return get_folder_icon(
+            self.folder_type.name,
+            mode=mode,
+            is_expanded=is_expanded,
+            has_children=has_children,
+        )
+
     @property
     def icon(self) -> str:
-        """Return an icon representing the folder type."""
-        icons = {
-            FolderType.UNIFIED: "📥\ufe0f",
-            FolderType.INBOX: "📨\ufe0f",
-            FolderType.STARRED: "⭐\ufe0f",
-            FolderType.SENT: "📤\ufe0f",
-            FolderType.DRAFTS: "📝\ufe0f",
-            FolderType.ARCHIVE: "📦\ufe0f",
-            FolderType.TRASH: "🗑️",
-            FolderType.SPAM: "🚫\ufe0f",
-            FolderType.CUSTOM: "📁\ufe0f",
-        }
-        return icons.get(self.folder_type, "📁\ufe0f")
+        """Return default icon representing the folder type."""
+        return self.get_icon("emoji")
 
 
 def detect_image_mime_type(data: bytes | None) -> str:

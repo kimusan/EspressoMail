@@ -15,6 +15,17 @@ from espressomail.ui.formatter import (
     format_message_for_reading_pane,
     html_to_terminal_text,
 )
+from espressomail.ui.icons import (
+    ICON_MODE_LABELS,
+    ICON_MODES,
+    IconMode,
+    get_badge,
+    get_brand_label,
+    get_folder_icon,
+    get_modal_title,
+    get_pane_title,
+    normalize_icon_mode,
+)
 from espressomail.ui.image_renderer import (
     ImageRenderBackend,
     TerminalImageRenderer,
@@ -76,4 +87,13 @@ __all__ = [
     "DownloadAttachmentsModal",
     "PreferencesModal",
     "PreferencesSavedMsg",
+    "IconMode",
+    "ICON_MODES",
+    "ICON_MODE_LABELS",
+    "normalize_icon_mode",
+    "get_folder_icon",
+    "get_pane_title",
+    "get_brand_label",
+    "get_badge",
+    "get_modal_title",
 ]

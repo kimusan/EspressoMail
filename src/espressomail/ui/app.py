@@ -263,9 +263,10 @@ class EspressoMailApp(Model):
         saved_img_mode = self.store.get_setting("image_backend", "auto")
         self.image_renderer = TerminalImageRenderer(saved_img_mode)
 
+        self.icon_mode = self.store.get_setting("icon_mode", "emoji")
         self.pgp = PGPManager()
         self.toasts = ToastManager()
-        self.menu_bar = MenuBar()
+        self.menu_bar = MenuBar(icon_mode=self.icon_mode)
         self.keymap = KeymapManager.load_from_store(self.store)
 
         self.width = 120
@@ -612,7 +613,7 @@ class EspressoMailApp(Model):
                 ftype = _node_folder_type(node, 0)
                 if node.folder is not None:
                     label = node.folder.display_name
-                    icon = node.folder.icon
+                    icon = node.folder.get_icon(self.icon_mode, is_expanded=is_expanded, has_children=has_children)
                 else:
                     label = "Inbox" if ftype == FolderType.INBOX else node.segment
                     icon = Folder(
@@ -621,10 +622,11 @@ class EspressoMailApp(Model):
                         name=node.segment,
                         display_name=label,
                         folder_type=ftype,
-                    ).icon
+                    ).get_icon(self.icon_mode, is_expanded=is_expanded, has_children=has_children)
             else:
                 label = node.segment
-                icon = ("📂\ufe0f" if is_expanded else "📁\ufe0f") if has_children else "📁\ufe0f"
+                from espressomail.ui.icons import get_folder_icon
+                icon = get_folder_icon("CUSTOM", mode=self.icon_mode, is_expanded=is_expanded, has_children=has_children)
 
             folder_name = node.folder.name if node.folder is not None else "/".join(node.path_parts)
             selectable_mailbox = node.folder is not None and node.folder.selectable
@@ -667,17 +669,22 @@ class EspressoMailApp(Model):
         return [_to_tree_node(r, 0) for r in sorted_roots]
 
     def _rebuild_folder_rows(self) -> None:
+        from espressomail.ui.icons import get_folder_icon
+
         top_nodes: list[TreeNode] = []
         unified_counts = self.store.get_unified_counts()
 
+        unified_unread_icon = (
+            "✉" if self.icon_mode == "unicode" else ("" if self.icon_mode == "none" else "✉️")
+        )
         unified_defs = [
-            ("INBOX", "Unified Inbox", "📥\ufe0f"),
-            ("All Unread", "All Unread", "✉️"),
-            ("Starred", "All Starred", "⭐\ufe0f"),
-            ("Drafts", "All Drafts", "📝\ufe0f"),
-            ("Sent", "All Sent", "📤\ufe0f"),
-            ("Archive", "All Archive", "📦\ufe0f"),
-            ("Trash", "All Trash", "🗑️"),
+            ("INBOX", "Unified Inbox", get_folder_icon("UNIFIED_INBOX", mode=self.icon_mode)),
+            ("All Unread", "All Unread", unified_unread_icon),
+            ("Starred", "All Starred", get_folder_icon("STARRED", mode=self.icon_mode)),
+            ("Drafts", "All Drafts", get_folder_icon("DRAFTS", mode=self.icon_mode)),
+            ("Sent", "All Sent", get_folder_icon("SENT", mode=self.icon_mode)),
+            ("Archive", "All Archive", get_folder_icon("ARCHIVE", mode=self.icon_mode)),
+            ("Trash", "All Trash", get_folder_icon("TRASH", mode=self.icon_mode)),
         ]
         unified_children: list[TreeNode] = []
         for fname, label, icon in unified_defs:
@@ -702,6 +709,9 @@ class EspressoMailApp(Model):
                 )
             )
         is_unified_expanded = "*" not in self.collapsed_accounts
+        unified_header_icon = (
+            "🌐\ufe0f" if self.icon_mode == "emoji" else ("▪ " if self.icon_mode == "unicode" else "")
+        )
         top_nodes.append(
             TreeNode(
                 label="UNIFIED MAILBOXES",
@@ -709,7 +719,7 @@ class EspressoMailApp(Model):
                     account_id="*",
                     folder_name="",
                     label="UNIFIED MAILBOXES",
-                    icon="🌐\ufe0f",
+                    icon=unified_header_icon,
                     is_header=True,
                     has_children=True,
                     is_expanded=is_unified_expanded,
@@ -726,6 +736,7 @@ class EspressoMailApp(Model):
             acc_folders = self.store.list_folders(acc.id)
             acc_tree_children = self._build_account_folder_tree_nodes(acc.id, acc_folders)
             is_acc_expanded = acc.id not in self.collapsed_accounts
+            acc_header_icon = get_folder_icon("ACCOUNT", mode=self.icon_mode)
             top_nodes.append(
                 TreeNode(
                     label=acc.name.upper(),
@@ -733,7 +744,7 @@ class EspressoMailApp(Model):
                         account_id=acc.id,
                         folder_name="",
                         label=acc.name.upper(),
-                        icon="☕\ufe0f",
+                        icon=acc_header_icon,
                         is_header=True,
                         badge_color=acc.color_badge,
                         has_children=bool(acc_tree_children),
@@ -936,7 +947,7 @@ class EspressoMailApp(Model):
         cache_key = (
             f"{m.id}|{m.is_read}:{m.is_starred}:{m.pgp_status.value}:"
             f"{self.theme.id}:{self.image_renderer.backend.value}:"
-            f"{self.show_raw_headers}:{reader_w}"
+            f"{self.show_raw_headers}:{self.icon_mode}:{reader_w}"
         )
         if not force and cache_key == self._last_rendered_msg_key:
             return
@@ -952,6 +963,7 @@ class EspressoMailApp(Model):
             thread=row.thread if self.threading_enabled else None,
             show_raw_headers=self.show_raw_headers,
             account=acc,
+            icon_mode=self.icon_mode,
         )
         self.reader_viewport.set_content(rendered)
         if prev_msg_id == m.id:
@@ -1079,6 +1091,9 @@ class EspressoMailApp(Model):
                 self.keymap.save_to_store(self.store)
             if getattr(msg, "external_editor", None):
                 self.external_editor = msg.external_editor
+            if getattr(msg, "icon_mode", None):
+                self.icon_mode = msg.icon_mode
+                self.menu_bar.set_icon_mode(self.icon_mode)
             self.refresh_data()
             self.status_message = (
                 f"✔ Saved preferences: theme={msg.theme}, renderer={msg.image_backend}, "
@@ -2050,6 +2065,7 @@ class EspressoMailApp(Model):
                 current_image_backend=self.image_renderer.backend.value,
                 threading_enabled=self.threading_enabled,
                 show_raw_headers=self.show_raw_headers,
+                icon_mode=self.icon_mode,
             )
             return self, None
 
@@ -3073,14 +3089,26 @@ class EspressoMailApp(Model):
             tree_prefix = Style().foreground(self.theme.fg_muted).render(branch_prefix)
 
             # Folders with subfolders use 🗂️ when closed, 📂 when open; leaf folders use their own icon
+            from espressomail.ui.icons import get_badge, get_pane_title
+
             if not node.is_leaf:
-                folder_icon = "📂\ufe0f" if node.expanded else "🗂️"
+                if self.icon_mode == "emoji":
+                    folder_icon = "📂\ufe0f" if node.expanded else "🗂️"
+                elif self.icon_mode == "unicode":
+                    folder_icon = "▾ " if node.expanded else "▸ "
+                else:
+                    folder_icon = ""
             else:
                 folder_icon = row.icon
 
-            unsub_badge = " 🔕\ufe0f" if (not getattr(row, "subscribed", True) and row.account_id != "*") else ""
-            lbl_raw = f" {tree_prefix}{folder_icon} {row.label}{unsub_badge}"
-            lbl_display = f" {branch_prefix}{folder_icon} {row.label}{unsub_badge}"
+            unsub_badge = (
+                get_badge("unsubscribed", self.icon_mode)
+                if (not getattr(row, "subscribed", True) and row.account_id != "*")
+                else ""
+            )
+            icon_sep = " " if folder_icon else ""
+            lbl_raw = f" {tree_prefix}{folder_icon}{icon_sep}{row.label}{unsub_badge}"
+            lbl_display = f" {branch_prefix}{folder_icon}{icon_sep}{row.label}{unsub_badge}"
 
             pad = max(1, inner_w - string_width(lbl_display) - string_width(count_badge) - 1)
             line_str_cut = truncate_ansi(f"{lbl_raw}{' ' * pad}{count_badge} ", inner_w)
@@ -3135,7 +3163,7 @@ class EspressoMailApp(Model):
             focused=(self.focused_pane == "folders"),
             width=width,
             height=height,
-            title="📁\ufe0f Mailboxes",
+            title=get_pane_title("folders", self.icon_mode),
         ).render("\n".join(lines))
 
     def _render_message_list_pane(self, width: int, height: int) -> str:
@@ -3169,14 +3197,16 @@ class EspressoMailApp(Model):
                 m = row.message
                 is_sel = abs_idx == self.message_cursor
 
+                from espressomail.ui.icons import get_badge
+
                 is_checked = hasattr(self, "selected_message_ids") and m.id in self.selected_message_ids
                 if is_checked:
                     unread_ch = "✓"
                 else:
-                    unread_ch = "●" if not m.is_read else " "
-                star_ch = "★" if m.is_starred else " "
-                att_ch = "📎\ufe0f " if m.has_attachments else ""
-                pgp_ch = "🔒\ufe0f " if m.pgp_status != PGPStatus.NONE else ""
+                    unread_ch = ("*" if self.icon_mode == "none" else "●") if not m.is_read else " "
+                star_ch = ("*" if self.icon_mode == "none" else "★") if m.is_starred else " "
+                att_ch = get_badge("attachment", self.icon_mode) if m.has_attachments else ""
+                pgp_ch = get_badge("pgp", self.icon_mode) if m.pgp_status != PGPStatus.NONE else ""
 
                 tree_prefix = ""
                 if self.threading_enabled and row.depth > 0:
@@ -3305,7 +3335,12 @@ class EspressoMailApp(Model):
             else " / ".join(split_folder_hierarchy(self.active_folder))
         )
         filter_badge = " [UNREAD ONLY]" if self.unread_only_filter else ""
-        pane_title = f"✉️ {folder_path} ({folder_label}){filter_badge}"
+        if self.icon_mode == "emoji":
+            pane_title = f"✉️ {folder_path} ({folder_label}){filter_badge}"
+        elif self.icon_mode == "unicode":
+            pane_title = f"✉ {folder_path} ({folder_label}){filter_badge}"
+        else:
+            pane_title = f"{folder_path} ({folder_label}){filter_badge}"
 
         return self.theme.pane_style(
             focused=(self.focused_pane == "messages"),
@@ -3324,10 +3359,17 @@ class EspressoMailApp(Model):
             Style().background(self.theme.bg_primary).foreground(self.theme.fg_primary)
         )
         m = self.selected_message
-        title = "📖\ufe0f Reading Pane"
+        if self.icon_mode == "emoji":
+            title_base = "📖\ufe0f Reading Pane"
+        elif self.icon_mode == "unicode":
+            title_base = "≡ Reading Pane"
+        else:
+            title_base = "Reading Pane"
+
+        title = title_base
         if m:
             scroll_pct = int(self.reader_viewport.scroll_percent * 100)
-            title = f"📖\ufe0f Reading Pane ({scroll_pct}%)"
+            title = f"{title_base} ({scroll_pct}%)"
 
         return self.theme.pane_style(
             focused=(self.focused_pane == "reader"),

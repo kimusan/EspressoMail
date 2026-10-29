@@ -119,8 +119,13 @@ DEFAULT_MENUS: tuple[MenuCategory, ...] = (
 class MenuBar(Model):
     """Interactive top menu bar with mouse and keyboard drop-down menus."""
 
-    def __init__(self, categories: tuple[MenuCategory, ...] = DEFAULT_MENUS) -> None:
+    def __init__(
+        self,
+        categories: tuple[MenuCategory, ...] = DEFAULT_MENUS,
+        icon_mode: str = "emoji",
+    ) -> None:
         self.categories = categories
+        self.icon_mode = icon_mode
         self.is_open = False
         self.active_cat_idx = 0
         self.active_item_idx = 0
@@ -128,9 +133,16 @@ class MenuBar(Model):
         self._cat_bounds: list[tuple[int, int]] = []
         self._compute_bounds()
 
+    def set_icon_mode(self, icon_mode: str) -> None:
+        """Update active icon mode and recompute layout bounds."""
+        self.icon_mode = icon_mode
+        self._compute_bounds()
+
     def _compute_bounds(self) -> None:
+        from espressomail.ui.icons import get_brand_label
+
         self._cat_bounds = []
-        brand_prefix = " ☕\ufe0f EspressoMail │ "
+        brand_prefix = get_brand_label(self.icon_mode)
         x = string_width(brand_prefix)
         for cat in self.categories:
             label = f" {cat.title} ▾ "
@@ -229,12 +241,22 @@ class MenuBar(Model):
 
     def view_bar(self, width: int, theme: Theme, right_status: str = "") -> str:
         """Render the single-line top application menu bar."""
+        from espressomail.ui.icons import normalize_icon_mode
+
+        m = normalize_icon_mode(self.icon_mode)
+        if m == "emoji":
+            brand_text = " ☕\ufe0f EspressoMail "
+        elif m == "unicode":
+            brand_text = " ☕︎ EspressoMail "
+        else:
+            brand_text = " EspressoMail "
+
         brand = (
             Style()
             .bold(True)
             .foreground(theme.bg_primary)
             .background(theme.accent_primary)
-            .render(" ☕\ufe0f EspressoMail ")
+            .render(brand_text)
         )
         sep = Style().foreground(theme.fg_muted).background(theme.bg_menubar).render("│ ")
 
@@ -276,8 +298,11 @@ class MenuBar(Model):
 
     def view_dropdown(self, theme: Theme) -> tuple[str, int, int]:
         """Render the currently open drop-down menu box and return (box_str, x, y)."""
+        from espressomail.ui.icons import get_brand_label
+
         cat = self.categories[self.active_cat_idx]
-        drop_x = self._cat_bounds[self.active_cat_idx][0] if self._cat_bounds else string_width(" ☕\ufe0f EspressoMail │ ")
+        default_x = string_width(get_brand_label(self.icon_mode))
+        drop_x = self._cat_bounds[self.active_cat_idx][0] if self._cat_bounds else default_x
         inner_w = 34
         rows: list[str] = []
         for idx, item in enumerate(cat.items):
