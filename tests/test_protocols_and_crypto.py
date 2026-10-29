@@ -849,6 +849,27 @@ class TestProtocolsAndCrypto(unittest.TestCase):
         self.assertEqual(len(fts_hits), 1)
         store.close()
 
+        # 6. Test automatic folder discovery when folders=None and discover_folders alias
+        mock_conn_no_multi.list.return_value = (
+            "OK",
+            [b'(\\HasNoChildren) "/" "INBOX"', b'(\\HasNoChildren) "/" "Sent"'],
+        )
+        # Test discover_folders alias
+        disc = client_no_multi.discover_folders()
+        self.assertEqual(len(disc), 2)
+        self.assertEqual([f.name for f in disc], ["INBOX", "Sent"])
+
+        # Test search_uids_remote with folders=None triggers automatic discovery
+        mock_conn_no_multi.uid.side_effect = None
+        mock_conn_no_multi.uid.return_value = ("OK", [b"42"])
+        discovered_search_res = client_no_multi.search_uids_remote(
+            criteria="from:elena",
+            folders=None,
+            limit=5,
+        )
+        self.assertIn("INBOX", discovered_search_res)
+        self.assertEqual(discovered_search_res["INBOX"], [42])
+
 
 if __name__ == "__main__":
     unittest.main()

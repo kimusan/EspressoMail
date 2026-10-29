@@ -676,6 +676,10 @@ class IMAPClient:
             )
         return folders
 
+    def discover_folders(self) -> list[Folder]:
+        """Discover all remote IMAP folders on the server (alias for list_remote_folders)."""
+        return self.list_remote_folders()
+
     def fetch_recent_messages(
         self,
         folder: str = "INBOX",
@@ -986,11 +990,18 @@ class IMAPClient:
 
         target_folders = list(folders) if folders else []
         if not target_folders:
-            discovered = self.discover_folders()
+            try:
+                discovered = self.list_remote_folders()
+            except Exception:
+                discovered = []
             if discovered:
                 target_folders = [f.name for f in discovered if f.selectable]
             else:
                 target_folders = ["INBOX"]
+
+        if "INBOX" in target_folders and target_folders[0] != "INBOX":
+            target_folders.remove("INBOX")
+            target_folders.insert(0, "INBOX")
 
         results: dict[str, list[int]] = {}
 
