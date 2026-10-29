@@ -1388,6 +1388,13 @@ class EspressoMailApp(Model):
             self.focused_pane = panes[max(0, idx - 1)]
             return self, None
 
+        if k == "T":
+            nxt_theme = self.theme_engine.next_theme()
+            self.store.set_setting("theme", nxt_theme.id)
+            self._update_reader_viewport(force=True)
+            self.status_message = f"Theme switched to {nxt_theme.name}."
+            return self, None
+
         # Pane-specific navigation
         if self.focused_pane == "folders":
             visible = self.folder_tree._flatten_visible()

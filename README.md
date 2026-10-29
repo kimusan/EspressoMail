@@ -7,19 +7,9 @@
 [![Framework: Espresso TUI](https://img.shields.io/badge/TUI-Espresso-orange.svg)](https://github.com/kimusan/espresso)
 [![Architecture: TEA](https://img.shields.io/badge/architecture-Elm-brightgreen.svg)](docs/architecture.md)
 
-```text
-          (  )   (   )  )
-           ) (   )  (  (
-           ( )  (    ) )
-         ___________________
-        <___________________> ___
-        |  ╔═════════════╗  |/ _ \
-        |  ║ ✉  ESPRESSO ║  | | | |
-        |  ║ ╲  ╱  MAIL  ║  |_| |_|
-        |  ╚══╲╱═════════╝  |\___/
-        |___________________|
-         \_________________/
-```
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kimusan/EspressoMail/main/docs/images/demo.gif" alt="EspressoMail Terminal Email Client Demo" width="100%" />
+</p>
 
 ---
 
