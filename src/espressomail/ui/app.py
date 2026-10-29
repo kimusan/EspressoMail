@@ -85,7 +85,11 @@ from espressomail.protocols.smtp_client import (
 from espressomail.protocols.threading import build_threads
 from espressomail.storage.database import LocalStore, default_data_dir
 from espressomail.themes.engine import Theme, ThemeEngine
-from espressomail.ui.formatter import extract_html_images, format_message_for_reading_pane
+from espressomail.ui.formatter import (
+    extract_html_images,
+    format_message_for_reading_pane,
+    sanitize_terminal_text,
+)
 from espressomail.ui.image_renderer import (
     ImageRenderBackend,
     TerminalImageRenderer,
@@ -243,6 +247,17 @@ class FlagSyncedMsg(Msg):
     enabled: bool
     success: bool
     error: str = ""
+
+
+def _fit_pane_lines(pane_str: str, target_h: int) -> str:
+    """Ensure a rendered pane block has strictly target_h lines, neither overflowing nor underflowing."""
+    lines = pane_str.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if len(lines) > target_h:
+        lines = lines[:target_h]
+    elif len(lines) < target_h:
+        w = max((string_width(l) for l in lines), default=0)
+        lines = lines + [" " * w] * (target_h - len(lines))
+    return "\n".join(lines)
 
 
 class EspressoMailApp(Model):
@@ -937,7 +952,7 @@ class EspressoMailApp(Model):
                 .italic(True)
                 .foreground(self.theme.fg_muted)
                 .background(self.theme.bg_primary)
-                .render("\n  No email selected in this folder.")
+                .render("  No email selected in this folder.")
             )
             return
 
@@ -2975,10 +2990,10 @@ class EspressoMailApp(Model):
     def view(self) -> str:
         """Render the complete EspressoMail screen."""
         if self.show_splash:
-            return self.splash.view(self.width, self.height)
+            return f"\x0f\x1b(B{self.splash.view(self.width, self.height)}"
 
         if self.show_onboarding:
-            return self.onboarding.view(self.width, self.height)
+            return f"\x0f\x1b(B{self.onboarding.view(self.width, self.height)}"
 
         folder_w, list_w, reader_w = self._pane_widths()
         pane_h = self._pane_height()
@@ -2987,14 +3002,14 @@ class EspressoMailApp(Model):
         right_info = f"🖼️ {self.image_renderer.backend.value}"
         top_bar = self.menu_bar.view_bar(self.width, self.theme, right_status=right_info)
 
-        # 2. Left Pane: Account / Folder Tree
-        left_pane = self._render_folder_pane(folder_w, pane_h)
+        # 2. Left Pane: Account / Folder Tree (strictly fitted to pane_h)
+        left_pane = _fit_pane_lines(self._render_folder_pane(folder_w, pane_h), pane_h)
 
-        # 3. Center Pane: Message / Thread List
-        center_pane = self._render_message_list_pane(list_w, pane_h)
+        # 3. Center Pane: Message / Thread List (strictly fitted to pane_h)
+        center_pane = _fit_pane_lines(self._render_message_list_pane(list_w, pane_h), pane_h)
 
-        # 4. Right Pane: Reading Pane
-        right_pane = self._render_reading_pane(reader_w, pane_h)
+        # 4. Right Pane: Reading Pane (strictly fitted to pane_h)
+        right_pane = _fit_pane_lines(self._render_reading_pane(reader_w, pane_h), pane_h)
 
         main_three_panes = join_horizontal(Align.TOP, left_pane, center_pane, right_pane)
 
@@ -3024,7 +3039,13 @@ class EspressoMailApp(Model):
                 dim_backdrop=True,
             )
 
-        return screen
+        # Clamp total screen height to self.height to prevent terminal emulator scrolling
+        screen_lines = screen.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if len(screen_lines) > self.height:
+            screen_lines = screen_lines[: self.height]
+        screen = "\n".join(screen_lines)
+
+        return f"\x0f\x1b(B{screen}"
 
     def _render_folder_pane(self, width: int, height: int) -> str:
         inner_w = max(12, width - 4)
@@ -3038,6 +3059,9 @@ class EspressoMailApp(Model):
         elif self.folder_cursor >= self.folder_scroll + inner_h:
             self.folder_scroll = self.folder_cursor - inner_h + 1
 
+        max_scroll = max(0, len(visible) - inner_h)
+        self.folder_scroll = max(0, min(self.folder_scroll, max_scroll))
+
         visible_folders = visible[self.folder_scroll : self.folder_scroll + inner_h]
         for offset, (node, depth, prefix, _) in enumerate(visible_folders):
             idx = self.folder_scroll + offset
@@ -3049,7 +3073,8 @@ class EspressoMailApp(Model):
                 hdr_color = row.badge_color or self.theme.accent_secondary
                 is_selected = idx == self.folder_cursor
                 ind = "▼" if node.expanded else "▶"
-                hdr_txt = truncate_ansi(f" {ind} {row.label}", inner_w)
+                hdr_raw = sanitize_terminal_text(f" {ind} {row.label}", multiline=False)
+                hdr_txt = truncate_ansi(hdr_raw, inner_w)
                 if is_selected and self.focused_pane == "folders":
                     lines.append(
                         Style()
@@ -3124,7 +3149,8 @@ class EspressoMailApp(Model):
 
             pad = max(1, inner_w - string_width(lbl_display) - string_width(count_badge) - 1)
             line_str_cut = truncate_ansi(f"{lbl_raw}{' ' * pad}{count_badge} ", inner_w)
-            line_str = line_str_cut + (" " * max(0, inner_w - string_width(line_str_cut)))
+            line_str_clean = sanitize_terminal_text(line_str_cut, multiline=False)
+            line_str = line_str_clean + (" " * max(0, inner_w - string_width(line_str_clean)))
 
             if is_selected and self.focused_pane == "folders":
                 lines.append(
@@ -3171,6 +3197,7 @@ class EspressoMailApp(Model):
                     .render(line_str)
                 )
 
+        lines = lines[:inner_h]
         return self.theme.pane_style(
             focused=(self.focused_pane == "folders"),
             width=width,
@@ -3253,16 +3280,19 @@ class EspressoMailApp(Model):
 
                 space_count = max(1, inner_w - string_width(left_line) - right_w)
                 line1_raw = f"{left_line}{' ' * space_count}{right_meta}"
-                line1_cut = truncate_ansi(line1_raw, inner_w)
+                line1_clean = sanitize_terminal_text(line1_raw, multiline=False)
+                line1_cut = truncate_ansi(line1_clean, inner_w)
                 line1 = line1_cut + (" " * max(0, inner_w - string_width(line1_cut)))
 
                 # Line 2: Subject indented cleanly with maximum available width
                 tree_indent = " " * min(4, row.depth * 2) if self.threading_enabled else ""
                 subj_indent = f"   {tree_indent}"
                 subj_avail = max(6, inner_w - string_width(subj_indent))
-                subj_txt = truncate_ansi(m.subject or "(No Subject)", subj_avail)
+                clean_subj = sanitize_terminal_text(m.subject or "(No Subject)", multiline=False)
+                subj_txt = truncate_ansi(clean_subj, subj_avail)
                 line2_raw = f"{subj_indent}{subj_txt}"
-                line2_cut = truncate_ansi(line2_raw, inner_w)
+                line2_clean = sanitize_terminal_text(line2_raw, multiline=False)
+                line2_cut = truncate_ansi(line2_clean, inner_w)
                 line2 = line2_cut + (" " * max(0, inner_w - string_width(line2_cut)))
 
                 if is_sel and self.focused_pane == "messages":
@@ -3354,6 +3384,7 @@ class EspressoMailApp(Model):
         else:
             pane_title = f"{folder_path} ({folder_label}){filter_badge}"
 
+        lines = lines[:inner_h]
         return self.theme.pane_style(
             focused=(self.focused_pane == "messages"),
             width=width,
@@ -3414,9 +3445,10 @@ class EspressoMailApp(Model):
                     priority=4,
                 )
             )
+        clean_status = sanitize_terminal_text(self.status_message, multiline=False)
         left_sections.append(
             StatusSection(
-                f" {self.status_message} ",
+                f" {clean_status} ",
                 style=Style().foreground(self.theme.fg_primary),
                 priority=2,
             )

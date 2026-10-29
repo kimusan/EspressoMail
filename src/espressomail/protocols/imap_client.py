@@ -30,6 +30,7 @@ from espressomail.models.entities import (
     decode_imap_utf7,
     detect_image_mime_type,
     split_folder_hierarchy,
+    sanitize_terminal_text,
 )
 from espressomail.storage.database import LocalStore
 
@@ -95,10 +96,11 @@ def parse_rfc5322_bytes(
     refs_raw = str(msg.get("References", "") or "").strip()
     references = [r for r in re.findall(r"<[^>]+>", refs_raw)] if refs_raw else []
 
-    subject = decode_mime_header(msg.get("Subject")) or "(No Subject)"
+    raw_subj = decode_mime_header(msg.get("Subject")) or "(No Subject)"
+    subject = sanitize_terminal_text(raw_subj, multiline=False) or "(No Subject)"
     from_raw = str(msg.get("From", "") or "")
     sender_name, sender_email = email.utils.parseaddr(from_raw)
-    sender_name = decode_mime_header(sender_name)
+    sender_name = sanitize_terminal_text(decode_mime_header(sender_name), multiline=False)
 
     to_headers = msg.get_all("To") or []
     cc_headers = msg.get_all("Cc") or []
@@ -279,6 +281,32 @@ def parse_rfc5322_bytes(
                     data=payload_bytes,
                 )
             )
+        elif not effective_root_ctype.startswith("text/"):
+            raw_fname = msg.get_filename()
+            fname = decode_mime_header(raw_fname) if raw_fname else ""
+            if not fname:
+                if "zip" in effective_root_ctype:
+                    fname = "report.zip"
+                elif "gzip" in effective_root_ctype or "gzip" in content_type_root:
+                    fname = "report.gz"
+                elif "pdf" in effective_root_ctype:
+                    fname = "document.pdf"
+                else:
+                    fname = "attachment.bin"
+            attachments.append(
+                Attachment(
+                    id=f"{local_id}:att:0:{fname}",
+                    message_id=local_id,
+                    filename=fname,
+                    content_type=effective_root_ctype,
+                    size_bytes=len(payload_bytes),
+                    is_inline=False,
+                    data=payload_bytes,
+                )
+            )
+            body_text_parts.append(
+                f"[Non-text email payload: {effective_root_ctype} attachment '{fname}' ({len(payload_bytes)} bytes)]"
+            )
         else:
             charset = msg.get_content_charset() or "utf-8"
             if charset.lower() in ("unknown-8bit", "x-unknown"):
@@ -292,8 +320,7 @@ def parse_rfc5322_bytes(
             else:
                 body_text_parts.append(text)
 
-
-    body_text = "\n".join(body_text_parts).strip()
+    body_text = sanitize_terminal_text("\n".join(body_text_parts).strip(), multiline=True)
     body_html = "\n".join(body_html_parts).strip()
 
     # Check inline OpenPGP armor markers

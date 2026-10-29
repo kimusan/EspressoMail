@@ -530,3 +530,29 @@ class SieveScript:
     content: str
     active: bool = True
     updated_at: str = ""
+
+
+def sanitize_terminal_text(text: str, multiline: bool = True) -> str:
+    """Sanitize arbitrary text to ensure it never injects control codes or ANSI escapes into terminal.
+
+    Removes:
+    - ANSI escape sequences (CSI, OSC, DCS, Sixel, Kitty, etc.)
+    - ASCII control characters: 0x00-0x08, 0x0b-0x0c, 0x0e-0x1f
+    - C1 control codes: 0x7f-0x9f
+    - Normalizes \\r\\n and \\r to \\n (or single spaces if multiline=False).
+    """
+    if not text:
+        return ""
+    import re
+    from espresso.crema.width import strip_ansi
+
+    # 1. Strip ANSI escape codes
+    clean = strip_ansi(str(text))
+    # 2. Normalize carriage returns
+    clean = clean.replace("\r\n", "\n").replace("\r", "\n")
+    # 3. Strip control characters (including \x0e Shift Out / DEC graphics)
+    clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", clean)
+    if not multiline:
+        clean = clean.replace("\n", " ")
+    return clean
+

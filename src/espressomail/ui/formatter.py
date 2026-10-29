@@ -21,6 +21,7 @@ from espressomail.models.entities import (
     EmailMessage,
     EmailThread,
     PGPStatus,
+    sanitize_terminal_text,
 )
 from espressomail.protocols.icalendar import CalendarEvent, find_calendar_event
 from espressomail.themes.engine import Theme
@@ -414,6 +415,7 @@ def format_message_for_reading_pane(
     val_style = Style().foreground(theme.fg_primary)
     muted_style = Style().foreground(theme.fg_muted)
 
+    safe_subject = sanitize_terminal_text(msg.subject or "(No Subject)", multiline=False)
     star_badge = (
         Style().foreground(theme.starred_fg).bold(True).render(get_badge("star", m_mode))
         if msg.is_starred
@@ -423,17 +425,20 @@ def format_message_for_reading_pane(
         Style()
         .bold(True)
         .foreground(theme.accent_secondary)
-        .render(wrap_ansi(msg.subject, width=inner_w))
+        .render(wrap_ansi(safe_subject, width=inner_w))
     )
     sections.append(f"{star_badge}{subj_rendered}")
 
+    safe_sender = sanitize_terminal_text(msg.sender_display, multiline=False)
+    safe_recips = ", ".join(sanitize_terminal_text(r, multiline=False) for r in msg.recipients_to)
     header_rows = [
-        f"{lbl_style.render('From:    ')} {val_style.render(msg.sender_display)}",
-        f"{lbl_style.render('To:      ')} {val_style.render(', '.join(msg.recipients_to) or '(undisclosed)')}",
+        f"{lbl_style.render('From:    ')} {val_style.render(safe_sender)}",
+        f"{lbl_style.render('To:      ')} {val_style.render(safe_recips or '(undisclosed)')}",
     ]
     if msg.recipients_cc:
+        safe_cc = ", ".join(sanitize_terminal_text(r, multiline=False) for r in msg.recipients_cc)
         header_rows.append(
-            f"{lbl_style.render('Cc:      ')} {val_style.render(', '.join(msg.recipients_cc))}"
+            f"{lbl_style.render('Cc:      ')} {val_style.render(safe_cc)}"
         )
 
     acc_name = account.name if account else msg.account_id
@@ -565,7 +570,7 @@ def format_message_for_reading_pane(
                 .foreground(theme.fg_secondary)
                 .render(f"╭─ {q_icon}{prev.sender_short} ({prev.short_date}) wrote:")
             )
-            prev_body_raw = prev.body_text or html_to_terminal_text(prev.body_html)
+            prev_body_raw = sanitize_terminal_text(prev.body_text or html_to_terminal_text(prev.body_html), multiline=True)
             prev_formatted = format_email_body(prev_body_raw, theme, max(24, inner_w - 4))
             indented = "\n".join(
                 f"{Style().foreground(theme.border_unfocused).render('│ ')}  {line}"
@@ -582,6 +587,7 @@ def format_message_for_reading_pane(
     else:
         body_source = msg.body_text.strip()
 
+    body_source = sanitize_terminal_text(body_source, multiline=True)
     body_formatted = format_email_body(body_source or "(Empty message body)", theme, inner_w)
     for marker, box in rendered_marker_blocks.items():
         if marker in body_formatted:

@@ -3474,6 +3474,114 @@ class TestUIAndApp(unittest.TestCase):
             self.assertEqual(len(client.last_newly_arrived), 1)
             self.assertEqual(client.last_newly_arrived[0].id, m_second_new.id)
 
+    def test_sanitize_terminal_text_and_dec_graphics_prevention(self) -> None:
+        """Verify sanitize_terminal_text strips control codes, ANSI escapes, and DEC graphics triggers."""
+        from espressomail.models.entities import sanitize_terminal_text
+
+        # 1. \x0e (Shift Out, which turns on DEC Special Graphics) and \x0f (Shift In)
+        scrambled_test = "Report domain: meatlover.dk\x0e Submitter: google.com\x0f"
+        sanitized = sanitize_terminal_text(scrambled_test, multiline=True)
+        self.assertNotIn("\x0e", sanitized)
+        self.assertNotIn("\x0f", sanitized)
+        self.assertEqual(sanitized, "Report domain: meatlover.dk Submitter: google.com")
+
+        # 2. Arbitrary ANSI escape codes and C0/C1 control codes
+        ansi_payload = "Test\x1b[30A\x1b[2J\x1b[1;32mStyled\x1b[0m\x00\x07\x08End"
+        clean_multi = sanitize_terminal_text(ansi_payload, multiline=True)
+        self.assertEqual(clean_multi, "TestStyledEnd")
+
+        # 3. Single-line mode replaces newlines with space while preserving padding
+        single_padded = "├── ⤓  Unified Inbox                 "
+        self.assertEqual(sanitize_terminal_text(single_padded, multiline=False), single_padded)
+
+        multiline_subj = "First Line\r\nSecond Line\nThird Line"
+        self.assertEqual(
+            sanitize_terminal_text(multiline_subj, multiline=False),
+            "First Line Second Line Third Line",
+        )
+
+    def test_non_multipart_binary_dmarc_report_parsed_as_attachment(self) -> None:
+        """Verify non-multipart email with application/zip or gzip is parsed as attachment, not raw body."""
+        from espressomail.protocols.imap_client import parse_rfc5322_bytes
+
+        fake_zip_bytes = b"PK\x03\x04" + b"\x00" * 30 + b"\x0e\x0f\x1b[30A"
+        raw_email = (
+            b"From: noreply-dmarc-support@google.com\r\n"
+            b"To: admin@meatlover.dk\r\n"
+            b"Subject: Report domain: meatlover.dk Submitter: google.com\r\n"
+            b"Content-Type: application/zip\r\n"
+            b"Content-Disposition: attachment; filename=\"google.com!meatlover.dk!1700000000.zip\"\r\n"
+            b"\r\n" + fake_zip_bytes
+        )
+
+        msg = parse_rfc5322_bytes(raw_email, account_id="acc1", folder="Spam", uid=42)
+        self.assertTrue(msg.has_attachments)
+        self.assertEqual(len(msg.attachments), 1)
+        self.assertEqual(msg.attachments[0].filename, "google.com!meatlover.dk!1700000000.zip")
+        self.assertEqual(msg.attachments[0].content_type, "application/zip")
+        self.assertIn("[Non-text email payload: application/zip", msg.body_text)
+        self.assertNotIn("\x0e", msg.body_text)
+        self.assertNotIn("\x1b", msg.body_text)
+
+    def test_view_height_invariant_and_dec_reset(self) -> None:
+        """Verify view() produces strictly self.height lines and starts with DEC graphics reset sequence."""
+        acc = AccountConfig(
+            id="acc_h",
+            name="Height Test",
+            email="h@test.org",
+            full_name="Height User",
+            imap_host="imap.test.org",
+        )
+        self.store.save_account(acc)
+        self.store.sync_remote_folders(
+            acc.id,
+            [
+                Folder(id="f1", account_id=acc.id, name="INBOX", display_name="Inbox", folder_type=FolderType.INBOX),
+                Folder(id="f2", account_id=acc.id, name="Container", display_name="Container", folder_type=FolderType.CUSTOM),
+                Folder(id="f3", account_id=acc.id, name="Container/Child1", display_name="Child1", folder_type=FolderType.CUSTOM),
+                Folder(id="f4", account_id=acc.id, name="Container/Child2", display_name="Child2", folder_type=FolderType.CUSTOM),
+            ],
+        )
+
+        # Message with overflowing newlines and ANSI escapes in subject
+        m_overflow = EmailMessage(
+            id="acc_h:INBOX:1",
+            account_id=acc.id,
+            folder="INBOX",
+            subject="Line 1\r\nLine 2\r\nLine 3\r\n\x1b[30A\x0eOverflow",
+            sender_name="Sender\r\nName",
+            sender_email="s@test.org",
+            recipients_to=["h@test.org"],
+            body_text="Body content",
+        )
+        self.store.save_messages([m_overflow])
+
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.width = 120
+        app.height = 36
+        app._rebuild_folder_rows()
+        app._rebuild_message_rows()
+
+        view_out = app.view()
+        # Starts with DEC graphics reset (\x0f\x1b(B)
+        self.assertTrue(view_out.startswith("\x0f\x1b(B"))
+
+        # Exact height invariant
+        view_lines = view_out.splitlines()
+        self.assertEqual(len(view_lines), 36)
+
+        # Navigate to last container folder with 2 subfolders
+        app.focused_pane = "folders"
+        for idx, r in enumerate(app.folder_rows):
+            if r.label == "Container":
+                app.folder_cursor = idx
+                break
+        app, _ = app.update(KeyMsg("enter"))
+        view_container = app.view()
+        self.assertEqual(len(view_container.splitlines()), 36)
+        # Empty viewport starts without leading newline
+        self.assertIn("No email selected in this folder.", view_container)
+
 
 if __name__ == "__main__":
     unittest.main()
