@@ -3582,6 +3582,90 @@ class TestUIAndApp(unittest.TestCase):
         # Empty viewport starts without leading newline
         self.assertIn("No email selected in this folder.", view_container)
 
+    def test_sync_current_folder_shortcut_and_execution(self) -> None:
+        """Verify sync current folder shortcuts (ctrl+r, f5, r in folders pane) and background TEA execution."""
+        from espressomail.ui import FolderSyncedMsg
+
+        acc = AccountConfig(
+            id="acc_scf",
+            name="SCF Test",
+            email="scf@test.org",
+            full_name="SCF User",
+            imap_host="imap.test.org",
+            imap_password="test-secret-password",
+        )
+        self.store.save_account(acc)
+        self.store.sync_remote_folders(
+            acc.id,
+            [
+                Folder(id="f_inbox", account_id=acc.id, name="INBOX", display_name="Inbox", folder_type=FolderType.INBOX),
+                Folder(id="f_spam", account_id=acc.id, name="Spam", display_name="Spam", folder_type=FolderType.SPAM),
+            ],
+        )
+
+        app = EspressoMailApp(self.store, show_splash=False)
+        app.update(WindowSizeMsg(width=100, height=30))
+        app.active_account_id = acc.id
+        app.active_folder = "INBOX"
+
+        # 1. Keymap resolutions
+        self.assertEqual(app.keymap.resolve_key("ctrl+r", pane="messages"), "sync_folder")
+        self.assertEqual(app.keymap.resolve_key("f5", pane="messages"), "sync_folder")
+        self.assertEqual(app.keymap.resolve_key("ctrl+r", pane="reader"), "sync_folder")
+        self.assertEqual(app.keymap.resolve_key("ctrl+r", pane="folders"), "sync_folder")
+        self.assertEqual(app.keymap.resolve_key("r", pane="folders"), "sync_folder")
+        self.assertEqual(app.keymap.resolve_key("r", pane="messages"), "reply")
+        self.assertEqual(app.keymap.resolve_key("r", pane="reader"), "reply")
+
+        # 2. Trigger sync via ctrl+r
+        app, cmd = app.update(KeyMsg("ctrl+r"))
+        self.assertTrue(app.is_syncing)
+        self.assertIn("Synchronizing", app.status_message)
+        self.assertIn("SYNCING", app._render_status_bar())
+        self.assertIsNotNone(cmd)
+
+        # 3. Duplicate trigger while is_syncing is prevented
+        app, dup_cmd = app.update(KeyMsg("ctrl+r"))
+        self.assertIsNone(dup_cmd)
+        self.assertIn("already in progress", app.status_message)
+
+        # 4. Background command execution with mocked IMAPClient
+        with mock.patch("espressomail.ui.app.IMAPClient") as mock_client_cls:
+            mock_inst = mock.MagicMock()
+            mock_client_cls.return_value = mock_inst
+            mock_inst.sync_single_folder.return_value = 2
+
+            res_msg = cmd()
+            self.assertIsInstance(res_msg, FolderSyncedMsg)
+            self.assertEqual(res_msg.account_id, acc.id)
+            self.assertEqual(res_msg.folder, "INBOX")
+            self.assertEqual(res_msg.synced_count, 2)
+            self.assertIn("2 new message", res_msg.message)
+
+        # 5. Handle FolderSyncedMsg in app update
+        app, post_cmd = app.update(res_msg)
+        self.assertFalse(app.is_syncing)
+        self.assertNotIn("SYNCING", app._render_status_bar())
+        self.assertIn("Synchronized", app.status_message)
+
+        # 6. Test 'r' in folders pane on a specific folder (Spam)
+        app.focused_pane = "folders"
+        for idx, row in enumerate(app.folder_rows):
+            if row.folder_name == "Spam":
+                app.folder_cursor = idx
+                break
+        app, cmd_folder = app.update(KeyMsg("r"))
+        self.assertTrue(app.is_syncing)
+        self.assertIn("Spam", app.sync_progress_text)
+        with mock.patch("espressomail.ui.app.IMAPClient") as mock_client_cls:
+            mock_inst = mock.MagicMock()
+            mock_client_cls.return_value = mock_inst
+            mock_inst.sync_single_folder.return_value = 0
+            spam_res = cmd_folder()
+            self.assertIsInstance(spam_res, FolderSyncedMsg)
+            self.assertEqual(spam_res.folder, "Spam")
+            self.assertIn("up to date", spam_res.message)
+
 
 if __name__ == "__main__":
     unittest.main()

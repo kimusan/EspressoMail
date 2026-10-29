@@ -141,6 +141,7 @@ espressomail --db ~/mail/custom_store.db
 | **`A`** | Edit Existing Account Settings (Password, IMAP/SMTP hosts, ports, TLS) |
 | **`P` / `p`** | Open Preferences & Configuration modal |
 | **`O`** | Launch Guided Account Onboarding Wizard (Add New Account) |
+| **`Ctrl+R` / `F5`** | Synchronize active folder with IMAP server (or `r` in Mailboxes pane) |
 | **`S`** | Synchronize all enabled IMAP accounts in background |
 | **`?`** | Show Keyboard & Mouse Shortcuts Help Modal |
 | **`q`** | Quit EspressoMail |

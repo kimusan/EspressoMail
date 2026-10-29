@@ -3,6 +3,7 @@
 from espressomail.ui.app import (
     AutoSyncTickMsg,
     EspressoMailApp,
+    FolderSyncedMsg,
     FolderTreeRow,
     MessageImagesLoadedMsg,
     MessageListRow,
@@ -57,6 +58,7 @@ __all__ = [
     "SyncProgressMsg",
     "AutoSyncTickMsg",
     "MoreMessagesFetchedMsg",
+    "FolderSyncedMsg",
     "MessageImagesLoadedMsg",
     "clear_image_caches",
     "SplashScreen",

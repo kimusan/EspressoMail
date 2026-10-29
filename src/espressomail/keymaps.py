@@ -29,6 +29,7 @@ ACTION_DESCRIPTIONS: dict[str, str] = {
     "toggle_unread_filter": "Toggle Unread-only message filter",
     "select_message_toggle": "Multi-select toggle message for batch actions",
     "fetch_more": "Fetch older messages from IMAP",
+    "sync_folder": "Synchronize active folder / mailbox with IMAP server",
     "sync_all": "Synchronize all accounts with IMAP server",
     "fuzzy_search": "Instant fuzzy search across emails",
     "empty_trash": "Permanently empty trash folder",
@@ -78,6 +79,8 @@ DEFAULT_BINDINGS: dict[str, str] = {
     "V": "toggle_unread_filter",
     "/": "fuzzy_search",
     "S": "sync_all",
+    "ctrl+r": "sync_folder",
+    "f5": "sync_folder",
     "M": "fetch_more",
     "ctrl+m": "fetch_more",
     "X": "empty_trash",
@@ -125,6 +128,8 @@ GMAIL_BINDINGS: dict[str, str] = {
     "/": "fuzzy_search",
     "U": "unified_inbox",
     "S": "sync_all",
+    "ctrl+r": "sync_folder",
+    "f5": "sync_folder",
     "q": "quit_app",
     "?": "show_shortcuts",
     "tab": "next_pane",
@@ -147,6 +152,8 @@ VIM_BINDINGS: dict[str, str] = {
     "u": "toggle_read",
     "/": "fuzzy_search",
     "S": "sync_all",
+    "ctrl+r": "sync_folder",
+    "f5": "sync_folder",
     "q": "quit_app",
     "?": "show_shortcuts",
     "tab": "next_pane",
@@ -170,6 +177,9 @@ PINE_BINDINGS: dict[str, str] = {
     "w": "fuzzy_search",
     "/": "fuzzy_search",
     "S": "sync_all",
+    "ctrl+r": "sync_folder",
+    "f5": "sync_folder",
+    "$": "sync_folder",
     "q": "quit_app",
     "?": "show_shortcuts",
     "tab": "next_pane",
@@ -226,6 +236,8 @@ class KeymapManager:
                 return "narrow_folder_list"
             if action == "expand_list":
                 return "widen_folder_list"
+            if action == "reply":
+                return "sync_folder"
         return action
 
     def get_keys_for_action(self, action_id: str) -> list[str]:

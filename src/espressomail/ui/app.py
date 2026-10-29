@@ -220,6 +220,16 @@ class MoreMessagesFetchedMsg(Msg):
 
 
 @dataclass(frozen=True)
+class FolderSyncedMsg(Msg):
+    """Emitted when single folder synchronization completes."""
+
+    account_id: str
+    folder: str
+    synced_count: int
+    message: str
+
+
+@dataclass(frozen=True)
 class AutoSyncTickMsg(Msg):
     """Periodic auto-sync timer tick."""
 
@@ -513,6 +523,7 @@ class EspressoMailApp(Model):
             PaletteItem("account_settings", "Accounts: Edit Account Settings", "Update password, IMAP/SMTP hosts, ports, and TLS", "A", "Accounts"),
             PaletteItem("preferences", "Settings: General Preferences", "Configure download folder, image renderer, theme, threading", "p", "Settings"),
             PaletteItem("new_account", "Accounts: Add New Account", "Launch onboarding wizard for a new account", "O", "Accounts"),
+            PaletteItem("sync_folder", "Accounts: Sync Current Folder", "Synchronize only the active mailbox / folder with IMAP server", "Ctrl+R", "Accounts"),
             PaletteItem("sync_all", "Accounts: Sync IMAP Mailboxes", "Synchronize all enabled accounts", "S", "Accounts"),
             PaletteItem("toggle_auto_sync", "Accounts: Toggle Auto-Sync Timer", "Toggle periodic background email sync on or off", "", "Accounts"),
             PaletteItem("toggle_imap_push", "Accounts: Toggle IMAP Push (IDLE)", "Enable or disable instant real-time IMAP push notifications", "", "Accounts"),
@@ -1317,8 +1328,18 @@ class EspressoMailApp(Model):
                 return self, self._sync_accounts_cmd
             return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
 
+        # Single folder sync completion
+        if isinstance(msg, FolderSyncedMsg):
+            self.is_syncing = False
+            self.sync_progress_text = ""
+            self.status_message = msg.message
+            self.refresh_data()
+            return self, None
+
         # 7b. More messages fetched
         if isinstance(msg, MoreMessagesFetchedMsg):
+            self.is_syncing = False
+            self.sync_progress_text = ""
             self.status_message = msg.message
             self.refresh_data()
             return self, None
@@ -2461,6 +2482,9 @@ class EspressoMailApp(Model):
             self.status_message = "Fetching older messages from server..."
             return self, self._fetch_more_messages_cmd
 
+        if action_id == "sync_folder":
+            return self._sync_current_folder()
+
         if action_id == "sync_all":
             if self.is_syncing:
                 self.status_message = "⟳ Synchronization already in progress in background."
@@ -2983,6 +3007,90 @@ class EspressoMailApp(Model):
 
         return _push_runner
 
+    def _sync_current_folder(self) -> tuple[EspressoMailApp, Cmd | None]:
+        if self.is_syncing:
+            self.status_message = "⟳ Synchronization already in progress in background."
+            return self, None
+
+        target_acc_id = self.active_account_id
+        target_folder = self.active_folder or "INBOX"
+        target_label = target_folder
+
+        if self.focused_pane == "folders" and 0 <= self.folder_cursor < len(self.folder_rows):
+            row = self.folder_rows[self.folder_cursor]
+            if row.selectable_mailbox:
+                target_acc_id = row.account_id
+                target_folder = row.folder_name
+                target_label = row.label
+
+        if target_acc_id == "*":
+            accounts = [a for a in self.store.list_accounts(enabled_only=True) if a.imap_password]
+            folder_to_sync = "INBOX" if target_folder in ("INBOX", "All Unread", "") else target_folder
+            folder_display = "Unified Inbox" if folder_to_sync == "INBOX" else folder_to_sync
+        else:
+            acc = self.store.get_account(target_acc_id)
+            accounts = [acc] if acc and acc.imap_password else []
+            folder_to_sync = target_folder
+            folder_display = target_label
+
+        if not accounts:
+            self.status_message = "⚠ Cannot sync: account has no configured IMAP password."
+            return self, None
+
+        self.is_syncing = True
+        self.sync_progress_text = f"Syncing {folder_display}..."
+        self.status_message = f"⟳ Synchronizing '{folder_display}' in background..."
+
+        def _runner() -> Msg:
+            total_synced = 0
+            errors: list[str] = []
+            newly_arrived: list[EmailMessage] = []
+            for account in accounts:
+                try:
+                    client = IMAPClient(account, timeout=20.0)
+                    client.connect()
+                    try:
+                        synced = client.sync_single_folder(
+                            self.store,
+                            folder_name=folder_to_sync,
+                            limit=self.fetch_batch_size,
+                        )
+                        total_synced += synced
+                        if getattr(client, "last_newly_arrived", None):
+                            newly_arrived.extend(client.last_newly_arrived)
+                    finally:
+                        client.disconnect()
+                except Exception as exc:
+                    errors.append(f"{account.email}: {exc}")
+
+            if newly_arrived and self.desktop_notifications:
+                to_notify = [
+                    m for m in newly_arrived
+                    if not m.is_read and not m.is_draft and not m.is_trashed
+                ][:5]
+                if to_notify:
+                    notify_new_messages(
+                        to_notify,
+                        account_name=accounts[0].name if len(accounts) == 1 else "Unified",
+                        folder_name=folder_to_sync,
+                        sound=self.notification_sound,
+                    )
+
+            err_suffix = f" (Errors: {'; '.join(errors)})" if errors else ""
+            if total_synced > 0:
+                status_txt = f"✔ Synchronized '{folder_display}' ({total_synced} new message(s)).{err_suffix}"
+            else:
+                status_txt = f"✔ Folder '{folder_display}' is up to date.{err_suffix}"
+
+            return FolderSyncedMsg(
+                account_id=target_acc_id,
+                folder=folder_to_sync,
+                synced_count=total_synced,
+                message=status_txt,
+            )
+
+        return self, _runner
+
     # ------------------------------------------------------------------
     # Pure View Rendering
     # ------------------------------------------------------------------
@@ -3464,10 +3572,10 @@ class EspressoMailApp(Model):
             center_text = f"[{k_comp}]Compose [{k_arch}]Archive [{k_trash}]Trash [{k_star}]Star [{k_read}]Read [{k_move}]Move [{k_help}]Help"
         else:
             k_search = self.keymap.get_display_key("fuzzy_search", "/")
-            k_reply = self.keymap.get_display_key("reply", "r")
+            k_sync = "r"
             k_thread = self.keymap.get_display_key("toggle_threading", "t")
             k_img = self.keymap.get_display_key("cycle_image_mode", "i")
-            center_text = f"[{k_comp}]Compose [{k_search}]Search [{k_reply}]Reply [{k_thread}]Threads [{k_img}]Img [{k_help}]Help"
+            center_text = f"[{k_comp}]Compose [{k_search}]Search [{k_sync}]Sync [{k_thread}]Threads [{k_img}]Img [{k_help}]Help"
         bar = StatusBar(
             left=left_sections,
             center=[

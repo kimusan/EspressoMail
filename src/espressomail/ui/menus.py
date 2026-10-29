@@ -54,6 +54,7 @@ DEFAULT_MENUS: tuple[MenuCategory, ...] = (
         hotkey="f",
         items=(
             MenuItem("sync_all", "Sync All Accounts", "S"),
+            MenuItem("sync_folder", "Sync Current Folder", "Ctrl+R"),
             MenuItem("account_settings", "Edit Account Settings...", "A"),
             MenuItem("new_account", "Add New Account...", "O"),
             MenuItem("preferences", "Preferences & Configuration...", "p"),
@@ -75,6 +76,7 @@ DEFAULT_MENUS: tuple[MenuCategory, ...] = (
             MenuItem("toggle_read", "Toggle Read / Unread", "u"),
             MenuItem("add_sender_contact", "Add Sender to Contacts", "a"),
             MenuItem("toggle_folder_subscription", "Toggle Folder Subscription", "s"),
+            MenuItem("sync_folder", "Sync Current Folder", "Ctrl+R"),
             MenuItem("fetch_more", "Fetch Older Messages from Server", "M"),
             MenuItem("archive_msg", "Archive Message", "e"),
             MenuItem("trash_msg", "Move to Trash / Delete", "d"),
