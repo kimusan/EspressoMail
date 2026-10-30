@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 import tempfile
@@ -3677,17 +3678,27 @@ class TestUIAndApp(unittest.TestCase):
             self.assertIn("up to date", spam_res.message)
 
     def test_single_point_version_and_updater_logic(self) -> None:
-        """Verify version resolution from pyproject.toml and semantic updater comparisons."""
-        import json
-        import tomllib
-        from pathlib import Path
-
+        # Verify pyproject.toml static version matches __version__
         pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
         self.assertTrue(pyproject_path.exists())
-        with open(pyproject_path, "rb") as f:
-            pyproject_data = tomllib.load(f)
-        pyproject_ver = pyproject_data.get("project", {}).get("version")
+        pyproject_text = pyproject_path.read_text(encoding="utf-8")
+        match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', pyproject_text, re.MULTILINE)
+        self.assertIsNotNone(match)
+        pyproject_ver = match.group(1).strip() if match else None
         self.assertEqual(pyproject_ver, __version__)
+
+        # If tomllib or tomli is available, also verify full TOML parsing
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            try:
+                import tomli as tomllib
+            except ModuleNotFoundError:
+                tomllib = None  # type: ignore[assignment]
+
+        if tomllib is not None:
+            pyproject_data = tomllib.loads(pyproject_text)
+            self.assertEqual(pyproject_data.get("project", {}).get("version"), __version__)
 
         # Version parsing tests
         self.assertEqual(parse_version("0.2.0"), (0, 2, 0))
