@@ -529,16 +529,18 @@ class ComposeModal(Model):
                 .render(self.editor.view())
             )
 
-        footer_text = "[F5] Send  [Ctrl+S] Draft  [Ctrl+O] Editor  [Ctrl+T] Translate  [Ctrl+M] MD  [F4] Preview  [Ctrl+A] Attach  [Esc] Close"
+        footer_text = "[F5] Send  [Ctrl+S] Draft  [Ctrl+O] Editor  [Ctrl+T] Translate  [Ctrl+B] Polish  [Ctrl+L] Grammar  [F4] Preview  [Esc] Close"
         footer = Style().foreground(self.theme.fg_muted).render(truncate_ansi(footer_text, content_w))
 
         badge_line_1 = f"{sign_badge}   {enc_badge}   {md_badge}"
         trans_badge = Style().bold(True).foreground(self.theme.accent_primary).render("[Ctrl+T] Translate")
-        badge_line_2 = f"{preview_badge}   {ext_badge}   {trans_badge}"
+        ai_badge = Style().bold(True).foreground(self.theme.accent_secondary).render("[Ctrl+B] AI Polish")
+        lt_badge = Style().bold(True).foreground(self.theme.accent_primary).render("[Ctrl+L] Grammar")
+        badge_line_2 = f"{preview_badge}   {ext_badge}   {trans_badge}   {ai_badge}   {lt_badge}"
         if string_width(f"{badge_line_1}   {badge_line_2}") <= content_w:
             badges_row = [f"{badge_line_1}   {badge_line_2}"]
         else:
-            badges_row = [badge_line_1, badge_line_2]
+            badges_row = [badge_line_1, truncate_ansi(badge_line_2, content_w)]
 
         content_rows = [
             from_row,
@@ -2967,33 +2969,41 @@ class PreferencesModal(Model):
                 rows.append("")
 
             rows.append("")
-            rows.append("")
+            if self.plugin_list:
+                sel_meta = self.plugin_list[self.plugin_idx].metadata
+                rows.append(
+                    Style()
+                    .bold(True)
+                    .foreground(self.current_theme.fg_secondary)
+                    .render(truncate_ansi(f"  {sel_meta.icon} {sel_meta.name}: {sel_meta.description}", modal_w - 6))
+                )
+            else:
+                rows.append("")
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_secondary)
-                .render("  💡 DeepL Neural Translation Plugin:")
+                .render("  💡 Built-in Plugin Shortcuts & Features:")
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • API keys ending in :fx automatically route to DeepL Free API.")
+                .render("  • DeepL (Ctrl+T): Translate emails & drafts  │  AI Assistant (Ctrl+Y / Ctrl+B)")
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Toggle translation in reading pane anytime with 'Ctrl+T' or Command Palette.")
+                .render("  • DMARC & Auth (Ctrl+D): Inspect SPF/DKIM/DMARC & XML/GZ/ZIP DMARC reports")
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • In Compose modal, translate draft subject & body using Ctrl+T.")
+                .render("  • URL Launcher (Ctrl+O): Links list  │  Unsubscribe (Ctrl+K)  │  Grammar (Ctrl+L)")
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Translations are cached locally in SQLite to preserve your API budget.")
+                .render("  • Phishing Scanner: Automatic alerts for deceptive links & spoofed headers.")
             )
-            rows.append("")
             rows.append("")
 
         if self.error_msg:

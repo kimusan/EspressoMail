@@ -594,3 +594,346 @@ class TestPluginUIIntegration(BaseTestCase):
         emitted = cmd()  # type: ignore[misc]
         self.assertIsInstance(emitted, PluginActionMsg)
         self.assertEqual(emitted.action_id, "deepl_translate_draft")
+
+        # Pressing Ctrl+B emits AI Polish action
+        modal, cmd_b = modal.update(KeyMsg("ctrl+b"))
+        self.assertIsNotNone(cmd_b)
+        emitted_b = cmd_b()  # type: ignore[misc]
+        self.assertIsInstance(emitted_b, PluginActionMsg)
+        self.assertEqual(emitted_b.action_id, "ai_polish_draft")
+
+        # Pressing Ctrl+L emits LanguageTool check action
+        modal, cmd_l = modal.update(KeyMsg("ctrl+l"))
+        self.assertIsNotNone(cmd_l)
+        emitted_l = cmd_l()  # type: ignore[misc]
+        self.assertIsInstance(emitted_l, PluginActionMsg)
+        self.assertEqual(emitted_l.action_id, "languagetool_check_draft")
+
+
+class TestSecurityAndUtilityPlugins(BaseTestCase):
+    """Test DMARC Inspector, Phishing Scanner, Unsubscribe, AI Assistant, LanguageTool, and URL Launcher plugins."""
+
+    def test_all_builtin_plugins_discovered(self) -> None:
+        manager = PluginManager(store=self.store)
+        expected = {
+            "deepl_translate",
+            "dmarc_inspector",
+            "phishing_scanner",
+            "unsubscribe",
+            "ai_assistant",
+            "languagetool",
+            "url_launcher",
+        }
+        self.assertTrue(expected.issubset(set(manager.plugins.keys())))
+
+    def test_dmarc_inspector_headers_and_xml_gz_zip_reports(self) -> None:
+        import gzip
+        import io
+        import zipfile
+        from espressomail.models.entities import Attachment
+        from espressomail.plugins.dmarc_inspector import (
+            DMARCInspectorPlugin,
+            extract_dmarc_reports_from_attachment,
+            parse_auth_headers,
+        )
+
+        headers = {
+            "Authentication-Results": "mx.google.com; dkim=pass header.i=@example.com; spf=pass; dmarc=pass (p=REJECT)",
+            "Received-SPF": "pass (google.com: domain of alice@example.com designates 192.0.2.1 as permitted sender)",
+        }
+        auth = parse_auth_headers(headers)
+        self.assertEqual(auth.spf, "pass")
+        self.assertEqual(auth.dkim, "pass")
+        self.assertEqual(auth.dmarc, "pass")
+        self.assertEqual(auth.dkim_domain, "example.com")
+        self.assertIn("✔ SPF", auth.overall_badge)
+
+        sample_xml = b"""<?xml version="1.0" encoding="UTF-8" ?>
+        <feedback>
+          <report_metadata>
+            <org_name>google.com</org_name>
+            <report_id>123456789</report_id>
+            <date_range><begin>1700000000</begin><end>1700086400</end></date_range>
+          </report_metadata>
+          <policy_published>
+            <domain>example.com</domain>
+            <p>reject</p>
+            <sp>reject</sp>
+            <pct>100</pct>
+          </policy_published>
+          <record>
+            <row>
+              <source_ip>192.0.2.44</source_ip>
+              <count>42</count>
+              <policy_evaluated>
+                <disposition>none</disposition>
+                <dkim>pass</dkim>
+                <spf>pass</spf>
+              </policy_evaluated>
+            </row>
+            <identifiers><header_from>example.com</header_from></identifiers>
+          </record>
+        </feedback>"""
+
+        # Test .xml.gz decompression
+        gz_bytes = gzip.compress(sample_xml)
+        att_gz = Attachment(
+            id="att_gz",
+            message_id="m1",
+            filename="google.com!example.com!1700000000!1700086400.xml.gz",
+            content_type="application/gzip",
+            data=gz_bytes,
+        )
+        reports_gz = extract_dmarc_reports_from_attachment(att_gz)
+        self.assertEqual(len(reports_gz), 1)
+        self.assertEqual(reports_gz[0].org_name, "google.com")
+        self.assertEqual(reports_gz[0].domain, "example.com")
+        self.assertEqual(reports_gz[0].total_messages, 42)
+        self.assertEqual(reports_gz[0].passed_messages, 42)
+
+        # Test .zip archive extraction
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("dmarc_report.xml", sample_xml)
+        att_zip = Attachment(
+            id="att_zip",
+            message_id="m1",
+            filename="report.zip",
+            content_type="application/zip",
+            data=zip_buf.getvalue(),
+        )
+        reports_zip = extract_dmarc_reports_from_attachment(att_zip)
+        self.assertEqual(len(reports_zip), 1)
+        self.assertEqual(reports_zip[0].records[0].source_ip, "192.0.2.44")
+
+        # Verify plugin rendering in reading pane
+        manager = PluginManager(store=self.store)
+        plugin: DMARCInspectorPlugin = manager.plugins["dmarc_inspector"]  # type: ignore[assignment]
+        msg = EmailMessage(
+            id="m_dmarc",
+            account_id="acc_1",
+            subject="Report Domain: example.com",
+            body_text="DMARC report attached.",
+            raw_headers=headers,
+            attachments=[att_gz],
+        )
+        transformed = plugin.transform_reader_content(msg, "DMARC report attached.", {})
+        self.assertIn("DMARC Aggregate Report: example.com", transformed)
+        self.assertIn("192.0.2.44", transformed)
+
+    def test_phishing_scanner_detection_rules(self) -> None:
+        from espressomail.plugins.phishing_scanner import (
+            PhishingScannerPlugin,
+            scan_message_for_phishing,
+        )
+
+        phish_msg = EmailMessage(
+            id="m_phish",
+            account_id="acc_1",
+            sender_name="support@paypal.com",
+            sender_email="attacker@evil-domain.ru",
+            subject="Urgent Account Verification",
+            raw_headers={
+                "Reply-To": "harvest@another-shady-site.org",
+                "Authentication-Results": "mx.example.com; spf=fail; dmarc=fail",
+            },
+            body_html=(
+                '<p>Click <a href="http://198.51.100.77/login">https://www.paypal.com/signin</a> '
+                'or <a href="https://xn--80ak6aa92e.com/verify">Verify Now</a></p>'
+            ),
+        )
+        warnings = scan_message_for_phishing(phish_msg)
+        rule_ids = {w.rule_id for w in warnings}
+        self.assertIn("display_name_spoof", rule_ids)
+        self.assertIn("reply_to_mismatch", rule_ids)
+        self.assertIn("auth_failure", rule_ids)
+        self.assertIn("mismatched_anchor_url", rule_ids)
+        self.assertIn("raw_ip_url", rule_ids)
+        self.assertIn("punycode_domain", rule_ids)
+
+        manager = PluginManager(store=self.store)
+        plugin: PhishingScannerPlugin = manager.plugins["phishing_scanner"]  # type: ignore[assignment]
+        pills = plugin.get_reader_actions(phish_msg)
+        self.assertEqual(len(pills), 1)
+        self.assertIn("Warning", pills[0].badge)
+
+        rendered = plugin.transform_reader_content(phish_msg, "Body content", {})
+        self.assertIn("SECURITY WARNING", rendered)
+        self.assertIn("Deceptive link", rendered)
+
+    @patch("urllib.request.urlopen")
+    def test_unsubscribe_plugin_rfc8058_and_mailto(self, mock_urlopen: MagicMock) -> None:
+        from espressomail.plugins.unsubscribe import (
+            UnsubscribeCompletedMsg,
+            UnsubscribePlugin,
+            parse_unsubscribe_headers,
+        )
+
+        headers = {
+            "List-Unsubscribe": "<mailto:unsub@news.example.com?subject=leave>, <https://news.example.com/unsub?id=99>",
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        }
+        target = parse_unsubscribe_headers(headers)
+        self.assertTrue(target.is_available)
+        self.assertTrue(target.one_click_post)
+        self.assertEqual(target.http_url, "https://news.example.com/unsub?id=99")
+        self.assertEqual(target.mailto_address, "unsub@news.example.com")
+        self.assertEqual(target.mailto_subject, "leave")
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        manager = PluginManager(store=self.store)
+        plugin: UnsubscribePlugin = manager.plugins["unsubscribe"]  # type: ignore[assignment]
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        msg = EmailMessage(
+            id="m_unsub",
+            account_id="acc_1",
+            subject="Weekly Newsletter",
+            raw_headers=headers,
+        )
+        app.message_rows = [MagicMock(message=msg, thread=None)]
+        app.message_cursor = 0
+
+        app, cmd = plugin.on_action("unsubscribe_current_email", app, {})
+        self.assertIsNotNone(cmd)
+        res_msg = cmd()  # type: ignore[misc]
+        self.assertIsInstance(res_msg, UnsubscribeCompletedMsg)
+        self.assertTrue(res_msg.success)
+
+        plugin.on_message(res_msg, app)
+        self.assertIn("Successfully unsubscribed", app.status_message)
+
+    @patch("urllib.request.urlopen")
+    def test_ai_assistant_summarize_and_polish_draft(self, mock_urlopen: MagicMock) -> None:
+        from espressomail.plugins.ai_assistant import AIAssistantPlugin, AISummaryReadyMsg
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(
+            {"message": {"content": "• TL;DR: Q4 budget review on Friday.\n• Action Items: Send slides by Thursday."}}
+        ).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        manager = PluginManager(store=self.store)
+        plugin: AIAssistantPlugin = manager.plugins["ai_assistant"]  # type: ignore[assignment]
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        msg = EmailMessage(
+            id="m_ai_1",
+            account_id="acc_1",
+            subject="Q4 Budget Review",
+            body_text="Hi team, let us meet Friday to finalize the Q4 budget. Please send your slides by Thursday.",
+        )
+        app.message_rows = [MagicMock(message=msg, thread=None)]
+        app.message_cursor = 0
+
+        app, cmd = plugin.on_action("ai_summarize_email", app, {})
+        self.assertIsNotNone(cmd)
+        ai_msg = cmd()  # type: ignore[misc]
+        self.assertIsInstance(ai_msg, AISummaryReadyMsg)
+        self.assertIn("TL;DR", ai_msg.summary_text)
+
+        plugin.on_message(ai_msg, app)
+        rendered = plugin.transform_reader_content(msg, msg.body_text, {})
+        self.assertIn("AI Summary & Action Items", rendered)
+        self.assertIn("Q4 budget review on Friday", rendered)
+
+    @patch("urllib.request.urlopen")
+    def test_languagetool_plugin_grammar_check(self, mock_urlopen: MagicMock) -> None:
+        from espressomail.plugins.languagetool import (
+            GrammarMatch,
+            LanguageToolPlugin,
+            LanguageToolResultMsg,
+            apply_languagetool_matches,
+        )
+
+        # Direct offset replacement test
+        sample = "This are a Singel test."
+        matches = [
+            GrammarMatch(offset=5, length=3, message="Use 'is'", replacement="is"),
+            GrammarMatch(offset=11, length=6, message="Spelling error", replacement="single"),
+        ]
+        fixed, count = apply_languagetool_matches(sample, matches)
+        self.assertEqual(count, 2)
+        self.assertEqual(fixed, "This is a single test.")
+
+        # Full plugin flow in ComposeModal
+        api_payload = {
+            "language": {"code": "en-US"},
+            "matches": [
+                {
+                    "offset": 5,
+                    "length": 3,
+                    "message": "Subject-verb agreement",
+                    "replacements": [{"value": "is"}],
+                    "rule": {"id": "EN_AGREEMENT"},
+                }
+            ],
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(api_payload).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        manager = PluginManager(store=self.store)
+        plugin: LanguageToolPlugin = manager.plugins["languagetool"]  # type: ignore[assignment]
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        modal = ComposeModal(
+            accounts=self.store.list_accounts(),
+            contacts=self.store.list_contacts(),
+            theme=app.theme,
+            body_initial="This are a draft.",
+            plugin_manager=manager,
+        )
+        app.active_modal = modal
+
+        app, cmd = plugin.on_action("languagetool_check_draft", app, {})
+        self.assertIsNotNone(cmd)
+        lt_msg = cmd()  # type: ignore[misc]
+        self.assertIsInstance(lt_msg, LanguageToolResultMsg)
+        self.assertEqual(lt_msg.applied_count, 1)
+
+        plugin.on_message(lt_msg, app)
+        self.assertEqual(modal.editor.value, "This is a draft.")
+
+    @patch("webbrowser.open")
+    def test_url_launcher_extraction_and_open(self, mock_wb_open: MagicMock) -> None:
+        from espressomail.plugins.url_launcher import (
+            URLLauncherPlugin,
+            extract_links_from_message,
+        )
+
+        msg = EmailMessage(
+            id="m_links",
+            account_id="acc_1",
+            subject="Project Links",
+            body_text="Docs: https://docs.example.com/guide and repo https://github.com/kimusan/espressomail.",
+            body_html=(
+                '<a href="https://docs.example.com/guide">Documentation Guide</a> '
+                '<img src="https://track.example.com/pixel.gif" />'
+            ),
+        )
+        links = extract_links_from_message(msg)
+        self.assertEqual(len(links), 2)
+        self.assertEqual(links[0].url, "https://docs.example.com/guide")
+        self.assertEqual(links[0].label, "Documentation Guide")
+        self.assertEqual(links[1].url, "https://github.com/kimusan/espressomail")
+
+        manager = PluginManager(store=self.store)
+        plugin: URLLauncherPlugin = manager.plugins["url_launcher"]  # type: ignore[assignment]
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.message_rows = [MagicMock(message=msg, thread=None)]
+        app.message_cursor = 0
+
+        # Toggle links table on
+        app, _ = plugin.on_action("url_launcher_toggle", app, {})
+        rendered = plugin.transform_reader_content(msg, msg.body_text, {})
+        self.assertIn("Extracted Links (2)", rendered)
+        self.assertIn("Documentation Guide", rendered)
+
+        # Open selected link #1
+        app, _ = plugin.on_action("url_launcher_open_selected", app, {})
+        mock_wb_open.assert_called_once_with("https://docs.example.com/guide")
+

@@ -115,22 +115,25 @@ class PluginManager:
     def _discover_builtin_plugins(self) -> None:
         """Scan built-in plugins bundled under espressomail.plugins.*."""
         pkg_dir = Path(__file__).resolve().parent
-        for item in pkg_dir.iterdir():
-            if item.is_dir() and (item / "__init__.py").exists() and item.name not in ("__pycache__",):
-                mod_name = f"espressomail.plugins.{item.name}"
-                try:
-                    import importlib
-                    module = importlib.import_module(mod_name)
-                    found = False
-                    for _, obj in inspect.getmembers(module, inspect.isclass):
-                        if issubclass(obj, BasePlugin) and obj is not BasePlugin:
-                            self.register_plugin_class(obj)
-                            found = True
-                    if not found:
-                        self._load_plugin_from_directory(item)
-                except Exception as exc:
-                    logger.warning("Failed importing built-in plugin %s: %s, falling back to file load", mod_name, exc)
+        dirs = sorted(
+            (item for item in pkg_dir.iterdir() if item.is_dir() and (item / "__init__.py").exists() and item.name not in ("__pycache__",)),
+            key=lambda p: (0 if p.name == "deepl" else 1, p.name),
+        )
+        for item in dirs:
+            mod_name = f"espressomail.plugins.{item.name}"
+            try:
+                import importlib
+                module = importlib.import_module(mod_name)
+                found = False
+                for _, obj in inspect.getmembers(module, inspect.isclass):
+                    if issubclass(obj, BasePlugin) and obj is not BasePlugin:
+                        self.register_plugin_class(obj)
+                        found = True
+                if not found:
                     self._load_plugin_from_directory(item)
+            except Exception as exc:
+                logger.warning("Failed importing built-in plugin %s: %s, falling back to file load", mod_name, exc)
+                self._load_plugin_from_directory(item)
 
     def _discover_entry_point_plugins(self) -> None:
         """Discover plugins registered via Python package entry points."""

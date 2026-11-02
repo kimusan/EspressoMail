@@ -291,13 +291,45 @@ In the **5. Plugins** tab:
 
 ---
 
-## 7. Reference Implementation: DeepL Translation
+## 7. Built-in Plugins
 
-The built-in `espressomail.plugins.deepl` plugin demonstrates a full-featured real-world plugin:
+EspressoMail ships with 7 built-in plugins under `src/espressomail/plugins/`:
 
+### 7.1 DeepL Neural Translation (`deepl_translate`)
 - **Free vs. Pro API Routing**: Detects `:fx` auth key suffixes to route to `https://api-free.deepl.com/v2` versus `https://api.deepl.com/v2`.
-- **Chunking Budget**: Implements `split_text_into_chunks` respecting DeepL's 128 KiB request payload limits by cleanly partitioning texts into <=100k chunks on paragraph and sentence boundaries.
-- **In-Place Reading Pane Toggle**: Pressing `Ctrl+T` triggers an asynchronous background translation via TEA `Cmd`. Once received, the reading pane displays the translated body alongside a translation banner. Pressing `Ctrl+T` again reverts instantly to the original text.
-- **Draft Translation**: In the composer modal, `Ctrl+T` translates the subject and body to the configured target language without leaving the editor.
-- **30-Day SQLite Caching**: Translations are cached locally for 30 days, avoiding redundant API calls and quota consumption.
-- **Target Language Cycling**: Instant cycle between common languages (EN-GB, EN-US, DA, DE, ES, FR, IT, JA, NL, PL, PT-PT, SV, UK, ZH) via command palette or shortcut.
+- **Chunking Budget**: Splits long email bodies into `<=100 KiB` chunks on paragraph and sentence boundaries.
+- **In-Place Reading Pane Toggle (`Ctrl+T`)**: Translates the current email (plain text or HTML-to-terminal fallback) and displays a language banner. Pressing `Ctrl+T` again reverts to the original text.
+- **Compose Draft Translation (`Ctrl+T`)**: Translates draft subject and body inside `ComposeModal`.
+- **30-Day SQLite Caching**: Translations are cached locally for 30 days to conserve API quota.
+
+### 7.2 DMARC / DKIM / SPF Inspector (`dmarc_inspector`)
+- **Authentication Header Verification (`Ctrl+D`)**: Parses `Authentication-Results`, `ARC-Authentication-Results`, `Received-SPF`, and `DKIM-Signature` headers into a status badge (`✔ SPF ✔ DKIM ✔ DMARC`) and toggleable inspector banner.
+- **DMARC Aggregate Report Parser**: Automatically detects and decompresses `.xml`, `.xml.gz`, `.gz`, and `.zip` DMARC aggregate reports attached to emails and renders a structured terminal table showing reporting organization, policy (`p=`, `sp=`, `pct=`), source IPs, message counts, and DKIM/SPF evaluation results.
+
+### 7.3 Phishing & Suspicious Link Scanner (`phishing_scanner`)
+- **Header Spoofing Detection**: Flags `From` vs `Reply-To` registrable domain mismatches, display names containing spoofed email addresses, and SPF/DMARC authentication failures.
+- **URL Defense**: Scans HTML `<a href="...">` tags and plain-text links for deceptive anchor text (where visible link text claims one domain while `href` points to another), Punycode (`xn--`) IDN homograph domains, and raw IPv4/IPv6 URLs.
+- **Security Alert Banner**: Injects a high-visibility warning banner above the reading pane body whenever suspicious indicators are found.
+
+### 7.4 One-Click Unsubscribe (`unsubscribe`)
+- **RFC 2369 & RFC 8058 Support (`Ctrl+K`)**: Parses `List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click` headers.
+- **Background One-Click HTTP POST**: Dispatches a non-blocking HTTP POST (`List-Unsubscribe=One-Click`) or GET fallback in a background TEA `Cmd`, or opens a pre-filled `ComposeModal` when only a `mailto:` unsubscribe URI is present.
+
+### 7.5 AI Email Assistant (`ai_assistant`)
+- **Local & Cloud Providers**: Supports local **Ollama** (`http://localhost:11434`, privacy-first default), **OpenAI-compatible** APIs (`/v1/chat/completions`), and **Anthropic Claude** (`/v1/messages`).
+- **Reading Pane Summarizer (`Ctrl+Y`)**: Generates a concise executive summary with **TL;DR**, **Key Points**, and **Action Items / Deadlines**, cached in SQLite for 30 days.
+- **Compose Draft Polisher (`Ctrl+B`)**: Proofreads and improves the clarity and tone of drafts directly in `ComposeModal`.
+
+### 7.6 LanguageTool Grammar & Spell Checker (`languagetool`)
+- **Compose Grammar Check (`Ctrl+L`)**: Sends draft text to the LanguageTool API (`https://api.languagetool.org/v2/check` or a self-hosted instance) and automatically applies top spelling and grammar replacements from right to left while preserving character offsets.
+
+### 7.7 URL Launcher & Link Picker (`url_launcher`)
+- **Link Extraction & Deduplication (`Ctrl+O`)**: Extracts HTTP(S) links and anchor text labels from both `body_html` and `body_text` while filtering out 1x1 tracking pixels.
+- **Interactive Link Table**: Toggles a numbered `[Links in this Email]` table at the bottom of the reading pane, cycles through links with `Ctrl+O`, and launches the selected URL in the system browser (`webbrowser.open`).
+
+---
+
+## 8. Future Plugin Roadmap
+
+See [PLUGIN_ROADMAP.md](./PLUGIN_ROADMAP.md) for detailed specifications of upcoming Phase 2 plugins (Git Patch & Diff Viewer, Task Manager / Obsidian Note Exporter, Quick Templates, and Attachment Text Previewer).
+
