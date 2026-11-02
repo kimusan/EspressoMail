@@ -431,6 +431,76 @@ class TestDeepLPlugin(BaseTestCase):
         self.assertNotEqual(plugin.target_lang, "EN-GB")
         self.assertIn("DeepL target language switched", app_mock.status_message)
 
+    @patch("urllib.request.urlopen")
+    def test_deepl_translates_html_email_when_body_text_is_empty(self, mock_urlopen: MagicMock) -> None:
+        """Verify HTML-only email (empty body_text) is properly extracted and translated."""
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        plugin: DeepLPlugin = app.plugin_manager.plugins["deepl_translate"]  # type: ignore[assignment]
+        plugin.context.set_setting("auth_key", "test-key:fx")
+        plugin.context.set_setting("target_lang", "DA")
+        html_msg = EmailMessage(
+            id="msg_html_1",
+            account_id="acc_1",
+            folder="INBOX",
+            subject="Backup failed",
+            body_text="",  # Empty text body
+            body_html="<p>Data backup task on Kvisten80nas failed.</p><p>Go to Log.</p>",
+        )
+        app.selected_message_override = html_msg  # type: ignore[attr-defined]
+        app.message_rows = [MagicMock(message=html_msg, thread=None)]
+        app.message_cursor = 0
+
+        api_response = {
+            "translations": [
+                {"detected_source_language": "EN", "text": "Sikkerhedskopi mislykkedes"},
+                {"detected_source_language": "EN", "text": "Sikkerhedskopieringsopgaven på Kvisten80nas mislykkedes.\n\nGå til log."},
+            ]
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(api_response).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        # Trigger translation
+        app, cmd = plugin.on_action("deepl_toggle_translate", app, {})
+        self.assertIsNotNone(cmd)
+        tea_msg = cmd()  # type: ignore[misc]
+
+        self.assertIsInstance(tea_msg, DeepLTranslationReadyMsg)
+        self.assertEqual(tea_msg.translated_subject, "Sikkerhedskopi mislykkedes")
+        self.assertIn("Sikkerhedskopieringsopgaven på Kvisten80nas mislykkedes", tea_msg.translated_body)
+
+        # Deliver message and verify viewport content
+        plugin.handle_translation_ready(tea_msg, app)
+        self.assertIn("Translated to DA", app.status_message)
+
+        rendered_reading_pane = "\n".join(app.reader_viewport.lines)
+        self.assertIn("Sikkerhedskopi mislykkedes", rendered_reading_pane)
+        self.assertIn("Sikkerhedskopieringsopgaven på Kvisten80nas", rendered_reading_pane)
+        self.assertIn("Gå til log.", rendered_reading_pane)
+
+    def test_ctrl_t_shortcut_and_no_collision_with_theme_toggle(self) -> None:
+        """Verify Ctrl+T triggers translation and T continues to cycle theme without collision."""
+        populate_test_store(self.store)
+        app = EspressoMailApp(store=self.store, show_splash=False)
+
+        # 1. T key cycles theme
+        init_theme = app.theme.id
+        app, _ = app.update(KeyMsg("T"))
+        self.assertNotEqual(app.theme.id, init_theme)
+        self.assertIn("Theme switched to", app.status_message)
+
+        # 2. Ctrl+T key triggers DeepL translation action
+        init_status = app.status_message
+        app, cmd = app.update(KeyMsg("ctrl+t"))
+        # Unconfigured DeepL key warns in status_message without crash
+        self.assertTrue(
+            "DeepL" in app.status_message
+            or "Translate" in app.status_message
+            or "Auth Key" in app.status_message
+        )
+
+
 
 class TestPluginUIIntegration(BaseTestCase):
     """Test MenuBar, CommandPalette, ReadingPane, and Preferences integration."""

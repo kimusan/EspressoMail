@@ -2981,7 +2981,7 @@ class PreferencesModal(Model):
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Toggle translation in reading pane anytime with 'T' or Command Palette.")
+                .render("  • Toggle translation in reading pane anytime with 'Ctrl+T' or Command Palette.")
             )
             rows.append(
                 Style()

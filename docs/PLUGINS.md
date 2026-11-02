@@ -297,7 +297,7 @@ The built-in `espressomail.plugins.deepl` plugin demonstrates a full-featured re
 
 - **Free vs. Pro API Routing**: Detects `:fx` auth key suffixes to route to `https://api-free.deepl.com/v2` versus `https://api.deepl.com/v2`.
 - **Chunking Budget**: Implements `split_text_into_chunks` respecting DeepL's 128 KiB request payload limits by cleanly partitioning texts into <=100k chunks on paragraph and sentence boundaries.
-- **In-Place Reading Pane Toggle**: Pressing `T` triggers an asynchronous background translation via TEA `Cmd`. Once received, the reading pane displays the translated body alongside a translation banner. Pressing `T` again reverts instantly to the original text.
+- **In-Place Reading Pane Toggle**: Pressing `Ctrl+T` triggers an asynchronous background translation via TEA `Cmd`. Once received, the reading pane displays the translated body alongside a translation banner. Pressing `Ctrl+T` again reverts instantly to the original text.
 - **Draft Translation**: In the composer modal, `Ctrl+T` translates the subject and body to the configured target language without leaving the editor.
 - **30-Day SQLite Caching**: Translations are cached locally for 30 days, avoiding redundant API calls and quota consumption.
 - **Target Language Cycling**: Instant cycle between common languages (EN-GB, EN-US, DA, DE, ES, FR, IT, JA, NL, PL, PT-PT, SV, UK, ZH) via command palette or shortcut.

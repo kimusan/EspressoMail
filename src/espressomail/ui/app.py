@@ -1563,6 +1563,13 @@ class EspressoMailApp(Model):
             self.status_message = f"Theme switched to {nxt_theme.name}."
             return self, None
 
+        # Plugin global hotkeys (e.g. Ctrl+T for translation on selected email)
+        if hasattr(self, "plugin_manager") and self.plugin_manager:
+            plugin_keys = self.plugin_manager.get_keybindings()
+            if k.lower() in plugin_keys:
+                p_id, a_id = plugin_keys[k.lower()]
+                return self._execute_action(a_id)
+
         # Pane-specific navigation
         if self.focused_pane == "folders":
             visible = self.folder_tree._flatten_visible()

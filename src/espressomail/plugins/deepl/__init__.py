@@ -104,7 +104,7 @@ class DeepLPlugin(BasePlugin):
                 target_category="Mail",
                 action_id="deepl_toggle_translate",
                 label="Translate with DeepL",
-                shortcut="T",
+                shortcut="Ctrl+T",
                 order=50,
             ),
             PluginMenuItem(
@@ -124,7 +124,7 @@ class DeepLPlugin(BasePlugin):
                 title=f"Translate: Toggle Translation to {tgt} (DeepL)",
                 description=f"Translate current email in reading pane into {tgt} or revert to original",
                 category="Plugins",
-                default_key="T",
+                default_key="ctrl+t",
                 pane_scope="reader",
             ),
             PluginCommand(
@@ -146,7 +146,7 @@ class DeepLPlugin(BasePlugin):
         )
 
     def get_keybindings(self) -> dict[str, str]:
-        return {"t": "deepl_toggle_translate"}
+        return {"ctrl+t": "deepl_toggle_translate"}
 
     def get_reader_actions(self, message: EmailMessage | None) -> Sequence[ReaderActionPill]:
         if not message:
@@ -157,7 +157,7 @@ class DeepLPlugin(BasePlugin):
                 ReaderActionPill(
                     action_id="deepl_toggle_translate",
                     label="Show Original",
-                    shortcut="T",
+                    shortcut="Ctrl+T",
                     badge=f"🌐 {src} → {tgt}",
                     priority=5,
                 ),
@@ -167,7 +167,7 @@ class DeepLPlugin(BasePlugin):
                 ReaderActionPill(
                     action_id="deepl_toggle_translate",
                     label=f"Translate ({self.target_lang})",
-                    shortcut="T",
+                    shortcut="Ctrl+T",
                     priority=5,
                 ),
             )
@@ -189,18 +189,44 @@ class DeepLPlugin(BasePlugin):
         if not message or message.id not in self._active_translations:
             return rendered_body
 
+        import re
+        from espressomail.ui.formatter import format_email_body
+
+        from espressomail.themes.engine import THEMES
+
         trans_subj, trans_body, src, tgt = self._active_translations[message.id]
-        theme = state.get("theme")
-        accent = theme.accent_primary if theme else "#d4a373"
-        fg_muted = theme.fg_muted if theme else "#8c776b"
+        theme = state.get("theme") or THEMES["espresso"]
+        width = state.get("width", 78)
+        accent = theme.accent_primary
+        fg_muted = theme.fg_muted
         banner = (
             Style().bold(True).foreground(accent).render(f"🌐 DeepL Translation: {src} → {tgt}")
             + " "
-            + Style().foreground(fg_muted).render("(Press T to view original)")
+            + Style().foreground(fg_muted).render("(Press Ctrl+T to view original)")
         )
 
-        divider = Style().foreground(fg_muted).render("─" * 60)
-        return f"{banner}\n{divider}\n\n{trans_body}"
+        formatted_trans_body = (
+            format_email_body(trans_body, theme, width)
+            if trans_body
+            else Style().italic(True).foreground(fg_muted).render("  (Empty translated body)")
+        )
+
+        # Check if rendered_body contains standard message headers divided by `━`
+        div_match = re.search(r"━{10,}", rendered_body)
+        if div_match:
+            # Preserve headers block up to the divider line
+            line_end = rendered_body.find("\n", div_match.end())
+            line_end = len(rendered_body) if line_end == -1 else line_end
+            header_block = rendered_body[:line_end]
+
+            # If trans_subj is present and message.subject is in header_block, update subject in header
+            if trans_subj and message.subject and message.subject in header_block:
+                header_block = header_block.replace(message.subject, trans_subj, 1)
+
+            return f"{header_block}\n\n{banner}\n\n{formatted_trans_body}"
+
+        divider = Style().foreground(fg_muted).render("─" * min(width, 60))
+        return f"{banner}\n{divider}\n\n{formatted_trans_body}"
 
     # ------------------------------------------------------------------
     # Action Dispatcher & Execution
@@ -245,17 +271,23 @@ class DeepLPlugin(BasePlugin):
             if cached_raw:
                 try:
                     cached_data = json.loads(cached_raw)
-                    self._active_translations[m.id] = (
-                        cached_data.get("subject", m.subject),
-                        cached_data.get("body", m.body_text),
-                        cached_data.get("detected", "AUTO"),
-                        tgt,
-                    )
-                    app.status_message = f"✔ Loaded {tgt} translation from local cache."
-                    if hasattr(app, "toasts"):
-                        app.toasts.add(f"Translated to {tgt} (cached)", level=ToastLevel.INFO)
-                    app._update_reader_viewport(force=True)
-                    return app, None
+                    cached_body = cached_data.get("body", "")
+                    has_original_body = bool((m.body_text and m.body_text.strip()) or (m.body_html and m.body_html.strip()))
+                    if has_original_body and not cached_body.strip():
+                        # Stale empty cache entry: clear it and re-translate
+                        self.context.clear_cache(cache_key)
+                    else:
+                        self._active_translations[m.id] = (
+                            cached_data.get("subject", m.subject),
+                            cached_body,
+                            cached_data.get("detected", "AUTO"),
+                            tgt,
+                        )
+                        app.status_message = f"✔ Loaded {tgt} translation from local cache."
+                        if hasattr(app, "toasts"):
+                            app.toasts.add(f"Translated to {tgt} (cached)", level=ToastLevel.INFO)
+                        app._update_reader_viewport(force=True)
+                        return app, None
                 except Exception as exc:
                     logger.warning("Invalid cached translation JSON for %s: %s", m.id, exc)
 
@@ -318,10 +350,37 @@ class DeepLPlugin(BasePlugin):
 
         def _runner() -> Msg:
             try:
-                # Translate subject and body
-                texts_to_trans = [message.subject, message.body_text]
+                # Extract clean body text (prefer plain text, fallback to parsed HTML)
+                body_source = ""
+                if message.body_text and message.body_text.strip():
+                    body_source = message.body_text.strip()
+                elif message.body_html:
+                    from espressomail.ui.formatter import html_to_terminal_text
+                    body_source = html_to_terminal_text(message.body_html, include_image_markers=False).strip()
+
+                subj = (message.subject or "").strip()
+                texts_to_trans: list[str] = []
+                has_subj = bool(subj)
+                has_body = bool(body_source)
+
+                if has_subj and has_body:
+                    texts_to_trans = [subj, body_source]
+                elif has_subj:
+                    texts_to_trans = [subj]
+                elif has_body:
+                    texts_to_trans = [body_source]
+                else:
+                    return DeepLTranslationReadyMsg(
+                        message_id=message.id,
+                        translated_subject="",
+                        translated_body="",
+                        detected_source_lang="AUTO",
+                        target_lang=target_lang,
+                        error="Email has no subject or text body to translate.",
+                    )
+
                 res = client.translate_texts(texts_to_trans, target_lang=target_lang)
-                if not res.success or len(res.texts) < 2:
+                if not res.success or not res.texts:
                     return DeepLTranslationReadyMsg(
                         message_id=message.id,
                         translated_subject="",
@@ -331,7 +390,16 @@ class DeepLPlugin(BasePlugin):
                         error=res.error or "Failed to translate message",
                     )
 
-                trans_subj, trans_body = res.texts[0], res.texts[1]
+                if has_subj and has_body:
+                    trans_subj = res.texts[0]
+                    trans_body = res.texts[1] if len(res.texts) > 1 else body_source
+                elif has_subj:
+                    trans_subj = res.texts[0]
+                    trans_body = ""
+                else:
+                    trans_subj = ""
+                    trans_body = res.texts[0]
+
                 # Cache result in SQLite
                 cache_key = f"{message.id}:{target_lang}"
                 cache_payload = json.dumps({
@@ -437,7 +505,7 @@ class DeepLPlugin(BasePlugin):
             msg.target_lang,
         )
         app.status_message = (
-            f"✔ Translated to {msg.target_lang} (detected: {msg.detected_source_lang}). Press T to revert."
+            f"✔ Translated to {msg.target_lang} (detected: {msg.detected_source_lang}). Press Ctrl+T to revert."
         )
         if hasattr(app, "toasts"):
             app.toasts.add(f"Translated to {msg.target_lang} (from {msg.detected_source_lang})", level=ToastLevel.INFO)
