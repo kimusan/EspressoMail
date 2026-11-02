@@ -97,7 +97,9 @@ from espressomail.ui.image_renderer import (
     _REMOTE_IMAGE_CACHE,
     _fetch_remote_image_bytes,
 )
-from espressomail.ui.menus import MenuActionMsg, MenuBar
+from espressomail.plugins.hooks import PluginActionMsg
+from espressomail.plugins.manager import PluginManager
+from espressomail.ui.menus import MenuActionMsg, MenuBar, build_menu_categories
 from espressomail.ui.modals import (
     AccountSettingsModal,
     AddressBookModal,
@@ -305,7 +307,11 @@ class EspressoMailApp(Model):
         self.icon_mode = self.store.get_setting("icon_mode", "emoji")
         self.pgp = PGPManager()
         self.toasts = ToastManager()
-        self.menu_bar = MenuBar(icon_mode=self.icon_mode)
+        self.plugin_manager = PluginManager(self.store)
+        self.menu_bar = MenuBar(
+            categories=build_menu_categories(self.plugin_manager),
+            icon_mode=self.icon_mode,
+        )
         self.keymap = KeymapManager.load_from_store(self.store)
 
         self.width = 120
@@ -550,6 +556,17 @@ class EspressoMailApp(Model):
             PaletteItem("show_shortcuts", "Help: Keyboard & Mouse Shortcuts", "Display full hotkey guide", "?", "Help"),
             PaletteItem("quit_app", "Application: Quit EspressoMail", "Exit cleanly", "q", "Application"),
         ]
+        if hasattr(self, "plugin_manager") and self.plugin_manager:
+            for p_cmd in self.plugin_manager.get_commands():
+                items.append(
+                    PaletteItem(
+                        id=p_cmd.action_id,
+                        title=p_cmd.title,
+                        description=p_cmd.description,
+                        shortcut=p_cmd.default_key,
+                        category=p_cmd.category,
+                    )
+                )
         return CommandPalette(
             items=items,
             width=68,
@@ -1016,6 +1033,10 @@ class EspressoMailApp(Model):
             account=acc,
             icon_mode=self.icon_mode,
         )
+        if hasattr(self, "plugin_manager") and self.plugin_manager:
+            rendered = self.plugin_manager.transform_reader_content(
+                m, rendered, {"theme": self.theme, "width": reader_w - 2}
+            )
         self.reader_viewport.set_content(rendered)
         if prev_msg_id == m.id:
             self.reader_viewport.y_offset = min(prev_y, self.reader_viewport.max_offset)
@@ -1037,6 +1058,12 @@ class EspressoMailApp(Model):
 
         # 2. Toast notifications auto-dismiss
         self.toasts, _ = self.toasts.update(msg)
+
+        # 3. Plugin messages & TEA background command completions
+        if hasattr(self, "plugin_manager") and self.plugin_manager:
+            self, plugin_cmd = self.plugin_manager.on_message(msg, self)
+            if plugin_cmd is not None:
+                return self, plugin_cmd
 
         # Update check completions from background command
         if isinstance(msg, UpdateCheckCompletedMsg):
@@ -1181,6 +1208,10 @@ class EspressoMailApp(Model):
             if getattr(msg, "icon_mode", None):
                 self.icon_mode = msg.icon_mode
                 self.menu_bar.set_icon_mode(self.icon_mode)
+            if hasattr(self, "plugin_manager") and self.plugin_manager:
+                self.menu_bar.reload_categories(build_menu_categories(self.plugin_manager))
+                self.command_palette = self._build_command_palette()
+                self._update_reader_viewport(force=True)
             self.refresh_data()
             self.status_message = (
                 f"✔ Saved preferences: theme={msg.theme}, renderer={msg.image_backend}, "
@@ -1261,13 +1292,14 @@ class EspressoMailApp(Model):
                     active_account_id=self.active_account_id,
                     to_initial=msg.recipient,
                     external_editor=self.external_editor,
+                    plugin_manager=self.plugin_manager,
                 )
                 return self, None
 
             self.active_modal, cmd = self.active_modal.update(msg)
             if cmd is not None and callable(cmd):
                 emitted = cmd()
-                if isinstance(emitted, (ModalClosedMsg, ComposeSubmittedMsg, SearchSelectMessageMsg, SearchRemoteMsg, ComposeToContactMsg, PreferencesSavedMsg, RSVPSubmittedMsg, MoveFolderSubmittedMsg)):
+                if isinstance(emitted, (ModalClosedMsg, ComposeSubmittedMsg, SearchSelectMessageMsg, SearchRemoteMsg, ComposeToContactMsg, PreferencesSavedMsg, RSVPSubmittedMsg, MoveFolderSubmittedMsg, PluginActionMsg)):
                     return self.update(emitted)
                 if cmd is quit_app or (hasattr(emitted, "__class__") and emitted.__class__.__name__ == "QuitMsg"):
                     return self, quit_app
@@ -1654,6 +1686,14 @@ class EspressoMailApp(Model):
             return self, None
 
         if self.focused_pane == "reader":
+            if hasattr(self, "plugin_manager") and self.plugin_manager:
+                plugin_keys = self.plugin_manager.get_keybindings()
+                if k.lower() in plugin_keys:
+                    p_id, a_id = plugin_keys[k.lower()]
+                    return self._execute_action(a_id)
+                for pill in self.plugin_manager.get_reader_actions(self.selected_message):
+                    if pill.shortcut and pill.shortcut.lower() == k.lower():
+                        return self._execute_action(pill.action_id)
             self.reader_viewport, cmd = self.reader_viewport.update(msg)
             return self, cmd
 
@@ -2174,6 +2214,7 @@ class EspressoMailApp(Model):
                 threading_enabled=self.threading_enabled,
                 show_raw_headers=self.show_raw_headers,
                 icon_mode=self.icon_mode,
+                plugin_manager=self.plugin_manager,
             )
             return self, None
 
@@ -2295,6 +2336,7 @@ class EspressoMailApp(Model):
                 theme=self.theme,
                 active_account_id=self.active_account_id,
                 external_editor=self.external_editor,
+                plugin_manager=self.plugin_manager,
             )
             return self, None
 
@@ -2586,6 +2628,11 @@ class EspressoMailApp(Model):
             self.status_message = "Checking GitHub for newer releases..."
             return self, self._make_check_update_cmd(manual=True)
 
+        if hasattr(self, "plugin_manager") and self.plugin_manager:
+            self, plugin_cmd = self.plugin_manager.dispatch_action(action_id, self)
+            if plugin_cmd is not None:
+                return self, plugin_cmd
+
         return self, None
 
     def _make_check_update_cmd(self, manual: bool = False) -> Cmd:
@@ -2658,6 +2705,7 @@ class EspressoMailApp(Model):
             in_reply_to=msg.message_id,
             references=refs,
             external_editor=self.external_editor,
+            plugin_manager=self.plugin_manager,
         )
         return self, None
 
@@ -2675,6 +2723,7 @@ class EspressoMailApp(Model):
             references=draft.references,
             draft_id=draft.id,
             external_editor=self.external_editor,
+            plugin_manager=self.plugin_manager,
         )
         return self, None
 
@@ -3635,6 +3684,11 @@ class EspressoMailApp(Model):
         if m:
             scroll_pct = int(self.reader_viewport.scroll_percent * 100)
             title = f"{title_base} ({scroll_pct}%)"
+            if hasattr(self, "plugin_manager") and self.plugin_manager:
+                pills = self.plugin_manager.get_reader_actions(m)
+                if pills:
+                    pill_str = " ".join(f"[{p.badge or p.label}]" for p in pills)
+                    title = f"{title} • {pill_str}"
 
         return self.theme.pane_style(
             focused=(self.focused_pane == "reader"),

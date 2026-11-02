@@ -176,11 +176,13 @@ class ComposeModal(Model):
         references: Sequence[str] = (),
         draft_id: str = "",
         external_editor: str = "",
+        plugin_manager: Any = None,
     ) -> None:
         self.accounts = list(accounts)
         self.contacts = list(contacts)
         self.theme = theme
         self.external_editor = external_editor
+        self.plugin_manager = plugin_manager
         self.editor_status_msg = ""
         self.account_idx = 0
         for idx, acc in enumerate(self.accounts):
@@ -327,6 +329,14 @@ class ComposeModal(Model):
                 return self._emit_submit(is_draft=True)
             if k in ("f5", "ctrl+enter", "ctrl+x"):
                 return self._emit_submit(is_draft=False)
+            if k == "ctrl+t":
+                from espressomail.plugins.hooks import PluginActionMsg
+                return self, lambda: PluginActionMsg("deepl_translate", "deepl_translate_draft")
+            if self.plugin_manager is not None:
+                for act in self.plugin_manager.get_compose_actions(self):
+                    if act.shortcut and act.shortcut.lower() == k.lower():
+                        from espressomail.plugins.hooks import PluginActionMsg
+                        return self, lambda a=act: PluginActionMsg("", a.action_id)
 
             if self.focus_idx in (1, 2):
                 matches = self._get_autocomplete_matches()
@@ -519,11 +529,12 @@ class ComposeModal(Model):
                 .render(self.editor.view())
             )
 
-        footer_text = "[F5] Send  [Ctrl+S] Draft  [Ctrl+O] Editor  [Ctrl+M] MD  [F4] Preview  [Ctrl+A] Attach  [Esc] Close"
+        footer_text = "[F5] Send  [Ctrl+S] Draft  [Ctrl+O] Editor  [Ctrl+T] Translate  [Ctrl+M] MD  [F4] Preview  [Ctrl+A] Attach  [Esc] Close"
         footer = Style().foreground(self.theme.fg_muted).render(truncate_ansi(footer_text, content_w))
 
         badge_line_1 = f"{sign_badge}   {enc_badge}   {md_badge}"
-        badge_line_2 = f"{preview_badge}   {ext_badge}"
+        trans_badge = Style().bold(True).foreground(self.theme.accent_primary).render("[Ctrl+T] Translate")
+        badge_line_2 = f"{preview_badge}   {ext_badge}   {trans_badge}"
         if string_width(f"{badge_line_1}   {badge_line_2}") <= content_w:
             badges_row = [f"{badge_line_1}   {badge_line_2}"]
         else:
@@ -2155,7 +2166,28 @@ class PreferencesModal(Model):
         "2. Mail & View",
         "3. Sync & Network",
         "4. Keys & System",
+        "5. Plugins",
     )
+    DEEPL_TARGET_LANGS: tuple[tuple[str, str], ...] = (
+        ("EN-GB", "English (British)"),
+        ("EN-US", "English (American)"),
+        ("DE", "German"),
+        ("DA", "Danish"),
+        ("FR", "French"),
+        ("ES", "Spanish"),
+        ("IT", "Italian"),
+        ("NL", "Dutch"),
+        ("PL", "Polish"),
+        ("PT-PT", "Portuguese (European)"),
+        ("PT-BR", "Portuguese (Brazilian)"),
+        ("SV", "Swedish"),
+        ("NO", "Norwegian"),
+        ("FI", "Finnish"),
+        ("JA", "Japanese"),
+        ("ZH", "Chinese"),
+    )
+    DEEPL_FORMALITIES: tuple[str, ...] = ("default", "prefer_more", "prefer_less")
+    DEEPL_CACHE_OPTIONS: tuple[int, ...] = (7, 14, 30, 60, 90)
     ICON_MODES: tuple[str, ...] = ("emoji", "unicode", "none")
     ICON_MODE_LABELS: dict[str, str] = {
         "emoji": "Emoji (Color)",
@@ -2191,10 +2223,11 @@ class PreferencesModal(Model):
         threading_enabled: bool = True,
         show_raw_headers: bool = False,
         icon_mode: str = "",
+        plugin_manager: Any = None,
     ) -> None:
         self.store = store
         self.current_theme = current_theme
-        self.active_tab = 0  # 0=Appearance, 1=Mail & View, 2=Sync & Network, 3=Keys & System
+        self.active_tab = 0  # 0=Appearance, 1=Mail & View, 2=Sync & Network, 3=Keys & System, 4=Plugins
         self.focus_idx = 0  # 0=tabs bar, 1..6=settings, 16/17=buttons
         self.status_msg = ""
         self.error_msg = ""
@@ -2301,6 +2334,46 @@ class PreferencesModal(Model):
             else 0
         )
 
+        self.plugin_manager = plugin_manager
+        self.plugin_list: list[Any] = (
+            list(self.plugin_manager.plugins.values()) if self.plugin_manager else []
+        )
+        self.plugin_idx = 0
+        self.plugin_enabled: dict[str, bool] = {}
+        if self.plugin_manager:
+            for p in self.plugin_list:
+                self.plugin_enabled[p.metadata.id] = self.plugin_manager.is_enabled(p.metadata.id)
+
+        deepl_key = ""
+        deepl_target = "EN-GB"
+        deepl_formality = "default"
+        deepl_cache = 30
+        if self.plugin_manager:
+            deepl_key = self.plugin_manager.get_plugin_setting("deepl_translate", "auth_key", "")
+            deepl_target = self.plugin_manager.get_plugin_setting("deepl_translate", "target_lang", "EN-GB").upper()
+            deepl_formality = self.plugin_manager.get_plugin_setting("deepl_translate", "formality", "default").lower()
+            try:
+                deepl_cache = int(self.plugin_manager.get_plugin_setting("deepl_translate", "cache_days", "30"))
+            except ValueError:
+                deepl_cache = 30
+
+        styles = self.current_theme.text_input_styles()
+        self.input_plugin_auth_key = TextInput(
+            placeholder="Enter DeepL Auth Key (ends with :fx for free tier)...",
+            prompt="API Auth Key:          ",
+            **styles,
+        )
+        self.input_plugin_auth_key.value = deepl_key
+
+        target_codes = [c for c, _ in self.DEEPL_TARGET_LANGS]
+        self.deepl_target_lang_idx = target_codes.index(deepl_target) if deepl_target in target_codes else 0
+        self.deepl_formality_idx = (
+            self.DEEPL_FORMALITIES.index(deepl_formality) if deepl_formality in self.DEEPL_FORMALITIES else 0
+        )
+        self.deepl_cache_days_idx = (
+            self.DEEPL_CACHE_OPTIONS.index(deepl_cache) if deepl_cache in self.DEEPL_CACHE_OPTIONS else 2
+        )
+
         self._sync_focus()
 
     @property
@@ -2319,12 +2392,20 @@ class PreferencesModal(Model):
         self.input_download_dir.style = styles["style"]
         self.input_download_dir.placeholder_style = styles["placeholder_style"]
         self.input_download_dir.prompt_style = styles["prompt_style"]
+        self.input_plugin_auth_key.style = styles["style"]
+        self.input_plugin_auth_key.placeholder_style = styles["placeholder_style"]
+        self.input_plugin_auth_key.prompt_style = styles["prompt_style"]
 
     def _sync_focus(self) -> None:
         if (self.active_tab == 1 and self.focus_idx == 1) or (self.focus_idx == 0 and self.active_tab == 1):
             self.input_download_dir.focus()
         else:
             self.input_download_dir.blur()
+
+        if self.active_tab == 4 and self.focus_idx == 3:
+            self.input_plugin_auth_key.focus()
+        else:
+            self.input_plugin_auth_key.blur()
 
     def _cycle_row(self, row_idx: int, delta: int = 1) -> None:
         """Cycle or toggle the setting on a specific row."""
@@ -2381,6 +2462,24 @@ class PreferencesModal(Model):
                 self.check_updates_startup = not self.check_updates_startup
             elif row_idx == 5:
                 self.update_notice_mode_idx = (self.update_notice_mode_idx + delta) % len(self.UPDATE_NOTICE_MODES)
+
+        elif self.active_tab == 4:
+            if row_idx == 1:
+                if self.plugin_list:
+                    self.plugin_idx = (self.plugin_idx + delta) % len(self.plugin_list)
+            elif row_idx == 2:
+                if self.plugin_list:
+                    p = self.plugin_list[self.plugin_idx]
+                    self.plugin_enabled[p.metadata.id] = not self.plugin_enabled.get(p.metadata.id, True)
+            elif row_idx == 3:
+                self.focus_idx = 3
+                self._sync_focus()
+            elif row_idx == 4:
+                self.deepl_target_lang_idx = (self.deepl_target_lang_idx + delta) % len(self.DEEPL_TARGET_LANGS)
+            elif row_idx == 5:
+                self.deepl_formality_idx = (self.deepl_formality_idx + delta) % len(self.DEEPL_FORMALITIES)
+            elif row_idx == 6:
+                self.deepl_cache_days_idx = (self.deepl_cache_days_idx + delta) % len(self.DEEPL_CACHE_OPTIONS)
 
         # Direct legacy row compatibility regardless of active tab
         if row_idx == 7:
@@ -2442,14 +2541,16 @@ class PreferencesModal(Model):
 
                     # Check tab bar click (row 0)
                     if row_idx == 0:
-                        if rel_x < 20:
+                        if rel_x < 15:
                             self.active_tab = 0
-                        elif rel_x < 39:
+                        elif rel_x < 30:
                             self.active_tab = 1
-                        elif rel_x < 59:
+                        elif rel_x < 46:
                             self.active_tab = 2
-                        else:
+                        elif rel_x < 60:
                             self.active_tab = 3
+                        else:
+                            self.active_tab = 4
                         self.focus_idx = 1
                         self._sync_focus()
                         return self, None
@@ -2473,8 +2574,8 @@ class PreferencesModal(Model):
             if k in ("enter", "ctrl+s"):
                 return self._save_preferences()
 
-            # Direct tab switching via 1, 2, 3, 4
-            if k in ("1", "2", "3", "4"):
+            # Direct tab switching via 1, 2, 3, 4, 5
+            if k in ("1", "2", "3", "4", "5"):
                 self.active_tab = int(k) - 1
                 self.focus_idx = 1
                 self._sync_focus()
@@ -2493,7 +2594,7 @@ class PreferencesModal(Model):
                 self._sync_focus()
                 return self, None
 
-            tab_max = {0: 6, 1: 4, 2: 4, 3: 5}.get(self.active_tab, 4)
+            tab_max = {0: 6, 1: 4, 2: 4, 3: 5, 4: 6}.get(self.active_tab, 4)
 
             if k in ("tab", "down"):
                 if self.focus_idx == 0:
@@ -2528,12 +2629,16 @@ class PreferencesModal(Model):
                     self.active_tab = (self.active_tab + delta) % len(self.TABS)
                     self._sync_focus()
                     return self, None
-                if not (self.active_tab == 1 and self.focus_idx in (0, 1)):
+                if not (self.active_tab == 1 and self.focus_idx in (0, 1)) and not (self.active_tab == 4 and self.focus_idx == 3):
                     self._cycle_row(self.focus_idx, delta)
                     return self, None
 
         if (self.active_tab == 1 and self.focus_idx in (0, 1)) or self.focus_idx == 0:
             self.input_download_dir, cmd = self.input_download_dir.update(msg)
+            return self, cmd
+
+        if self.active_tab == 4 and self.focus_idx == 3:
+            self.input_plugin_auth_key, cmd = self.input_plugin_auth_key.update(msg)
             return self, cmd
 
         return self, None
@@ -2545,8 +2650,8 @@ class PreferencesModal(Model):
             return self, None
 
         try:
-            p = Path(dir_val).expanduser().resolve()
-            p.mkdir(parents=True, exist_ok=True)
+            target_dl = Path(dir_val).expanduser().resolve()
+            target_dl.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             self.error_msg = f"Invalid download directory: {e}"
             return self, None
@@ -2560,7 +2665,7 @@ class PreferencesModal(Model):
         keymap_val = self.KEYMAP_PRESETS[self.keymap_preset_idx]
         icon_mode_val = self.ICON_MODES[self.icon_mode_idx]
 
-        self.store.set_setting("download_dir", str(p))
+        self.store.set_setting("download_dir", str(target_dl))
         self.store.set_setting("image_backend", backend_val)
         self.store.set_setting("theme", theme_val)
         self.store.set_setting("color_mode", mode)
@@ -2583,8 +2688,22 @@ class PreferencesModal(Model):
         unm_val = self.UPDATE_NOTICE_MODES[self.update_notice_mode_idx]
         self.store.set_setting("update_notice_mode", unm_val)
 
+        if self.plugin_manager:
+            for pl in self.plugin_list:
+                en = self.plugin_enabled.get(pl.metadata.id, True)
+                self.plugin_manager.set_enabled(pl.metadata.id, en)
+
+            key_val = self.input_plugin_auth_key.value.strip()
+            self.plugin_manager.set_plugin_setting("deepl_translate", "auth_key", key_val)
+            t_code = self.DEEPL_TARGET_LANGS[self.deepl_target_lang_idx][0]
+            self.plugin_manager.set_plugin_setting("deepl_translate", "target_lang", t_code)
+            formality_val = self.DEEPL_FORMALITIES[self.deepl_formality_idx]
+            self.plugin_manager.set_plugin_setting("deepl_translate", "formality", formality_val)
+            cache_val = str(self.DEEPL_CACHE_OPTIONS[self.deepl_cache_days_idx])
+            self.plugin_manager.set_plugin_setting("deepl_translate", "cache_days", cache_val)
+
         return self, lambda: PreferencesSavedMsg(
-            download_dir=str(p),
+            download_dir=str(target_dl),
             image_backend=backend_val,
             theme=theme_val,
             threading=self.threading_enabled,
@@ -2769,7 +2888,7 @@ class PreferencesModal(Model):
             rows.append("")
             rows.append("")
 
-        else:
+        elif self.active_tab == 3:
             # Tab 3: Keys & System
             cur_kp = self.KEYMAP_PRESETS[self.keymap_preset_idx].upper()
             rows.append(f"Keyboard Shortcuts:    ◀ {_opt_style(1, cur_kp)} ▶")
@@ -2810,6 +2929,70 @@ class PreferencesModal(Model):
             )
             rows.append("")
             rows.append("")
+            rows.append("")
+            rows.append("")
+
+        else:
+            # Tab 4: Plugins
+            if self.plugin_list:
+                p = self.plugin_list[self.plugin_idx]
+                meta = p.metadata
+                p_label = f"{meta.icon} {meta.name} v{meta.version}"
+                rows.append(f"Select Plugin:         ◀ {_opt_style(1, p_label)} ▶")
+
+                en_val = "[x] Enabled" if self.plugin_enabled.get(meta.id, True) else "[ ] Disabled"
+                rows.append(f"Plugin Status:         {_opt_style(2, en_val)}")
+
+                rows.append(self.input_plugin_auth_key.view())
+
+                cur_tgt_code, cur_tgt_name = self.DEEPL_TARGET_LANGS[self.deepl_target_lang_idx]
+                rows.append(f"Target Language:       ◀ {_opt_style(4, f'{cur_tgt_code} ({cur_tgt_name})')} ▶")
+
+                cur_formality = self.DEEPL_FORMALITIES[self.deepl_formality_idx]
+                rows.append(f"Formality Preference:  ◀ {_opt_style(5, cur_formality)} ▶")
+
+                cur_cache_days = f"{self.DEEPL_CACHE_OPTIONS[self.deepl_cache_days_idx]} days"
+                rows.append(f"Cache Translations:    ◀ {_opt_style(6, cur_cache_days)} ▶")
+            else:
+                rows.append(
+                    Style()
+                    .italic(True)
+                    .foreground(self.current_theme.fg_muted)
+                    .render("  No plugins installed or discovered.")
+                )
+                rows.append("")
+                rows.append("")
+                rows.append("")
+                rows.append("")
+                rows.append("")
+
+            rows.append("")
+            rows.append("")
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_secondary)
+                .render("  💡 DeepL Neural Translation Plugin:")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • API keys ending in :fx automatically route to DeepL Free API.")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • Toggle translation in reading pane anytime with 'T' or Command Palette.")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • In Compose modal, translate draft subject & body using Ctrl+T.")
+            )
+            rows.append(
+                Style()
+                .foreground(self.current_theme.fg_muted)
+                .render("  • Translations are cached locally in SQLite to preserve your API budget.")
+            )
             rows.append("")
             rows.append("")
 

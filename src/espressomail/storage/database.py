@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Sequence
@@ -256,6 +257,14 @@ class LocalStore:
                 updated_at TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS plugin_cache (
+                plugin_id TEXT NOT NULL,
+                cache_key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                expires_at REAL NOT NULL DEFAULT 0.0,
+                PRIMARY KEY (plugin_id, cache_key)
+            );
             """
         )
 
@@ -387,6 +396,63 @@ class LocalStore:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+        self._conn.commit()
+
+    def get_plugin_setting(self, plugin_id: str, key: str, default: str = "") -> str:
+        """Retrieve a persistent setting namespaced to a plugin."""
+        return self.get_setting(f"plugin:{plugin_id}:{key}", default)
+
+    def set_plugin_setting(self, plugin_id: str, key: str, value: str) -> None:
+        """Store a persistent setting namespaced to a plugin."""
+        self.set_setting(f"plugin:{plugin_id}:{key}", value)
+
+    def get_plugin_cache(self, plugin_id: str, cache_key: str) -> str | None:
+        """Retrieve a cached string value if not expired."""
+        now = time.time()
+        row = self._conn.execute(
+            "SELECT value, expires_at FROM plugin_cache WHERE plugin_id = ? AND cache_key = ?",
+            (plugin_id, cache_key),
+        ).fetchone()
+        if not row:
+            return None
+        if row["expires_at"] > 0 and row["expires_at"] < now:
+            self._conn.execute(
+                "DELETE FROM plugin_cache WHERE plugin_id = ? AND cache_key = ?",
+                (plugin_id, cache_key),
+            )
+            self._conn.commit()
+            return None
+        return str(row["value"])
+
+    def set_plugin_cache(
+        self, plugin_id: str, cache_key: str, value: str, ttl_seconds: float = 0.0
+    ) -> None:
+        """Store a cached string value with optional expiration time."""
+        expires_at = (time.time() + ttl_seconds) if ttl_seconds > 0 else 0.0
+        self._conn.execute(
+            """
+            INSERT INTO plugin_cache (plugin_id, cache_key, value, expires_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(plugin_id, cache_key) DO UPDATE SET
+                value = excluded.value,
+                expires_at = excluded.expires_at
+            """,
+            (plugin_id, cache_key, value, expires_at),
+        )
+        self._conn.commit()
+
+    def clear_plugin_cache(self, plugin_id: str, cache_key: str | None = None) -> None:
+        """Clear cached entries for a plugin, optionally filtering by specific key."""
+        if cache_key is not None:
+            self._conn.execute(
+                "DELETE FROM plugin_cache WHERE plugin_id = ? AND cache_key = ?",
+                (plugin_id, cache_key),
+            )
+        else:
+            self._conn.execute(
+                "DELETE FROM plugin_cache WHERE plugin_id = ?",
+                (plugin_id,),
+            )
         self._conn.commit()
 
     # ------------------------------------------------------------------

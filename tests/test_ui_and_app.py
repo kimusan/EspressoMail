@@ -3199,13 +3199,19 @@ class TestUIAndApp(unittest.TestCase):
         self.assertIn("4. Keys & System", view3)
         self.assertIn("Keyboard Shortcuts:", view3)
 
-        # Cycle forward with "]"
+        # Switch to tab 5 (Plugins) with key "5"
+        modal, _ = modal.update(KeyMsg("5"))
+        self.assertEqual(modal.active_tab, 4)
+        view4 = modal.view(80, 24)
+        self.assertIn("5. Plugins", view4)
+
+        # Cycle forward with "]" (wraps around to tab 0)
         modal, _ = modal.update(KeyMsg("]"))
         self.assertEqual(modal.active_tab, 0)
 
-        # Cycle backward with "["
+        # Cycle backward with "[" (wraps around to tab 4)
         modal, _ = modal.update(KeyMsg("["))
-        self.assertEqual(modal.active_tab, 3)
+        self.assertEqual(modal.active_tab, 4)
 
         # Test mouse clicks on tab bar (row 0 = pos_y + 2)
         pos_y = modal.last_pos_y
@@ -3215,16 +3221,20 @@ class TestUIAndApp(unittest.TestCase):
         self.assertEqual(modal.active_tab, 0)
 
         # Click Tab 1 (Mail & View)
-        modal, _ = modal.update(MouseMsg(x=28, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
+        modal, _ = modal.update(MouseMsg(x=22, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
         self.assertEqual(modal.active_tab, 1)
 
         # Click Tab 2 (Sync & Network)
-        modal, _ = modal.update(MouseMsg(x=48, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
+        modal, _ = modal.update(MouseMsg(x=38, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
         self.assertEqual(modal.active_tab, 2)
 
         # Click Tab 3 (Keys & System)
-        modal, _ = modal.update(MouseMsg(x=68, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
+        modal, _ = modal.update(MouseMsg(x=52, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
         self.assertEqual(modal.active_tab, 3)
+
+        # Click Tab 4 (Plugins)
+        modal, _ = modal.update(MouseMsg(x=66, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
+        self.assertEqual(modal.active_tab, 4)
 
     def test_preferences_icon_mode_cycling_persistence_and_propagation(self) -> None:
         """Verify icon_mode cycles between emoji/unicode/none, saves to store, and applies to app."""

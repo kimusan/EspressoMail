@@ -118,6 +118,75 @@ DEFAULT_MENUS: tuple[MenuCategory, ...] = (
     ),
 )
 
+CATEGORY_ALIASES: dict[str, str] = {
+    "file": "File",
+    "mail": "Mail",
+    "message": "Mail",
+    "email": "Mail",
+    "view": "View",
+    "tools": "Tools",
+    "tool": "Tools",
+    "edit": "Tools",
+    "plugins": "Plugins",
+    "plugin": "Plugins",
+    "help": "Help",
+}
+
+
+def build_menu_categories(plugin_manager: Any = None) -> tuple[MenuCategory, ...]:
+    """Construct MenuCategory tuple merging default menus and active plugin items."""
+    if plugin_manager is None:
+        return DEFAULT_MENUS
+
+    try:
+        plugin_items = plugin_manager.get_menu_items()
+    except Exception:
+        return DEFAULT_MENUS
+
+    if not plugin_items:
+        return DEFAULT_MENUS
+
+    cat_map: dict[str, list[MenuItem]] = {
+        cat.title: list(cat.items) for cat in DEFAULT_MENUS
+    }
+    cat_hotkeys: dict[str, str] = {
+        cat.title: cat.hotkey for cat in DEFAULT_MENUS
+    }
+
+    for pi in plugin_items:
+        raw_cat = getattr(pi, "target_category", getattr(pi, "category", "Tools"))
+        norm_cat = CATEGORY_ALIASES.get(raw_cat.strip().lower(), raw_cat.strip().title())
+        item = MenuItem(action_id=pi.action_id, label=pi.label, shortcut=pi.shortcut)
+        if norm_cat not in cat_map:
+            cat_map[norm_cat] = []
+            cat_hotkeys[norm_cat] = "p" if norm_cat == "Plugins" else norm_cat[0].lower()
+
+        if getattr(pi, "position", "bottom") == "top":
+            cat_map[norm_cat].insert(0, item)
+        else:
+            cat_map[norm_cat].append(item)
+
+    categories: list[MenuCategory] = []
+    # Preferred order: File, Mail, View, Tools, Plugins, (custom), Help
+    order = ["File", "Mail", "View", "Tools", "Plugins"]
+    for c_title in cat_map:
+        if c_title not in order and c_title != "Help":
+            order.append(c_title)
+    if "Help" in cat_map and "Help" not in order:
+        order.append("Help")
+
+    for title in order:
+        if title in cat_map and cat_map[title]:
+            categories.append(
+                MenuCategory(
+                    title=title,
+                    hotkey=cat_hotkeys.get(title, title[0].lower()),
+                    items=tuple(cat_map[title]),
+                )
+            )
+
+    return tuple(categories)
+
 
 class MenuBar(Model):
     """Interactive top menu bar with mouse and keyboard drop-down menus."""
@@ -134,6 +203,13 @@ class MenuBar(Model):
         self.active_item_idx = 0
         # Store (start_x, end_x) for each category label in the top bar for mouse hit testing
         self._cat_bounds: list[tuple[int, int]] = []
+        self._compute_bounds()
+
+    def reload_categories(self, categories: tuple[MenuCategory, ...]) -> None:
+        """Update menu categories and recompute hit-test bounds."""
+        self.categories = categories
+        if self.active_cat_idx >= len(self.categories):
+            self.active_cat_idx = 0
         self._compute_bounds()
 
     def set_icon_mode(self, icon_mode: str) -> None:
