@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-03
+
+
+> Release v0.3.0: Plugins, Phishing Shields, and AI Baristas
+
+### Highlights: EspressoMail Now Has Extra Shots (Plugins!)
+
+We realized a terminal email client isn't truly complete until you can bolt arbitrary Python scripts onto it like a caffeinated mad scientist. **v0.3.0** introduces a full-blown, crash-isolated **Plugin Architecture** along with **7 built-in plugins** so you can translate, summarize, grammar-check, and deflect phishing attacks without ever touching your mouse.
+
+#### 1. The Extensible Plugin System
+- **Three Ways to Brew**: Load built-in plugins, drop custom scripts into `~/.config/espressomail/plugins/`, or install 3rd-party packages via `pip` entry points (`espressomail.plugins`).
+- **Crash-Isolated Hooks**: If a 3rd-party plugin divides by zero while inspecting your spam folder, EspressoMail catches it, logs it, and keeps your inbox running smoothly.
+- **Full Developer Guide**: Want to build your own plugin? Check out the new step-by-step tutorial in `docs/PLUGIN_DEVELOPMENT.md`.
+
+#### 2. Seven Built-In Plugins Ready to Pour
+- **DeepL Translation (`Ctrl+T`)**: Effortlessly translate foreign emails in the reading pane or translate your own outgoing drafts before sending. Now you can finally look fluent in 16 languages without opening a browser tab.
+- **AI Email Assistant (`Ctrl+Y` / `Ctrl+B`)**: Hook up your local **Ollama** instance (or OpenAI / Anthropic Claude) to turn 15-paragraph corporate monologues into a 3-line **TL;DR + Action Items** (`Ctrl+Y`), or transform your sleep-deprived drafts into polite, professional prose (`Ctrl+B`).
+- **Phishing & Suspicious Link Scanner**: Automatically guards your inbox at 7:00 AM before the coffee kicks in. Detects display-name spoofing (`"PayPal Support" <totally-legit@gmail.com>`), sneaky `Reply-To` traps, Punycode (`xn--`) homograph attacks, and raw IP links.
+- **DMARC / DKIM / SPF Security Inspector (`Ctrl+D`)**: Parses `Authentication-Results` headers into a clean security badge and automatically unpacks `.xml`, `.xml.gz`, and `.zip` DMARC aggregate reports into human-readable terminal tables—because life is too short to read raw XML.
+- **One-Click Unsubscribe (`Ctrl+K`)**: Detects `List-Unsubscribe` headers and fires RFC 8058 One-Click `POST` requests in the background. Banish marketing newsletters to the shadow realm without ever opening a browser.
+- **LanguageTool Grammar & Spell Checker (`Ctrl+L`)**: Catches `teh` typos and questionable grammar right inside the composer before you accidentally email your entire department.
+- **URL Launcher & Link Picker (`Ctrl+O`)**: Extracts every link from the current email into a numbered list (cleverly ignoring 1x1 tracking pixels) so you can launch the exact URL you want in one keystroke.
+
+#### 3. Quality-of-Life & Under-the-Hood Goodies
+- **Single-Point Version & Startup Update Checker**: EspressoMail now knows its own version from a single source of truth and quietly checks GitHub on startup to let you know (via toast or modal) when a fresher roast is available.
+- **Sync Current Folder (`Ctrl+R` / `F5` / `r`)**: Impatiently waiting for a 2FA code? Refresh just the active folder on demand without syncing your entire archive.
+- **Dynamic Plugin Preferences UI**: Configure API keys, models, and toggles for every installed plugin directly from `Preferences -> 5. Plugins`.
 ## [0.2.0] - 2026-10-29
 
 
@@ -76,7 +103,8 @@ A massive shoutout to the Espresso TUI framework (espressoTUI) and The Elm Archi
 - Modals and Dialogs: Full-screen and modal overlays for Compose, Preferences, Account Setup & Editing, Attachment Downloader, and Exit Confirmation.
 - Packaging and CI/CD: Standalone single-binary executables (Linux x86_64 and Windows x86_64.exe), native Linux packages (Debian .deb, RPM, Arch Linux), PyPI publication, and automated release management.
 
-[Unreleased]: https://github.com/kimusan/EspressoMail/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/kimusan/EspressoMail/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kimusan/EspressoMail/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kimusan/EspressoMail/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/kimusan/EspressoMail/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kimusan/EspressoMail/releases/tag/v0.1.0
