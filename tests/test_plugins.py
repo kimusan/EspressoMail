@@ -547,7 +547,7 @@ class TestPluginUIIntegration(BaseTestCase):
         view_text = modal.view(80, 24)
         self.assertIn("5. Plugins", view_text)
         self.assertIn("DeepL Translation", view_text)
-        self.assertIn("Target Language:", view_text)
+        self.assertIn("Default Target Langua:", view_text)
         self.assertIn("API Auth Key:", view_text)
 
         # Toggle enabled state (row 2)
@@ -560,15 +560,44 @@ class TestPluginUIIntegration(BaseTestCase):
         modal._cycle_row(4, delta=1)
         self.assertNotEqual(modal.deepl_target_lang_idx, init_lang_idx)
 
-        # Enter auth key
+        # Enter DeepL auth key
         modal.input_plugin_auth_key.value = "my-secret-key:fx"
+
+        # Cycle row 1 to switch to AI Email Assistant plugin
+        while modal.plugin_list[modal.plugin_idx].metadata.id != "ai_assistant":
+            modal._cycle_row(1, delta=1)
+
+        ai_view = modal.view(80, 24)
+        self.assertIn("AI Email Assistant", ai_view)
+        self.assertIn("AI Provider:", ai_view)
+        self.assertIn("API Base URL:", ai_view)
+        self.assertIn("Model Name:", ai_view)
+        self.assertIn("API Key (OpenAI / Ant:", ai_view)
+        self.assertNotIn("Default Target Langua:", ai_view)
+
+        # Cycle AI provider (row 3: ollama -> openai) and set AI API key (row 6)
+        modal._cycle_row(3, delta=1)
+        modal.plugin_text_inputs[("ai_assistant", "api_key")].value = "sk-test-ai-key"
+        modal.plugin_text_inputs[("ai_assistant", "model")].value = "gpt-4o-mini"
+
+        # Cycle row 1 to switch to LanguageTool plugin
+        while modal.plugin_list[modal.plugin_idx].metadata.id != "languagetool":
+            modal._cycle_row(1, delta=1)
+
+        lt_view = modal.view(80, 24)
+        self.assertIn("LanguageTool Grammar Check", lt_view)
+        self.assertIn("LanguageTool API Endp:", lt_view)
+        self.assertIn("Language Code:", lt_view)
+        self.assertIn("API Key (Optional / P:", lt_view)
+        modal.plugin_text_inputs[("languagetool", "api_key")].value = "lt-plus-key-99"
+        modal.plugin_text_inputs[("languagetool", "language")].value = "en-GB"
 
         # Save preferences
         modal, cmd = modal._save_preferences()
         self.assertIsNotNone(cmd)
         saved_msg = cmd()  # type: ignore[misc]
 
-        # Verify persistence in SQLite store
+        # Verify persistence in SQLite store across all edited plugins
         self.assertEqual(self.store.get_plugin_setting("deepl_translate", "auth_key"), "my-secret-key:fx")
         expected_lang = modal.DEEPL_TARGET_LANGS[modal.deepl_target_lang_idx][0]
         self.assertEqual(self.store.get_plugin_setting("deepl_translate", "target_lang"), expected_lang)
@@ -576,6 +605,11 @@ class TestPluginUIIntegration(BaseTestCase):
             self.store.get_setting("plugin:deepl_translate:enabled"),
             "1" if modal.plugin_enabled["deepl_translate"] else "0",
         )
+        self.assertEqual(self.store.get_plugin_setting("ai_assistant", "provider"), "openai")
+        self.assertEqual(self.store.get_plugin_setting("ai_assistant", "api_key"), "sk-test-ai-key")
+        self.assertEqual(self.store.get_plugin_setting("ai_assistant", "model"), "gpt-4o-mini")
+        self.assertEqual(self.store.get_plugin_setting("languagetool", "api_key"), "lt-plus-key-99")
+        self.assertEqual(self.store.get_plugin_setting("languagetool", "language"), "en-GB")
 
     def test_compose_modal_plugin_integration(self) -> None:
         manager = PluginManager(store=self.store)

@@ -81,6 +81,7 @@ def check_text_with_languagetool(
     text: str,
     api_url: str = "https://api.languagetool.org/v2/check",
     language: str = "auto",
+    api_key: str = "",
     timeout: float = 15.0,
 ) -> tuple[bool, list[GrammarMatch], str, str]:
     """Query LanguageTool HTTP API and return (success, matches, detected_lang, error)."""
@@ -91,12 +92,13 @@ def check_text_with_languagetool(
     if not endpoint.endswith("/check"):
         endpoint = endpoint.rstrip("/") + "/v2/check" if "/v2" not in endpoint else endpoint.rstrip("/") + "/check"
 
-    form_data = urllib.parse.urlencode(
-        {
-            "text": text,
-            "language": (language or "auto").strip(),
-        }
-    ).encode("utf-8")
+    params: dict[str, str] = {
+        "text": text,
+        "language": (language or "auto").strip(),
+    }
+    if api_key and api_key.strip():
+        params["apiKey"] = api_key.strip()
+    form_data = urllib.parse.urlencode(params).encode("utf-8")
 
     req = urllib.request.Request(
         endpoint,
@@ -180,6 +182,12 @@ class LanguageToolPlugin(BasePlugin):
                 "default": "auto",
                 "description": "Language code (e.g. auto, en-US, en-GB, de-DE, da-DK, fr)",
             },
+            "api_key": {
+                "type": "secret",
+                "label": "API Key (Optional / Plus)",
+                "default": "",
+                "description": "Optional API key for LanguageTool Plus or authenticated self-hosted servers",
+            },
             "auto_apply": {
                 "type": "bool",
                 "label": "Auto-Apply Top Corrections",
@@ -238,6 +246,7 @@ class LanguageToolPlugin(BasePlugin):
 
             api_url = self.context.get_setting("api_url", "https://api.languagetool.org/v2/check")
             language = self.context.get_setting("language", "auto")
+            api_key = self.context.get_setting("api_key", "")
             auto_apply = self.context.get_setting("auto_apply", "true").lower() in ("1", "true", "yes")
 
             app.status_message = "✍️ Checking grammar and spelling with LanguageTool..."
@@ -246,7 +255,7 @@ class LanguageToolPlugin(BasePlugin):
 
             def _cmd() -> Msg:
                 ok, matches, det_lang, err = check_text_with_languagetool(
-                    draft_text, api_url=api_url, language=language
+                    draft_text, api_url=api_url, language=language, api_key=api_key
                 )
                 if not ok:
                     return LanguageToolResultMsg(

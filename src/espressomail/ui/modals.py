@@ -2342,30 +2342,57 @@ class PreferencesModal(Model):
         )
         self.plugin_idx = 0
         self.plugin_enabled: dict[str, bool] = {}
-        if self.plugin_manager:
-            for p in self.plugin_list:
-                self.plugin_enabled[p.metadata.id] = self.plugin_manager.is_enabled(p.metadata.id)
-
-        deepl_key = ""
-        deepl_target = "EN-GB"
-        deepl_formality = "default"
-        deepl_cache = 30
-        if self.plugin_manager:
-            deepl_key = self.plugin_manager.get_plugin_setting("deepl_translate", "auth_key", "")
-            deepl_target = self.plugin_manager.get_plugin_setting("deepl_translate", "target_lang", "EN-GB").upper()
-            deepl_formality = self.plugin_manager.get_plugin_setting("deepl_translate", "formality", "default").lower()
-            try:
-                deepl_cache = int(self.plugin_manager.get_plugin_setting("deepl_translate", "cache_days", "30"))
-            except ValueError:
-                deepl_cache = 30
+        self.plugin_settings_values: dict[str, dict[str, str]] = {}
+        self.plugin_text_inputs: dict[tuple[str, str], TextInput] = {}
 
         styles = self.current_theme.text_input_styles()
-        self.input_plugin_auth_key = TextInput(
-            placeholder="Enter DeepL Auth Key (ends with :fx for free tier)...",
-            prompt="API Auth Key:          ",
-            **styles,
-        )
-        self.input_plugin_auth_key.value = deepl_key
+        for p in self.plugin_list:
+            pid = p.metadata.id
+            if self.plugin_manager:
+                self.plugin_enabled[pid] = self.plugin_manager.is_enabled(pid)
+            else:
+                self.plugin_enabled[pid] = True
+            self.plugin_settings_values[pid] = {}
+            schema = getattr(p.metadata, "settings_schema", {}) or {}
+            for s_key, s_spec in schema.items():
+                default_val = str(s_spec.get("default", ""))
+                cur_val = (
+                    self.plugin_manager.get_plugin_setting(pid, s_key, default_val)
+                    if self.plugin_manager
+                    else default_val
+                )
+                self.plugin_settings_values[pid][s_key] = cur_val
+                s_type = str(s_spec.get("type", "str")).lower()
+                if s_type in ("str", "secret", "password", "text"):
+                    label = str(s_spec.get("label", s_key))
+                    desc = str(s_spec.get("description", ""))
+                    prompt_str = f"{label[:21] + ':':<23}"
+                    ti = TextInput(
+                        placeholder=desc or f"Enter {label}...",
+                        prompt=prompt_str,
+                        **styles,
+                    )
+                    ti.value = cur_val
+                    self.plugin_text_inputs[(pid, s_key)] = ti
+
+        deepl_key = self.plugin_settings_values.get("deepl_translate", {}).get("auth_key", "")
+        deepl_target = self.plugin_settings_values.get("deepl_translate", {}).get("target_lang", "EN-GB").upper()
+        deepl_formality = self.plugin_settings_values.get("deepl_translate", {}).get("formality", "default").lower()
+        try:
+            deepl_cache = int(self.plugin_settings_values.get("deepl_translate", {}).get("cache_days", "30"))
+        except ValueError:
+            deepl_cache = 30
+
+        if ("deepl_translate", "auth_key") in self.plugin_text_inputs:
+            self.input_plugin_auth_key = self.plugin_text_inputs[("deepl_translate", "auth_key")]
+            self.input_plugin_auth_key.prompt = "API Auth Key:          "
+        else:
+            self.input_plugin_auth_key = TextInput(
+                placeholder="Enter DeepL Auth Key (ends with :fx for free tier)...",
+                prompt="API Auth Key:          ",
+                **styles,
+            )
+            self.input_plugin_auth_key.value = deepl_key
 
         target_codes = [c for c, _ in self.DEEPL_TARGET_LANGS]
         self.deepl_target_lang_idx = target_codes.index(deepl_target) if deepl_target in target_codes else 0
@@ -2377,6 +2404,24 @@ class PreferencesModal(Model):
         )
 
         self._sync_focus()
+
+    def _current_plugin_schema_items(self) -> list[tuple[str, dict[str, Any]]]:
+        if not self.plugin_list:
+            return []
+        p = self.plugin_list[self.plugin_idx % len(self.plugin_list)]
+        schema = getattr(p.metadata, "settings_schema", {}) or {}
+        return list(schema.items())
+
+    def _active_plugin_text_input(self) -> TextInput | None:
+        if self.active_tab != 4 or not self.plugin_list:
+            return None
+        items = self._current_plugin_schema_items()
+        idx = self.focus_idx - 3
+        if 0 <= idx < len(items):
+            p = self.plugin_list[self.plugin_idx % len(self.plugin_list)]
+            s_key, _ = items[idx]
+            return self.plugin_text_inputs.get((p.metadata.id, s_key))
+        return None
 
     @property
     def update_notice_mode(self) -> str:
@@ -2397,6 +2442,10 @@ class PreferencesModal(Model):
         self.input_plugin_auth_key.style = styles["style"]
         self.input_plugin_auth_key.placeholder_style = styles["placeholder_style"]
         self.input_plugin_auth_key.prompt_style = styles["prompt_style"]
+        for ti in self.plugin_text_inputs.values():
+            ti.style = styles["style"]
+            ti.placeholder_style = styles["placeholder_style"]
+            ti.prompt_style = styles["prompt_style"]
 
     def _sync_focus(self) -> None:
         if (self.active_tab == 1 and self.focus_idx == 1) or (self.focus_idx == 0 and self.active_tab == 1):
@@ -2404,9 +2453,13 @@ class PreferencesModal(Model):
         else:
             self.input_download_dir.blur()
 
-        if self.active_tab == 4 and self.focus_idx == 3:
-            self.input_plugin_auth_key.focus()
-        else:
+        active_ti = self._active_plugin_text_input()
+        for ti in self.plugin_text_inputs.values():
+            if ti is active_ti:
+                ti.focus()
+            else:
+                ti.blur()
+        if active_ti is None and self.input_plugin_auth_key not in self.plugin_text_inputs.values():
             self.input_plugin_auth_key.blur()
 
     def _cycle_row(self, row_idx: int, delta: int = 1) -> None:
@@ -2469,19 +2522,57 @@ class PreferencesModal(Model):
             if row_idx == 1:
                 if self.plugin_list:
                     self.plugin_idx = (self.plugin_idx + delta) % len(self.plugin_list)
+                    self._sync_focus()
             elif row_idx == 2:
                 if self.plugin_list:
                     p = self.plugin_list[self.plugin_idx]
                     self.plugin_enabled[p.metadata.id] = not self.plugin_enabled.get(p.metadata.id, True)
-            elif row_idx == 3:
-                self.focus_idx = 3
-                self._sync_focus()
-            elif row_idx == 4:
-                self.deepl_target_lang_idx = (self.deepl_target_lang_idx + delta) % len(self.DEEPL_TARGET_LANGS)
-            elif row_idx == 5:
-                self.deepl_formality_idx = (self.deepl_formality_idx + delta) % len(self.DEEPL_FORMALITIES)
-            elif row_idx == 6:
-                self.deepl_cache_days_idx = (self.deepl_cache_days_idx + delta) % len(self.DEEPL_CACHE_OPTIONS)
+            elif row_idx >= 3 and self.plugin_list:
+                p = self.plugin_list[self.plugin_idx]
+                pid = p.metadata.id
+                items = self._current_plugin_schema_items()
+                s_idx = row_idx - 3
+                if 0 <= s_idx < len(items):
+                    s_key, s_spec = items[s_idx]
+                    s_type = str(s_spec.get("type", "str")).lower()
+                    cur_val = self.plugin_settings_values.get(pid, {}).get(
+                        s_key, str(s_spec.get("default", ""))
+                    )
+                    if s_type in ("str", "secret", "password", "text"):
+                        self.focus_idx = row_idx
+                        self._sync_focus()
+                    elif s_type == "bool":
+                        is_true = cur_val.lower() in ("1", "true", "yes")
+                        self.plugin_settings_values.setdefault(pid, {})[s_key] = "false" if is_true else "true"
+                    elif s_type == "choice":
+                        opts = [str(o) for o in s_spec.get("options", [])]
+                        if opts:
+                            try:
+                                c_i = opts.index(cur_val)
+                            except ValueError:
+                                c_i = 0
+                            new_val = opts[(c_i + delta) % len(opts)]
+                            self.plugin_settings_values.setdefault(pid, {})[s_key] = new_val
+                            if pid == "deepl_translate" and s_key == "target_lang":
+                                t_codes = [c for c, _ in self.DEEPL_TARGET_LANGS]
+                                if new_val in t_codes:
+                                    self.deepl_target_lang_idx = t_codes.index(new_val)
+                            elif pid == "deepl_translate" and s_key == "formality":
+                                if new_val in self.DEEPL_FORMALITIES:
+                                    self.deepl_formality_idx = self.DEEPL_FORMALITIES.index(new_val)
+                    elif s_type == "int":
+                        int_opts = [str(x) for x in s_spec.get("options", self.DEEPL_CACHE_OPTIONS)]
+                        try:
+                            c_i = int_opts.index(str(cur_val))
+                        except ValueError:
+                            c_i = 0
+                        new_val = int_opts[(c_i + delta) % len(int_opts)]
+                        self.plugin_settings_values.setdefault(pid, {})[s_key] = new_val
+                        if pid == "deepl_translate" and s_key == "cache_days":
+                            try:
+                                self.deepl_cache_days_idx = self.DEEPL_CACHE_OPTIONS.index(int(new_val))
+                            except ValueError:
+                                pass
 
         # Direct legacy row compatibility regardless of active tab
         if row_idx == 7:
@@ -2596,7 +2687,8 @@ class PreferencesModal(Model):
                 self._sync_focus()
                 return self, None
 
-            tab_max = {0: 6, 1: 4, 2: 4, 3: 5, 4: 6}.get(self.active_tab, 4)
+            plugin_schema_len = len(self._current_plugin_schema_items())
+            tab_max = {0: 6, 1: 4, 2: 4, 3: 5, 4: max(2, 2 + plugin_schema_len)}.get(self.active_tab, 4)
 
             if k in ("tab", "down"):
                 if self.focus_idx == 0:
@@ -2631,7 +2723,8 @@ class PreferencesModal(Model):
                     self.active_tab = (self.active_tab + delta) % len(self.TABS)
                     self._sync_focus()
                     return self, None
-                if not (self.active_tab == 1 and self.focus_idx in (0, 1)) and not (self.active_tab == 4 and self.focus_idx == 3):
+                active_ti = self._active_plugin_text_input()
+                if not (self.active_tab == 1 and self.focus_idx in (0, 1)) and active_ti is None:
                     self._cycle_row(self.focus_idx, delta)
                     return self, None
 
@@ -2639,8 +2732,16 @@ class PreferencesModal(Model):
             self.input_download_dir, cmd = self.input_download_dir.update(msg)
             return self, cmd
 
-        if self.active_tab == 4 and self.focus_idx == 3:
-            self.input_plugin_auth_key, cmd = self.input_plugin_auth_key.update(msg)
+        active_ti = self._active_plugin_text_input()
+        if active_ti is not None:
+            p = self.plugin_list[self.plugin_idx % len(self.plugin_list)]
+            items = self._current_plugin_schema_items()
+            s_key, _ = items[self.focus_idx - 3]
+            updated_ti, cmd = active_ti.update(msg)
+            self.plugin_text_inputs[(p.metadata.id, s_key)] = updated_ti
+            self.plugin_settings_values.setdefault(p.metadata.id, {})[s_key] = updated_ti.value
+            if p.metadata.id == "deepl_translate" and s_key == "auth_key":
+                self.input_plugin_auth_key = updated_ti
             return self, cmd
 
         return self, None
@@ -2691,18 +2792,28 @@ class PreferencesModal(Model):
         self.store.set_setting("update_notice_mode", unm_val)
 
         if self.plugin_manager:
-            for pl in self.plugin_list:
-                en = self.plugin_enabled.get(pl.metadata.id, True)
-                self.plugin_manager.set_enabled(pl.metadata.id, en)
+            # Sync any direct edits to legacy DeepL properties if changed directly by tests/callers
+            if ("deepl_translate", "auth_key") in self.plugin_text_inputs:
+                self.plugin_settings_values.setdefault("deepl_translate", {})[
+                    "auth_key"
+                ] = self.input_plugin_auth_key.value.strip()
 
-            key_val = self.input_plugin_auth_key.value.strip()
-            self.plugin_manager.set_plugin_setting("deepl_translate", "auth_key", key_val)
-            t_code = self.DEEPL_TARGET_LANGS[self.deepl_target_lang_idx][0]
-            self.plugin_manager.set_plugin_setting("deepl_translate", "target_lang", t_code)
-            formality_val = self.DEEPL_FORMALITIES[self.deepl_formality_idx]
-            self.plugin_manager.set_plugin_setting("deepl_translate", "formality", formality_val)
-            cache_val = str(self.DEEPL_CACHE_OPTIONS[self.deepl_cache_days_idx])
-            self.plugin_manager.set_plugin_setting("deepl_translate", "cache_days", cache_val)
+            for pl in self.plugin_list:
+                pid = pl.metadata.id
+                en = self.plugin_enabled.get(pid, True)
+                self.plugin_manager.set_enabled(pid, en)
+
+                schema = getattr(pl.metadata, "settings_schema", {}) or {}
+                for s_key, s_spec in schema.items():
+                    if (pid, s_key) in self.plugin_text_inputs:
+                        val_to_save = self.plugin_text_inputs[(pid, s_key)].value.strip()
+                    else:
+                        val_to_save = str(
+                            self.plugin_settings_values.get(pid, {}).get(
+                                s_key, s_spec.get("default", "")
+                            )
+                        )
+                    self.plugin_manager.set_plugin_setting(pid, s_key, val_to_save)
 
         return self, lambda: PreferencesSavedMsg(
             download_dir=str(target_dl),
@@ -2937,24 +3048,53 @@ class PreferencesModal(Model):
         else:
             # Tab 4: Plugins
             if self.plugin_list:
-                p = self.plugin_list[self.plugin_idx]
+                p = self.plugin_list[self.plugin_idx % len(self.plugin_list)]
                 meta = p.metadata
+                pid = meta.id
                 p_label = f"{meta.icon} {meta.name} v{meta.version}"
                 rows.append(f"Select Plugin:         ◀ {_opt_style(1, p_label)} ▶")
 
-                en_val = "[x] Enabled" if self.plugin_enabled.get(meta.id, True) else "[ ] Disabled"
+                en_val = "[x] Enabled" if self.plugin_enabled.get(pid, True) else "[ ] Disabled"
                 rows.append(f"Plugin Status:         {_opt_style(2, en_val)}")
 
-                rows.append(self.input_plugin_auth_key.view())
+                schema_items = self._current_plugin_schema_items()
+                for s_offset, (s_key, s_spec) in enumerate(schema_items):
+                    row_num = 3 + s_offset
+                    s_type = str(s_spec.get("type", "str")).lower()
+                    s_label = str(s_spec.get("label", s_key))
+                    label_col = f"{s_label[:21] + ':':<22}"
+                    cur_val = str(
+                        self.plugin_settings_values.get(pid, {}).get(
+                            s_key, s_spec.get("default", "")
+                        )
+                    )
 
-                cur_tgt_code, cur_tgt_name = self.DEEPL_TARGET_LANGS[self.deepl_target_lang_idx]
-                rows.append(f"Target Language:       ◀ {_opt_style(4, f'{cur_tgt_code} ({cur_tgt_name})')} ▶")
+                    if s_type in ("str", "secret", "password", "text"):
+                        ti = self.plugin_text_inputs.get((pid, s_key))
+                        if ti is not None:
+                            ti.width = max(24, modal_w - 6)
+                            rows.append(ti.view())
+                        else:
+                            rows.append(f"{label_col} {_opt_style(row_num, cur_val)}")
+                    elif s_type == "bool":
+                        is_true = cur_val.lower() in ("1", "true", "yes")
+                        b_str = "[x] Enabled" if is_true else "[ ] Disabled"
+                        rows.append(f"{label_col} {_opt_style(row_num, b_str)}")
+                    elif s_type == "choice":
+                        disp_val = cur_val
+                        if pid == "deepl_translate" and s_key == "target_lang":
+                            lang_dict = dict(self.DEEPL_TARGET_LANGS)
+                            if cur_val in lang_dict:
+                                disp_val = f"{cur_val} ({lang_dict[cur_val]})"
+                        rows.append(f"{label_col} ◀ {_opt_style(row_num, disp_val)} ▶")
+                    elif s_type == "int":
+                        disp_val = f"{cur_val} days" if "days" in s_key else cur_val
+                        rows.append(f"{label_col} ◀ {_opt_style(row_num, disp_val)} ▶")
+                    else:
+                        rows.append(f"{label_col} {_opt_style(row_num, cur_val)}")
 
-                cur_formality = self.DEEPL_FORMALITIES[self.deepl_formality_idx]
-                rows.append(f"Formality Preference:  ◀ {_opt_style(5, cur_formality)} ▶")
-
-                cur_cache_days = f"{self.DEEPL_CACHE_OPTIONS[self.deepl_cache_days_idx]} days"
-                rows.append(f"Cache Translations:    ◀ {_opt_style(6, cur_cache_days)} ▶")
+                while len(rows) < 7:
+                    rows.append("")
             else:
                 rows.append(
                     Style()
