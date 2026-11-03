@@ -42,6 +42,14 @@
 * **ManageSieve Filter Manager (`F`)**: Visual rule builder, RFC 5228 Sieve compiler, static syntax validator, local rule runner, and RFC 5804 ManageSieve uploader.
 * **CardDAV Address Book & Contact Autocomplete (`B`)**: Address book synchronization, sender contact harvesting, and autocomplete inside the email composer.
 * **GPG / OpenPGP Integration (`G`)**: Cleartext signing, signature verification, recipient encryption, decryption, and Ed25519 key generation.
+* **Extensible Plugin System & 7 Built-in Plugins**: Crash-isolated plugin architecture supporting user scripts (`~/.config/espressomail/plugins/`), Python entry points (`espressomail.plugins`), and built-in plugins:
+  - **🌐 DeepL Neural Translation (`Ctrl+T`)**: In-place reading pane and compose draft translation with 30-day SQLite caching.
+  - **🤖 AI Email Assistant (`Ctrl+Y` / `Ctrl+B`)**: Local **Ollama**, **OpenAI**, or **Anthropic Claude** reading pane TL;DR + action-item summaries and draft polishing.
+  - **🛡️ DMARC / DKIM / SPF Inspector (`Ctrl+D`)**: Authentication header verification and automatic `.xml` / `.xml.gz` / `.zip` DMARC aggregate report table rendering.
+  - **🚨 Phishing & Suspicious Link Scanner**: Automatic alerts for display-name spoofing, `Reply-To` mismatches, deceptive HTML links, Punycode (`xn--`) homographs, and raw IP URLs.
+  - **🔕 One-Click Unsubscribe (`Ctrl+K`)**: RFC 8058 One-Click background HTTP POST and `mailto:` unsubscribe handling.
+  - **✍️ LanguageTool Grammar & Spell Checker (`Ctrl+L`)**: Automated grammar and spelling fixes inside the email composer.
+  - **🔗 URL Launcher & Link Picker (`Ctrl+O`)**: Numbered hyperlink extraction table and one-key browser launching.
 
 ---
 
@@ -131,6 +139,11 @@ espressomail --db ~/mail/custom_store.db
 | **`t`** | Toggle conversation threading view (`Threaded` vs `Flat`) |
 | **`T`** | Cycle active theme (`Espresso`, `Catppuccin`, `Dracula`, `Nord`, `Gruvbox`, `Solarized`) |
 | **`i`** | Cycle terminal image renderer (`Auto`, `Chafa`, `Sixel`, `Kitty`, `Half-Block`, `Braille`, `Off`) |
+| **`Ctrl+T`** | Toggle in-place email translation via DeepL plugin |
+| **`Ctrl+Y`** | Toggle AI email summary & action items (`ai_assistant` plugin) |
+| **`Ctrl+D`** | Toggle SPF / DKIM / DMARC authentication inspector (`dmarc_inspector` plugin) |
+| **`Ctrl+K`** | One-Click Unsubscribe from mailing list (`unsubscribe` plugin) |
+| **`Ctrl+O`** | Toggle numbered email links table / cycle links (`url_launcher` plugin) |
 | **`[` / `]`** | Widen Reading Pane (`[`) or widen Message List (`]`) |
 | **`{` / `}`** | Narrow (`{`) or widen (`}`) Folder List pane |
 | **`H`** | Toggle full RFC 5322 headers in Reading Pane |
@@ -139,7 +152,7 @@ espressomail --db ~/mail/custom_store.db
 | **`F`** | Open Sieve Filter Rules & RFC 5228 Script Manager |
 | **`G`** | Open GPG / OpenPGP Keyring & Security Manager |
 | **`A`** | Edit Existing Account Settings (Password, IMAP/SMTP hosts, ports, TLS) |
-| **`P` / `p`** | Open Preferences & Configuration modal |
+| **`P` / `p`** | Open Preferences & Configuration modal (including **Tab 5: Plugins**) |
 | **`O`** | Launch Guided Account Onboarding Wizard (Add New Account) |
 | **`Ctrl+R` / `F5`** | Synchronize active folder with IMAP server (or `r` in Mailboxes pane) |
 | **`S`** | Synchronize all enabled IMAP accounts in background |
@@ -159,6 +172,9 @@ espressomail --db ~/mail/custom_store.db
 * **`Ctrl+M`**: Toggle Markdown to HTML rendering on send
 * **`F4` / `Ctrl+V`**: Toggle Markdown live terminal preview
 * **`Ctrl+O` / `F6`**: Open draft in external editor (`$EDITOR` / nano / vim / emacs)
+* **`Ctrl+T`**: Translate draft subject and body via DeepL plugin
+* **`Ctrl+B`**: Polish and proofread draft via AI Assistant plugin
+* **`Ctrl+L`**: Check and fix grammar/spelling via LanguageTool plugin
 * **`Ctrl+G`**: Toggle OpenPGP Cleartext Signature (`[x] PGP Sign`)
 * **`Ctrl+E`**: Toggle OpenPGP Encryption (`[x] PGP Encrypt`)
 * **`Ctrl+S`**: Save message to `Drafts`
@@ -169,6 +185,9 @@ espressomail --db ~/mail/custom_store.db
 
 ## 📚 Documentation
 
+* **[Third-Party Plugin Development Guide & Tutorial](docs/PLUGIN_DEVELOPMENT.md)**: Step-by-step tutorial and reference for writing, testing, configuring, and packaging custom EspressoMail plugins.
+* **[Built-in Plugins & Architecture Reference](docs/PLUGINS.md)**: Overview of the plugin system and the 7 built-in plugins.
+* **[Plugin Roadmap](docs/PLUGIN_ROADMAP.md)**: Specifications for upcoming Phase 2 plugins (Git Patch Viewer, Task/Note Exporter, Quick Templates, Attachment Previewer).
 * **[Architecture & TEA Design](docs/architecture.md)**: How EspressoMail structures state, commands, SQLite persistence, JWZ threading, and protocol clients.
 * **[User Guide](docs/user_guide.md)**: Detailed walkthrough of account onboarding, fuzzy search operators, terminal image rendering (`chafa` / Sixel), Sieve filters, and PGP encryption.
 * **[Contributing Guide](CONTRIBUTING.md)**: Development workflow, running unit tests, and Conventional Commits guidelines.

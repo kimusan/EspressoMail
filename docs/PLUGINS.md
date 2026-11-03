@@ -259,35 +259,37 @@ data_file = data_dir / "index.json"
 EspressoMail's Preferences modal (`PreferencesModal`, accessible via `,` or menu) includes **Tab 5: Plugins**.
 
 ### Defining Settings Schema
-Plugins declare configurable settings in `metadata.settings_schema`:
+Plugins declare configurable settings in `metadata.settings_schema` as a dictionary:
 
 ```python
 PluginMetadata(
     id="my_plugin",
     name="My Plugin",
     version="1.0.0",
-    settings_schema=(
-        PluginSettingField(
-            key="api_key",
-            label="API Key",
-            field_type="password",
-            description="Authentication key",
-        ),
-        PluginSettingField(
-            key="format",
-            label="Format Mode",
-            field_type="choice",
-            choices=("Plain", "Markdown", "HTML"),
-            default="Markdown",
-        ),
-    ),
+    settings_schema={
+        "api_key": {
+            "type": "secret",
+            "label": "API Key",
+            "default": "",
+            "description": "Authentication key",
+        },
+        "format": {
+            "type": "choice",
+            "label": "Format Mode",
+            "default": "Markdown",
+            "options": ["Plain", "Markdown", "HTML"],
+            "description": "Output format mode",
+        },
+    },
 )
 ```
 
 In the **5. Plugins** tab:
-- Users can toggle any plugin on/off with `Space` or Enter.
-- Active plugin settings can be edited and cycled directly in the TUI.
-- Settings are committed to SQLite when saving preferences (`S` or click Save).
+- Users can cycle through installed plugins on Row 1 (`Select Plugin: ◀ ... ▶`) and toggle any plugin on/off on Row 2.
+- All settings defined in the selected plugin's `settings_schema` are dynamically rendered and editable directly in the TUI.
+- Settings are committed to SQLite when saving preferences (`Enter` / `Ctrl+S`).
+
+For a complete tutorial on building, testing, and packaging third-party plugins, see the **[Third-Party Plugin Development Guide](PLUGIN_DEVELOPMENT.md)**.
 
 ---
 
