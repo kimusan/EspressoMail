@@ -547,7 +547,7 @@ class TestPluginUIIntegration(BaseTestCase):
         view_text = modal.view(80, 24)
         self.assertIn("5. Plugins", view_text)
         self.assertIn("DeepL Translation", view_text)
-        self.assertIn("Default Target Langua:", view_text)
+        self.assertIn("Default Target Language:", view_text)
         self.assertIn("API Auth Key:", view_text)
 
         # Toggle enabled state (row 2)
@@ -563,6 +563,14 @@ class TestPluginUIIntegration(BaseTestCase):
         # Enter DeepL auth key
         modal.input_plugin_auth_key.value = "my-secret-key:fx"
 
+        # Cycle row 1 to switch to DMARC & Auth Inspector plugin and verify full labels
+        while modal.plugin_list[modal.plugin_idx].metadata.id != "dmarc_inspector":
+            modal._cycle_row(1, delta=1)
+        dmarc_view = modal.view(80, 24)
+        self.assertIn("DMARC & Auth Inspector", dmarc_view)
+        self.assertIn("Auto-Render DMARC Reports:", dmarc_view)
+        self.assertIn("Always Show Auth Details:", dmarc_view)
+
         # Cycle row 1 to switch to AI Email Assistant plugin
         while modal.plugin_list[modal.plugin_idx].metadata.id != "ai_assistant":
             modal._cycle_row(1, delta=1)
@@ -572,8 +580,8 @@ class TestPluginUIIntegration(BaseTestCase):
         self.assertIn("AI Provider:", ai_view)
         self.assertIn("API Base URL:", ai_view)
         self.assertIn("Model Name:", ai_view)
-        self.assertIn("API Key (OpenAI / Ant:", ai_view)
-        self.assertNotIn("Default Target Langua:", ai_view)
+        self.assertIn("API Key (OpenAI / Anthropic):", ai_view)
+        self.assertNotIn("Default Target Language:", ai_view)
 
         # Cycle AI provider (row 3: ollama -> openai) and set AI API key (row 6)
         modal._cycle_row(3, delta=1)
@@ -586,9 +594,9 @@ class TestPluginUIIntegration(BaseTestCase):
 
         lt_view = modal.view(80, 24)
         self.assertIn("LanguageTool Grammar Check", lt_view)
-        self.assertIn("LanguageTool API Endp:", lt_view)
+        self.assertIn("LanguageTool API Endpoint:", lt_view)
         self.assertIn("Language Code:", lt_view)
-        self.assertIn("API Key (Optional / P:", lt_view)
+        self.assertIn("API Key (Optional / Plus):", lt_view)
         modal.plugin_text_inputs[("languagetool", "api_key")].value = "lt-plus-key-99"
         modal.plugin_text_inputs[("languagetool", "language")].value = "en-GB"
 

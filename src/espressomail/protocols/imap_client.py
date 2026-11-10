@@ -32,6 +32,7 @@ from espressomail.models.entities import (
     split_folder_hierarchy,
     sanitize_terminal_text,
 )
+from espressomail.notifications import filter_notifiable_messages
 from espressomail.storage.database import LocalStore
 
 
@@ -993,10 +994,11 @@ class IMAPClient:
                 else:
                     store.save_messages(fetched)
                     new_msgs = fetched
-                self.last_newly_arrived = [
-                    m for m in new_msgs
-                    if not m.is_read and not m.is_draft and not m.is_trashed
-                ]
+                self.last_newly_arrived = filter_notifiable_messages(
+                    new_msgs,
+                    folder_name=folder_name,
+                    account_email=self.account.email,
+                )
                 count = len(new_msgs)
             store.refresh_folder_counts(self.account.id, folder_name)
         except Exception:

@@ -151,7 +151,7 @@ class UnsubscribePlugin(BasePlugin):
         settings_schema={
             "open_browser_fallback": {
                 "type": "bool",
-                "label": "Open Browser When Non-One-Click HTTP",
+                "label": "Open Non-One-Click in Browser",
                 "default": "false",
                 "description": "Open non-RFC-8058 HTTP unsubscribe links in system browser instead of background GET",
             },

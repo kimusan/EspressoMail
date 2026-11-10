@@ -218,13 +218,14 @@ class MenuBar(Model):
         self._compute_bounds()
 
     def _compute_bounds(self) -> None:
+        from espressomail.i18n import tr
         from espressomail.ui.icons import get_brand_label
 
         self._cat_bounds = []
         brand_prefix = get_brand_label(self.icon_mode)
         x = string_width(brand_prefix)
         for cat in self.categories:
-            label = f" {cat.title} ▾ "
+            label = f" {tr(cat.title)} ▾ "
             w = string_width(label)
             self._cat_bounds.append((x, x + w))
             x += w + 1
@@ -275,6 +276,7 @@ class MenuBar(Model):
                 return self, lambda: MenuActionMsg(chosen.action_id)
 
         elif isinstance(msg, MouseMsg):
+            self._compute_bounds()
             if msg.action == MouseAction.PRESS and msg.button == MouseButton.LEFT:
                 # Top bar row is y == 0
                 if msg.y == 0:
@@ -320,8 +322,10 @@ class MenuBar(Model):
 
     def view_bar(self, width: int, theme: Theme, right_status: str = "") -> str:
         """Render the single-line top application menu bar."""
+        from espressomail.i18n import tr
         from espressomail.ui.icons import normalize_icon_mode
 
+        self._compute_bounds()
         m = normalize_icon_mode(self.icon_mode)
         if m == "emoji":
             brand_text = " ☕\ufe0f EspressoMail "
@@ -341,7 +345,7 @@ class MenuBar(Model):
 
         cat_parts: list[str] = []
         for idx, cat in enumerate(self.categories):
-            label = f" {cat.title} ▾ "
+            label = f" {tr(cat.title)} ▾ "
             if self.is_open and idx == self.active_cat_idx:
                 part = (
                     Style()
@@ -362,7 +366,7 @@ class MenuBar(Model):
         left_cluster = brand + sep + " ".join(cat_parts)
         left_w = string_width(left_cluster)
 
-        right_text = f" {right_status}  [F10/m] Menu "
+        right_text = f" {right_status}  [F10/m] {tr('Menu')} "
         right_rendered = (
             Style()
             .foreground(theme.fg_secondary)
@@ -377,17 +381,20 @@ class MenuBar(Model):
 
     def view_dropdown(self, theme: Theme) -> tuple[str, int, int]:
         """Render the currently open drop-down menu box and return (box_str, x, y)."""
+        from espressomail.i18n import tr
         from espressomail.ui.icons import get_brand_label
 
+        self._compute_bounds()
         cat = self.categories[self.active_cat_idx]
         default_x = string_width(get_brand_label(self.icon_mode))
         drop_x = self._cat_bounds[self.active_cat_idx][0] if self._cat_bounds else default_x
-        inner_w = 34
+        inner_w = 36
         rows: list[str] = []
         for idx, item in enumerate(cat.items):
             sc = f"[{item.shortcut}]" if item.shortcut else ""
-            lbl_pad = max(1, inner_w - string_width(item.label) - string_width(sc) - 2)
-            line_txt = f" {item.label}{' ' * lbl_pad}{sc} "
+            item_lbl = tr(item.label)
+            lbl_pad = max(1, inner_w - string_width(item_lbl) - string_width(sc) - 2)
+            line_txt = f" {item_lbl}{' ' * lbl_pad}{sc} "
             if idx == self.active_item_idx:
                 rows.append(
                     Style()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 import re
@@ -35,6 +37,7 @@ from espresso.beans import (
     PaletteItem,
     StatusBar,
     StatusSection,
+    ToastDismissMsg,
     ToastLevel,
     ToastManager,
     Tree,
@@ -54,6 +57,7 @@ from espresso.crema import (
 
 from espressomail import __version__
 from espressomail.crypto.pgp import PGPManager
+from espressomail.i18n import get_language, normalize_language, set_language, tr
 from espressomail.keymaps import KeymapManager
 from espressomail.models.entities import (
     AccountConfig,
@@ -67,6 +71,8 @@ from espressomail.models.entities import (
     split_folder_hierarchy,
 )
 from espressomail.notifications import (
+    filter_notifiable_messages,
+    is_notifiable_folder,
     notify_new_messages,
     send_desktop_notification,
 )
@@ -212,7 +218,7 @@ class SyncProgressMsg(Msg):
     action: str  # "discovered_folders", "synced_folder", "sync_done"
     folder_name: str = ""
     new_messages: int = 0
-    newly_arrived_messages: tuple[EmailMessage, ...] = ()
+    newly_arrived_messages: tuple[EmailMessage, ...] | None = None
     total_synced: int = 0
     total_folders: int = 0
     step_index: int = 0
@@ -257,7 +263,7 @@ class ImapPushEventMsg(Msg):
     folder: str
     event_type: str  # "exists", "recent", "expunge", "timeout", "not_supported", "error"
     new_messages: int = 0
-    newly_arrived_messages: tuple[EmailMessage, ...] = ()
+    newly_arrived_messages: tuple[EmailMessage, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -284,6 +290,33 @@ def _fit_pane_lines(pane_str: str, target_h: int) -> str:
     return "\n".join(lines)
 
 
+class _TrackingToastManager(ToastManager):
+    """ToastManager subclass that caps visible toasts and records auto-dismiss commands."""
+
+    def __init__(self, cmd_sink: list[Cmd]) -> None:
+        super().__init__()
+        self._cmd_sink = cmd_sink
+
+    def add(
+        self,
+        message: str,
+        level: ToastLevel = ToastLevel.INFO,
+        duration: float = 3.0,
+    ) -> tuple[Any, Cmd]:
+        clean = sanitize_terminal_text(message, multiline=False).strip()
+        for prefix in ("✔ ", "⚠ ", "✖ ", "ℹ "):
+            if clean.startswith(prefix):
+                clean = clean[len(prefix):].strip()
+                break
+        if len(clean) > 68:
+            clean = clean[:67] + "…"
+        while len(self.toasts) >= 2:
+            self.toasts.pop(0)
+        item, dismiss_cmd = super().add(clean, level=level, duration=duration)
+        self._cmd_sink.append(dismiss_cmd)
+        return item, dismiss_cmd
+
+
 class EspressoMailApp(Model):
     """Root TEA Model orchestrating the 3-pane layout, splash, onboarding, menus, and modals."""
 
@@ -305,8 +338,10 @@ class EspressoMailApp(Model):
         self.image_renderer = TerminalImageRenderer(saved_img_mode)
 
         self.icon_mode = self.store.get_setting("icon_mode", "emoji")
+        self.language = set_language(self.store.get_setting("language", "en"))
         self.pgp = PGPManager()
-        self.toasts = ToastManager()
+        self._pending_toast_cmds: list[Cmd] = []
+        self.toasts = _TrackingToastManager(self._pending_toast_cmds)
         self.plugin_manager = PluginManager(self.store)
         self.menu_bar = MenuBar(
             categories=build_menu_categories(self.plugin_manager),
@@ -746,13 +781,13 @@ class EspressoMailApp(Model):
         unified_counts = self.store.get_unified_counts()
 
         unified_defs = [
-            ("INBOX", "Unified Inbox", get_folder_icon("UNIFIED_INBOX", mode=self.icon_mode)),
-            ("All Unread", "All Unread", get_folder_icon("ALL_UNREAD", mode=self.icon_mode)),
-            ("Starred", "All Starred", get_folder_icon("STARRED", mode=self.icon_mode)),
-            ("Drafts", "All Drafts", get_folder_icon("DRAFTS", mode=self.icon_mode)),
-            ("Sent", "All Sent", get_folder_icon("SENT", mode=self.icon_mode)),
-            ("Archive", "All Archive", get_folder_icon("ARCHIVE", mode=self.icon_mode)),
-            ("Trash", "All Trash", get_folder_icon("TRASH", mode=self.icon_mode)),
+            ("INBOX", tr("Unified Inbox"), get_folder_icon("UNIFIED_INBOX", mode=self.icon_mode)),
+            ("All Unread", tr("All Unread"), get_folder_icon("ALL_UNREAD", mode=self.icon_mode)),
+            ("Starred", tr("All Starred"), get_folder_icon("STARRED", mode=self.icon_mode)),
+            ("Drafts", tr("All Drafts"), get_folder_icon("DRAFTS", mode=self.icon_mode)),
+            ("Sent", tr("All Sent"), get_folder_icon("SENT", mode=self.icon_mode)),
+            ("Archive", tr("All Archive"), get_folder_icon("ARCHIVE", mode=self.icon_mode)),
+            ("Trash", tr("All Trash"), get_folder_icon("TRASH", mode=self.icon_mode)),
         ]
         unified_children: list[TreeNode] = []
         for fname, label, icon in unified_defs:
@@ -780,13 +815,14 @@ class EspressoMailApp(Model):
         unified_header_icon = (
             "🌐\ufe0f" if self.icon_mode == "emoji" else ("▪ " if self.icon_mode == "unicode" else "")
         )
+        unified_header_label = tr("UNIFIED MAILBOXES")
         top_nodes.append(
             TreeNode(
-                label="UNIFIED MAILBOXES",
+                label=unified_header_label,
                 value=FolderTreeRow(
                     account_id="*",
                     folder_name="",
-                    label="UNIFIED MAILBOXES",
+                    label=unified_header_label,
                     icon=unified_header_icon,
                     is_header=True,
                     has_children=True,
@@ -1006,7 +1042,7 @@ class EspressoMailApp(Model):
                 .italic(True)
                 .foreground(self.theme.fg_muted)
                 .background(self.theme.bg_primary)
-                .render("  No email selected in this folder.")
+                .render(tr("  No email selected in this folder."))
             )
             return
 
@@ -1015,7 +1051,7 @@ class EspressoMailApp(Model):
         cache_key = (
             f"{m.id}|{m.is_read}:{m.is_starred}:{m.pgp_status.value}:"
             f"{self.theme.id}:{self.image_renderer.backend.value}:"
-            f"{self.show_raw_headers}:{self.icon_mode}:{reader_w}"
+            f"{self.show_raw_headers}:{self.icon_mode}:{self.language}:{reader_w}"
         )
         if not force and cache_key == self._last_rendered_msg_key:
             return
@@ -1043,12 +1079,65 @@ class EspressoMailApp(Model):
         else:
             self.reader_viewport.y_offset = 0
 
+    def _notify_toast(
+        self,
+        message: str,
+        level: ToastLevel = ToastLevel.INFO,
+        duration: float = 3.0,
+    ) -> Cmd:
+        """Display a transient toast notification and schedule its auto-dismiss timer."""
+        clean = sanitize_terminal_text(message, multiline=False).strip()
+        for prefix in ("✔ ", "⚠ ", "✖ ", "ℹ "):
+            if clean.startswith(prefix):
+                clean = clean[len(prefix):].strip()
+                break
+        if len(clean) > 68:
+            clean = clean[:67] + "…"
+        while len(self.toasts.toasts) >= 2:
+            self.toasts.toasts.pop(0)
+        _, dismiss_cmd = self.toasts.add(clean, level=level, duration=duration)
+        self._pending_toast_cmds.append(dismiss_cmd)
+        return dismiss_cmd
+
     # ------------------------------------------------------------------
     # TEA Update Loop
     # ------------------------------------------------------------------
 
     def update(self, msg: Msg) -> tuple[EspressoMailApp, Cmd | None]:
         """Process all TEA messages deterministically."""
+        self._pending_toast_cmds.clear()
+        orig_update = self._update_inner
+        model, cmd = orig_update(msg)
+        if self._pending_toast_cmds:
+            t_cmds = list(self._pending_toast_cmds)
+            self._pending_toast_cmds.clear()
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                if cmd is None:
+                    return model, batch(*t_cmds) if len(t_cmds) > 1 else t_cmds[0]
+                if not inspect.iscoroutinefunction(cmd) and callable(cmd):
+                    for tc in t_cmds:
+                        if callable(tc):
+                            loop.create_task(self._schedule_bg_toast_dismiss(tc))
+                    return model, cmd
+                return model, batch(cmd, *t_cmds)
+        return model, cmd
+
+    async def _schedule_bg_toast_dismiss(self, dismiss_cmd: Cmd) -> None:
+        try:
+            if callable(dismiss_cmd):
+                res = dismiss_cmd()
+                if inspect.isawaitable(res):
+                    msg = await res
+                    if isinstance(msg, ToastDismissMsg):
+                        self.toasts.dismiss(msg.toast_id)
+        except Exception:
+            pass
+
+    def _update_inner(self, msg: Msg) -> tuple[EspressoMailApp, Cmd | None]:
         # 1. Window Resize
         if isinstance(msg, WindowSizeMsg):
             self.width = max(80, msg.width)
@@ -1057,6 +1146,9 @@ class EspressoMailApp(Model):
             return self, None
 
         # 2. Toast notifications auto-dismiss
+        if isinstance(msg, ToastDismissMsg):
+            self.toasts, _ = self.toasts.update(msg)
+            return self, None
         self.toasts, _ = self.toasts.update(msg)
 
         # 3. Plugin messages & TEA background command completions
@@ -1208,6 +1300,9 @@ class EspressoMailApp(Model):
             if getattr(msg, "icon_mode", None):
                 self.icon_mode = msg.icon_mode
                 self.menu_bar.set_icon_mode(self.icon_mode)
+            if getattr(msg, "language", None):
+                self.language = set_language(msg.language)
+                self.menu_bar._compute_bounds()
             if hasattr(self, "plugin_manager") and self.plugin_manager:
                 self.menu_bar.reload_categories(build_menu_categories(self.plugin_manager))
                 self.command_palette = self._build_command_palette()
@@ -1215,8 +1310,9 @@ class EspressoMailApp(Model):
             self.refresh_data()
             self.status_message = (
                 f"✔ Saved preferences: theme={msg.theme}, renderer={msg.image_backend}, "
-                f"batch={msg.fetch_batch_size}, auto-sync={msg.auto_sync_interval}s, push={msg.imap_push_enabled}, keymap={getattr(msg, 'keymap_preset', 'default')}"
+                f"batch={msg.fetch_batch_size}, auto-sync={msg.auto_sync_interval}s, push={msg.imap_push_enabled}, keymap={getattr(msg, 'keymap_preset', 'default')}, lang={self.language}"
             )
+            self._notify_toast(tr("Saved preferences"), level=ToastLevel.SUCCESS)
             cmds: list[Cmd] = []
             if self.auto_sync_interval > 0 and (old_sync_interval != self.auto_sync_interval or not self.is_syncing):
                 cmds.append(tick(float(self.auto_sync_interval), AutoSyncTickMsg()))
@@ -1232,10 +1328,12 @@ class EspressoMailApp(Model):
             self.refresh_data()
             if msg.error and msg.found_count == 0:
                 self.status_message = f"⚠ Remote search error: {msg.error}"
+                self._notify_toast(f"Remote search error: {msg.error}", level=ToastLevel.WARNING)
                 if isinstance(self.active_modal, SearchModal):
                     self.active_modal.status_msg = f"⚠ Remote search failed: {msg.error}"
             else:
                 self.status_message = f"✔ Remote search completed: {msg.found_count} messages synced."
+                self._notify_toast(f"Remote search completed: {msg.found_count} messages synced", level=ToastLevel.SUCCESS)
                 if isinstance(self.active_modal, SearchModal):
                     self.active_modal.status_msg = f"✔ Remote search returned {msg.found_count} messages."
                     self.active_modal._refresh_results()
@@ -1244,9 +1342,15 @@ class EspressoMailApp(Model):
         # 6. Active Modal Dialogs
         if self.active_modal is not None:
             if isinstance(msg, ModalClosedMsg):
+                set_language(self.language)
+                self.menu_bar._compute_bounds()
                 self.active_modal = None
                 if msg.status_note:
                     self.status_message = msg.status_note
+                    note_lower = msg.status_note.lower()
+                    if not note_lower.startswith(("closed ", "update notice dismissed")):
+                        lvl = ToastLevel.SUCCESS if msg.status_note.startswith("✔") else (ToastLevel.WARNING if msg.status_note.startswith("⚠") else ToastLevel.INFO)
+                        self._notify_toast(msg.status_note, level=lvl)
                 self.refresh_data()
                 if self.pending_update_release and self.pending_update_release.is_newer:
                     rel = self.pending_update_release
@@ -1273,6 +1377,7 @@ class EspressoMailApp(Model):
                 self.refresh_data()
                 remaining = len(self.message_rows)
                 self.status_message = f"Moved message to '{msg.target_folder}' ({remaining} remaining)."
+                self._notify_toast(self.status_message, level=ToastLevel.INFO)
                 adv_cmd = self._on_message_selection_changed(mark_read=True)
                 sync_cmd = self._make_move_msg_cmd(msg.account_id, msg.source_folder, msg.uid, msg.target_folder)
                 cmds = [c for c in (adv_cmd, sync_cmd) if c is not None]
@@ -1318,21 +1423,33 @@ class EspressoMailApp(Model):
         if isinstance(msg, FlagSyncedMsg):
             if not msg.success and msg.error:
                 self.status_message = f"Warning: could not sync flag to server: {msg.error}"
+                self._notify_toast(self.status_message, level=ToastLevel.WARNING)
             return self, None
 
         # 7. Background Sync progress & steps
         if isinstance(msg, SyncProgressMsg):
-            # Trigger desktop notification ONLY for newly arrived messages if enabled
-            if self.desktop_notifications and (msg.newly_arrived_messages or msg.new_messages > 0):
-                if msg.newly_arrived_messages:
-                    to_notify = [m for m in msg.newly_arrived_messages if not m.is_read and not m.is_draft and not m.is_trashed][:5]
+            # Trigger desktop notification ONLY for newly arrived messages in incoming/notifiable folders
+            if (
+                self.desktop_notifications
+                and is_notifiable_folder(msg.folder_name)
+                and (msg.newly_arrived_messages or msg.new_messages > 0)
+            ):
+                acc_obj = self.store.get_account(msg.account_id) if msg.account_id else None
+                acc_email = acc_obj.email if acc_obj else ""
+                if msg.newly_arrived_messages is not None:
+                    raw_candidates = list(msg.newly_arrived_messages)
                 else:
-                    # Fallback for manual/mocked SyncProgressMsg with new_messages > 0
-                    to_notify = self.store.list_messages(
+                    # Fallback for manual/mocked SyncProgressMsg where newly_arrived_messages was omitted
+                    raw_candidates = self.store.list_messages(
                         account_id=msg.account_id,
                         folder=msg.folder_name,
                         limit=min(5, msg.new_messages),
                     )
+                to_notify = filter_notifiable_messages(
+                    raw_candidates,
+                    folder_name=msg.folder_name,
+                    account_email=acc_email,
+                )[:5]
                 if to_notify:
                     notify_new_messages(
                         to_notify,
@@ -1431,6 +1548,8 @@ class EspressoMailApp(Model):
             self.is_syncing = False
             self.sync_progress_text = ""
             self.status_message = msg.message
+            lvl = ToastLevel.WARNING if msg.message.startswith(("⚠", "Could not")) else ToastLevel.SUCCESS
+            self._notify_toast(msg.message, level=lvl)
             self.refresh_data()
             return self, None
 
@@ -1439,6 +1558,8 @@ class EspressoMailApp(Model):
             self.is_syncing = False
             self.sync_progress_text = ""
             self.status_message = msg.message
+            lvl = ToastLevel.WARNING if msg.message.startswith(("⚠", "Could not")) else ToastLevel.INFO
+            self._notify_toast(msg.message, level=lvl)
             self.refresh_data()
             return self, None
 
@@ -1446,15 +1567,23 @@ class EspressoMailApp(Model):
         if isinstance(msg, ImapPushEventMsg):
             if msg.new_messages > 0:
                 self.status_message = f"⚡ Instant Push: {msg.new_messages} new message(s) in {msg.account_name}/{msg.folder}"
-                if self.desktop_notifications:
-                    if msg.newly_arrived_messages:
-                        to_notify = [m for m in msg.newly_arrived_messages if not m.is_read and not m.is_draft and not m.is_trashed][:5]
+                self._notify_toast(self.status_message, level=ToastLevel.INFO)
+                if self.desktop_notifications and is_notifiable_folder(msg.folder):
+                    acc_obj = self.store.get_account(msg.account_id) if msg.account_id else None
+                    acc_email = acc_obj.email if acc_obj else ""
+                    if msg.newly_arrived_messages is not None:
+                        raw_candidates = list(msg.newly_arrived_messages)
                     else:
-                        to_notify = self.store.list_messages(
+                        raw_candidates = self.store.list_messages(
                             account_id=msg.account_id,
                             folder=msg.folder,
                             limit=min(5, msg.new_messages),
                         )
+                    to_notify = filter_notifiable_messages(
+                        raw_candidates,
+                        folder_name=msg.folder,
+                        account_email=acc_email,
+                    )[:5]
                     if to_notify:
                         notify_new_messages(
                             to_notify,
@@ -1561,6 +1690,7 @@ class EspressoMailApp(Model):
             self.store.set_setting("theme", nxt_theme.id)
             self._update_reader_viewport(force=True)
             self.status_message = f"Theme switched to {nxt_theme.name}."
+            self._notify_toast(self.status_message, level=ToastLevel.INFO)
             return self, None
 
         # Plugin global hotkeys (e.g. Ctrl+T for translation on selected email)
@@ -1693,6 +1823,8 @@ class EspressoMailApp(Model):
             return self, None
 
         if self.focused_pane == "reader":
+            if k in ("y", "Y"):
+                return self._execute_action("copy_message")
             if hasattr(self, "plugin_manager") and self.plugin_manager:
                 plugin_keys = self.plugin_manager.get_keybindings()
                 if k.lower() in plugin_keys:
@@ -2178,6 +2310,27 @@ class EspressoMailApp(Model):
             self.active_modal = AddressBookModal(self.store, self.theme)
             return self, None
 
+        if action_id == "copy_message":
+            m = self.selected_message
+            if m:
+                from espresso.utils import copy_to_clipboard
+
+                text_to_copy = m.body_text or m.snippet or m.subject
+                copied = copy_to_clipboard(text_to_copy)
+                msg_str = (
+                    tr("Message body copied to clipboard.")
+                    if copied
+                    else tr("Failed to copy to clipboard.")
+                )
+                self.status_message = msg_str
+                self._notify_toast(
+                    msg_str,
+                    level=ToastLevel.SUCCESS if copied else ToastLevel.WARNING,
+                )
+            else:
+                self.status_message = tr("No message selected to copy.")
+            return self, None
+
         if action_id == "test_notification":
             sent = send_desktop_notification(
                 title="EspressoMail Test Notification",
@@ -2186,8 +2339,10 @@ class EspressoMailApp(Model):
             )
             if sent:
                 self.status_message = "✔ Test desktop notification dispatched."
+                self._notify_toast("Test desktop notification dispatched", level=ToastLevel.SUCCESS)
             else:
                 self.status_message = "⚠ Could not send desktop notification (daemon or tool not found)."
+                self._notify_toast("Could not send desktop notification", level=ToastLevel.WARNING)
             return self, None
 
         if action_id == "sieve_filters":
@@ -2221,6 +2376,7 @@ class EspressoMailApp(Model):
                 threading_enabled=self.threading_enabled,
                 show_raw_headers=self.show_raw_headers,
                 icon_mode=self.icon_mode,
+                language=self.language,
                 plugin_manager=self.plugin_manager,
             )
             return self, None
@@ -2243,6 +2399,7 @@ class EspressoMailApp(Model):
             self.message_cursor = 0
             self.refresh_data()
             self.status_message = "Switched to Unified Inbox (all accounts)."
+            self._notify_toast("Switched to Unified Inbox", level=ToastLevel.INFO)
             return self, None
 
         if action_id == "toggle_unread_filter":
@@ -2256,6 +2413,7 @@ class EspressoMailApp(Model):
                 self.status_message = f"Showing unread only in '{folder_label}' ({len(self.message_rows)} unread — Ctrl+U to clear)"
             else:
                 self.status_message = f"Showing all messages in '{folder_label}' ({len(self.message_rows)} total)"
+            self._notify_toast(self.status_message, level=ToastLevel.INFO)
             return self, cmd
 
         if action_id == "toggle_threading":
@@ -2264,6 +2422,7 @@ class EspressoMailApp(Model):
             self.refresh_data()
             state_str = "enabled" if self.threading_enabled else "disabled"
             self.status_message = f"Conversation threading {state_str}."
+            self._notify_toast(self.status_message, level=ToastLevel.INFO)
             return self, None
 
         if action_id == "cycle_image_mode":
@@ -2271,6 +2430,7 @@ class EspressoMailApp(Model):
             self.store.set_setting("image_backend", new_mode.value)
             self._update_reader_viewport(force=True)
             self.status_message = f"Terminal image renderer set to: {self.image_renderer.label}"
+            self._notify_toast(self.status_message, level=ToastLevel.INFO)
             return self, None
 
         if action_id == "toggle_headers":
@@ -2279,6 +2439,7 @@ class EspressoMailApp(Model):
             self.status_message = (
                 "Showing raw RFC 5322 headers." if self.show_raw_headers else "Hiding raw RFC 5322 headers."
             )
+            self._notify_toast(self.status_message, level=ToastLevel.INFO)
             return self, None
 
         if action_id == "widen_folder_list":
@@ -2334,6 +2495,7 @@ class EspressoMailApp(Model):
             self.store.set_setting("custom_folder_w", "")
             self._update_reader_viewport(force=True)
             self.status_message = "Splitters reset to default responsive widths."
+            self._notify_toast(self.status_message, level=ToastLevel.INFO)
             return self, None
 
         if action_id == "compose":
@@ -2351,6 +2513,7 @@ class EspressoMailApp(Model):
             m = self.selected_message
             if not m:
                 self.status_message = "No message selected."
+                self._notify_toast("No message selected", level=ToastLevel.WARNING)
                 return self, None
             return self._open_reply_or_forward(m, mode=action_id)
 
@@ -2358,16 +2521,19 @@ class EspressoMailApp(Model):
             m = self.selected_message
             if not m:
                 self.status_message = "No message selected."
+                self._notify_toast("No message selected", level=ToastLevel.WARNING)
                 return self, None
             ev = find_calendar_event(m)
             if not ev:
                 self.status_message = "Selected message does not contain a calendar invitation."
+                self._notify_toast(self.status_message, level=ToastLevel.WARNING)
                 return self, None
             acc = self.store.get_account(m.account_id) or (
                 self.store.list_accounts()[0] if self.store.list_accounts() else None
             )
             if not acc:
                 self.status_message = "No configured account found."
+                self._notify_toast(self.status_message, level=ToastLevel.WARNING)
                 return self, None
             self.active_modal = RSVPModal(
                 account=acc,
@@ -2385,6 +2551,7 @@ class EspressoMailApp(Model):
                 m.is_starred = new_star
                 self.refresh_data()
                 self.status_message = "★ Starred message." if new_star else "Removed star."
+                self._notify_toast(self.status_message, level=ToastLevel.INFO)
                 cmd = self._make_flag_sync_cmd(m.account_id, m.folder, m.uid, r"\Flagged", new_star)
                 return self, cmd
             return self, None
@@ -2393,6 +2560,7 @@ class EspressoMailApp(Model):
             m = self.selected_message
             if not m or not m.sender_email:
                 self.status_message = "No message selected or sender has no email."
+                self._notify_toast(self.status_message, level=ToastLevel.WARNING)
                 return self, None
             existing = self.store.get_contact_by_email(m.sender_email)
             if existing:
@@ -2401,6 +2569,7 @@ class EspressoMailApp(Model):
                 existing.frequency += 1
                 self.store.save_contact(existing)
                 self.status_message = f"Updated contact: {existing.formatted}"
+                self._notify_toast(self.status_message, level=ToastLevel.SUCCESS)
             else:
                 new_contact = Contact(
                     id=f"contact:{uuid.uuid4().hex[:10]}",
@@ -2410,6 +2579,7 @@ class EspressoMailApp(Model):
                 )
                 self.store.save_contact(new_contact)
                 self.status_message = f"Added contact: {new_contact.formatted}"
+                self._notify_toast(self.status_message, level=ToastLevel.SUCCESS)
             return self, None
 
         if action_id == "toggle_folder_subscription":
@@ -2420,6 +2590,7 @@ class EspressoMailApp(Model):
                     self.refresh_data()
                     state_str = "Subscribed to" if new_sub else "Unsubscribed from"
                     self.status_message = f"{state_str} '{row.label}'"
+                    self._notify_toast(self.status_message, level=ToastLevel.INFO)
                     acc = self.store.get_account(row.account_id)
                     if acc and acc.imap_password:
                         target_folder = row.folder_name
@@ -2442,6 +2613,7 @@ class EspressoMailApp(Model):
                     return self, None
                 else:
                     self.status_message = "Cannot toggle subscription for this item."
+                    self._notify_toast(self.status_message, level=ToastLevel.WARNING)
             return self, None
 
         if action_id == "toggle_read":
@@ -2452,6 +2624,7 @@ class EspressoMailApp(Model):
                 m.is_read = new_read
                 self.refresh_data()
                 self.status_message = "Marked as read." if new_read else "Marked as unread."
+                self._notify_toast(self.status_message, level=ToastLevel.INFO)
                 cmd = self._make_flag_sync_cmd(m.account_id, m.folder, m.uid, r"\Seen", new_read)
                 return self, cmd
             return self, None
@@ -2482,6 +2655,7 @@ class EspressoMailApp(Model):
                 else:
                     msg_text = f"Archived {len(valid_targets)} messages. Inbox zero!" if remaining == 0 else f"Archived {len(valid_targets)} messages ({remaining} remaining)."
                 self.status_message = msg_text
+                self._notify_toast(msg_text, level=ToastLevel.INFO)
                 adv_cmd = self._on_message_selection_changed(mark_read=True)
                 if adv_cmd is not None:
                     cmds.append(adv_cmd)
@@ -2518,6 +2692,7 @@ class EspressoMailApp(Model):
                 else:
                     msg_text = f"Moved {len(valid_targets)} messages to Trash. Inbox zero!" if remaining == 0 else f"Moved {len(valid_targets)} messages to Trash ({remaining} remaining)."
                 self.status_message = msg_text
+                self._notify_toast(msg_text, level=ToastLevel.INFO)
                 adv_cmd = self._on_message_selection_changed(mark_read=True)
                 if adv_cmd is not None:
                     cmds.append(adv_cmd)
@@ -2550,6 +2725,7 @@ class EspressoMailApp(Model):
                 else:
                     msg_text = f"Marked {len(valid_targets)} messages as Spam. Inbox zero!" if remaining == 0 else f"Marked {len(valid_targets)} messages as Spam ({remaining} remaining)."
                 self.status_message = msg_text
+                self._notify_toast(msg_text, level=ToastLevel.INFO)
                 adv_cmd = self._on_message_selection_changed(mark_read=True)
                 if adv_cmd is not None:
                     cmds.append(adv_cmd)
@@ -2560,6 +2736,7 @@ class EspressoMailApp(Model):
             m = self.selected_message
             if not m:
                 self.status_message = "No message selected to move."
+                self._notify_toast(self.status_message, level=ToastLevel.WARNING)
                 return self, None
             acc = self.store.get_account(m.account_id) or (
                 self.store.list_accounts()[0] if self.store.list_accounts() else None
@@ -2578,12 +2755,14 @@ class EspressoMailApp(Model):
             deleted_cnt = self.store.empty_trash(self.active_account_id)
             self.refresh_data()
             self.status_message = f"Emptied Trash ({deleted_cnt} messages permanently removed)."
+            self._notify_toast(self.status_message, level=ToastLevel.INFO)
             return self, None
 
         if action_id == "save_attachments":
             m = self.selected_message
             if not m or not m.attachments:
                 self.status_message = "Selected message has no attachments to download."
+                self._notify_toast(self.status_message, level=ToastLevel.WARNING)
                 return self, None
             self.active_modal = DownloadAttachmentsModal(
                 attachments=m.attachments,
@@ -2595,6 +2774,7 @@ class EspressoMailApp(Model):
 
         if action_id == "fetch_more":
             self.status_message = "Fetching older messages from server..."
+            self._notify_toast(self.status_message, level=ToastLevel.INFO)
             return self, self._fetch_more_messages_cmd
 
         if action_id == "sync_folder":
@@ -2603,6 +2783,7 @@ class EspressoMailApp(Model):
         if action_id == "sync_all":
             if self.is_syncing:
                 self.status_message = "⟳ Synchronization already in progress in background."
+                self._notify_toast("Synchronization already in progress", level=ToastLevel.INFO)
                 return self, None
             self.is_syncing = True
             self.sync_progress_text = "Starting sync..."
@@ -2614,11 +2795,13 @@ class EspressoMailApp(Model):
                 self.auto_sync_interval = 0
                 self.store.set_setting("auto_sync_interval", "0")
                 self.status_message = "Auto-sync disabled (manual sync only via 'S')."
+                self._notify_toast(self.status_message, level=ToastLevel.INFO)
                 return self, None
             else:
                 self.auto_sync_interval = 300
                 self.store.set_setting("auto_sync_interval", "300")
                 self.status_message = "Auto-sync enabled (interval: 5 minutes)."
+                self._notify_toast(self.status_message, level=ToastLevel.INFO)
                 return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
 
         if action_id == "toggle_imap_push":
@@ -2626,13 +2809,16 @@ class EspressoMailApp(Model):
             self.store.set_setting("imap_push_enabled", "1" if self.imap_push_enabled else "0")
             if self.imap_push_enabled:
                 self.status_message = "⚡ IMAP Push (IDLE) enabled: incoming messages arrive instantly."
+                self._notify_toast("IMAP Push (IDLE) enabled", level=ToastLevel.INFO)
                 return self, self._make_idle_push_cmd()
             else:
                 self.status_message = "IMAP Push (IDLE) disabled: relying on periodic auto-sync timer."
+                self._notify_toast("IMAP Push (IDLE) disabled", level=ToastLevel.INFO)
                 return self, None
 
         if action_id == "check_updates":
             self.status_message = "Checking GitHub for newer releases..."
+            self._notify_toast(self.status_message, level=ToastLevel.INFO)
             return self, self._make_check_update_cmd(manual=True)
 
         if hasattr(self, "plugin_manager") and self.plugin_manager:
@@ -2785,6 +2971,7 @@ class EspressoMailApp(Model):
             self.active_modal = None
             self.refresh_data()
             self.status_message = f"📝 Saved draft '{msg.subject}'."
+            self._notify_toast(f"Saved draft '{msg.subject}'", level=ToastLevel.SUCCESS)
             return self, None
 
         # Remove draft if this message was previously saved as a draft
@@ -2809,6 +2996,7 @@ class EspressoMailApp(Model):
         self.active_modal = None
         self.refresh_data()
         self.status_message = f"📤 {smtp_note}: '{msg.subject}' to {', '.join(msg.to_addrs) or '(no recipient)'}"
+        self._notify_toast(self.status_message, level=ToastLevel.SUCCESS)
         return self, None
 
     def _handle_rsvp_submitted(
@@ -2840,6 +3028,7 @@ class EspressoMailApp(Model):
         }.get(msg.partstat, "Accepted")
         dest = msg.event.organizer_email or msg.orig_message.sender_email or "organizer"
         self.status_message = f"📅 RSVP {status_label} ({smtp_note}) to {dest}"
+        self._notify_toast(self.status_message, level=ToastLevel.SUCCESS)
         return self, None
 
     def _jump_to_message(self, target: EmailMessage) -> tuple[EspressoMailApp, Cmd | None]:
@@ -3224,11 +3413,13 @@ class EspressoMailApp(Model):
                 except Exception as exc:
                     errors.append(f"{account.email}: {exc}")
 
-            if newly_arrived and self.desktop_notifications:
-                to_notify = [
-                    m for m in newly_arrived
-                    if not m.is_read and not m.is_draft and not m.is_trashed
-                ][:5]
+            if newly_arrived and self.desktop_notifications and is_notifiable_folder(folder_to_sync):
+                acc_email = accounts[0].email if len(accounts) == 1 else ""
+                to_notify = filter_notifiable_messages(
+                    newly_arrived,
+                    folder_name=folder_to_sync,
+                    account_email=acc_email,
+                )[:5]
                 if to_notify:
                     notify_new_messages(
                         to_notify,
@@ -3498,7 +3689,7 @@ class EspressoMailApp(Model):
         lines: list[str] = []
 
         if not visible:
-            no_msg_text = "  (No unread messages in folder — Ctrl+U to show all)" if self.unread_only_filter else "  (No messages in folder)"
+            no_msg_text = tr("  (No unread messages in folder — Ctrl+U to show all)") if self.unread_only_filter else tr("  (No messages in folder)")
             lines.append(
                 Style()
                 .italic(True)
@@ -3566,7 +3757,7 @@ class EspressoMailApp(Model):
                 tree_indent = " " * min(4, row.depth * 2) if self.threading_enabled else ""
                 subj_indent = f"   {tree_indent}"
                 subj_avail = max(6, inner_w - string_width(subj_indent))
-                clean_subj = sanitize_terminal_text(m.subject or "(No Subject)", multiline=False)
+                clean_subj = sanitize_terminal_text(m.subject or tr("(No Subject)"), multiline=False)
                 subj_txt = truncate_ansi(clean_subj, subj_avail)
                 line2_raw = f"{subj_indent}{subj_txt}"
                 line2_clean = sanitize_terminal_text(line2_raw, multiline=False)
@@ -3639,7 +3830,7 @@ class EspressoMailApp(Model):
                     )
 
             if len(lines) < inner_h:
-                fetch_hint = truncate_ansi("  ─── [M] Fetch more from server ───", inner_w)
+                fetch_hint = truncate_ansi(tr("  ─── [M] Fetch more from server ───"), inner_w)
                 lines.append(
                     Style()
                     .foreground(self.theme.fg_muted)
@@ -3648,13 +3839,13 @@ class EspressoMailApp(Model):
                     .render(fetch_hint)
                 )
 
-        folder_label = "Unified" if self.active_account_id == "*" else self.active_account_id
+        folder_label = tr("Unified") if self.active_account_id == "*" else self.active_account_id
         folder_path = (
             self.active_folder
             if self.active_account_id == "*"
             else " / ".join(split_folder_hierarchy(self.active_folder))
         )
-        filter_badge = " [UNREAD ONLY]" if self.unread_only_filter else ""
+        filter_badge = tr(" [UNREAD ONLY]") if self.unread_only_filter else ""
         if self.icon_mode == "emoji":
             pane_title = f"✉️ {folder_path} ({folder_label}){filter_badge}"
         elif self.icon_mode == "unicode":
@@ -3680,12 +3871,13 @@ class EspressoMailApp(Model):
             Style().background(self.theme.bg_primary).foreground(self.theme.fg_primary)
         )
         m = self.selected_message
+        reading_label = tr("Reading Pane")
         if self.icon_mode == "emoji":
-            title_base = "📖\ufe0f Reading Pane"
+            title_base = f"📖\ufe0f {reading_label}"
         elif self.icon_mode == "unicode":
-            title_base = "≡ Reading Pane"
+            title_base = f"≡ {reading_label}"
         else:
-            title_base = "Reading Pane"
+            title_base = reading_label
 
         title = title_base
         if m:
@@ -3706,7 +3898,7 @@ class EspressoMailApp(Model):
         ).render(self.reader_viewport.view())
 
     def _render_status_bar(self) -> str:
-        pane_badge = self.focused_pane.upper()
+        pane_badge = tr(self.focused_pane.upper())
         left_sections = [
             StatusSection(
                 f" {pane_badge} ",
@@ -3720,7 +3912,7 @@ class EspressoMailApp(Model):
         if self.is_syncing:
             left_sections.append(
                 StatusSection(
-                    " ⟳ SYNCING ",
+                    f" ⟳ {tr('SYNCING')} ",
                     style=Style()
                     .bold(True)
                     .foreground(self.theme.bg_primary)
@@ -3728,14 +3920,33 @@ class EspressoMailApp(Model):
                     priority=4,
                 )
             )
-        clean_status = sanitize_terminal_text(self.status_message, multiline=False)
-        left_sections.append(
-            StatusSection(
-                f" {clean_status} ",
-                style=Style().foreground(self.theme.fg_primary),
-                priority=2,
+            if self.sync_progress_text:
+                clean_prog = sanitize_terminal_text(self.sync_progress_text, multiline=False)
+                left_sections.append(
+                    StatusSection(
+                        f" {clean_prog} ",
+                        style=Style().foreground(self.theme.fg_primary),
+                        priority=2,
+                    )
+                )
+        else:
+            folder_ctx = (
+                tr("Unified Inbox")
+                if self.active_account_id == "*" and self.active_folder == "INBOX"
+                else (
+                    self.active_folder
+                    if self.active_account_id == "*"
+                    else " / ".join(split_folder_hierarchy(self.active_folder))
+                )
             )
-        )
+            clean_ctx = sanitize_terminal_text(folder_ctx, multiline=False)
+            left_sections.append(
+                StatusSection(
+                    f" {clean_ctx} ",
+                    style=Style().foreground(self.theme.fg_primary),
+                    priority=2,
+                )
+            )
         k_comp = self.keymap.get_display_key("compose", "c")
         k_help = self.keymap.get_display_key("show_shortcuts", "?")
         if self.focused_pane in ("messages", "reader"):
@@ -3744,13 +3955,19 @@ class EspressoMailApp(Model):
             k_star = self.keymap.get_display_key("toggle_star", "s")
             k_read = self.keymap.get_display_key("toggle_read", "u")
             k_move = self.keymap.get_display_key("move_to_folder", "v")
-            center_text = f"[{k_comp}]Compose [{k_arch}]Archive [{k_trash}]Trash [{k_star}]Star [{k_read}]Read [{k_move}]Move [{k_help}]Help"
+            center_text = (
+                f"[{k_comp}]{tr('Compose')} [{k_arch}]{tr('Archive')} [{k_trash}]{tr('Trash')} "
+                f"[{k_star}]{tr('Star')} [{k_read}]{tr('Read')} [{k_move}]{tr('Move')} [{k_help}]{tr('Help')}"
+            )
         else:
             k_search = self.keymap.get_display_key("fuzzy_search", "/")
             k_sync = "r"
             k_thread = self.keymap.get_display_key("toggle_threading", "t")
             k_img = self.keymap.get_display_key("cycle_image_mode", "i")
-            center_text = f"[{k_comp}]Compose [{k_search}]Search [{k_sync}]Sync [{k_thread}]Threads [{k_img}]Img [{k_help}]Help"
+            center_text = (
+                f"[{k_comp}]{tr('Compose')} [{k_search}]{tr('Search')} [{k_sync}]{tr('Sync')} "
+                f"[{k_thread}]{tr('Threads')} [{k_img}]{tr('Img')} [{k_help}]{tr('Help')}"
+            )
         bar = StatusBar(
             left=left_sections,
             center=[
@@ -3762,7 +3979,7 @@ class EspressoMailApp(Model):
             ],
             right=[
                 StatusSection(
-                    f"Msgs: {len(self.message_rows)}",
+                    f"{tr('Msgs')}: {len(self.message_rows)}",
                     style=Style().foreground(self.theme.accent_secondary),
                     priority=3,
                 ),

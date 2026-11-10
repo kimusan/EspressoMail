@@ -55,6 +55,7 @@ ACTION_DESCRIPTIONS: dict[str, str] = {
     "expand_list": "Expand message list pane",
     "next_pane": "Focus next pane (Folders -> Messages -> Reader)",
     "prev_pane": "Focus previous pane",
+    "copy_message": "Copy message text to clipboard",
 }
 
 # Default EspressoMail keybindings
@@ -66,6 +67,8 @@ DEFAULT_BINDINGS: dict[str, str] = {
     "a": "add_sender_contact",
     "e": "archive_msg",
     "y": "archive_msg",
+    "Y": "copy_message",
+    "ctrl+y": "copy_message",
     "d": "trash_msg",
     "#": "trash_msg",
     "delete": "trash_msg",
@@ -238,6 +241,9 @@ class KeymapManager:
                 return "widen_folder_list"
             if action == "reply":
                 return "sync_folder"
+        if pane == "reader":
+            if action == "archive_msg":
+                return "copy_message"
         return action
 
     def get_keys_for_action(self, action_id: str) -> list[str]:

@@ -10,6 +10,7 @@ from espresso import Cmd, KeyMsg, Model, MouseAction, MouseButton, MouseMsg, Msg
 from espresso.beans import EchoMode, SelectPrompt, SelectSubmitMsg, TextInput
 from espresso.crema import DOUBLE_BORDER, Align, Style, join_vertical, place
 
+from espressomail.i18n import tr
 from espressomail.models.entities import AccountConfig, SecurityType
 from espressomail.protocols.sieve import ManageSieveClient
 from espressomail.protocols.smtp_client import validate_account_credentials
@@ -131,38 +132,38 @@ class OnboardingWizard(Model):
         self.show_password = False
 
         self.provider_prompt = SelectPrompt(
-            question="Select your email server type or provider preset:",
-            options=[p.label for p in PROVIDER_PRESETS],
+            question=tr("Select your email server type or provider preset:"),
+            options=[tr(p.label) for p in PROVIDER_PRESETS],
             default_index=0,
         )
 
         styles = self.theme.text_input_styles()
         # Step 2 inputs
-        self.input_account_name = TextInput(placeholder="Work / Personal", prompt="Account Name:  ", **styles)
-        self.input_full_name = TextInput(placeholder="Jane Doe", prompt="Full Name:     ", **styles)
-        self.input_email = TextInput(placeholder="jane@example.com", prompt="Email Address: ", **styles)
+        self.input_account_name = TextInput(placeholder="Work / Personal", prompt=tr("Account Name:  "), **styles)
+        self.input_full_name = TextInput(placeholder="Jane Doe", prompt=tr("Full Name:     "), **styles)
+        self.input_email = TextInput(placeholder="jane@example.com", prompt=tr("Email Address: "), **styles)
         self.input_username = TextInput(
-            placeholder="(Optional — defaults to Email Address)",
-            prompt="Login User:    ",
+            placeholder=tr("(Optional — defaults to Email Address)"),
+            prompt=tr("Login User:    "),
             **styles,
         )
         self.input_password = TextInput(
-            placeholder="IMAP / SMTP Password or App Password",
-            prompt="Password:      ",
+            placeholder=tr("IMAP / SMTP Password or App Password"),
+            prompt=tr("Password:      "),
             echo_mode=EchoMode.PASSWORD,
             **styles,
         )
         self.step2_focus = 0
 
         # Step 3 inputs & security selectors
-        self.input_imap_host = TextInput(placeholder="imap.example.com", prompt="IMAP Host:     ", **styles)
-        self.input_imap_port = TextInput(placeholder="993", prompt="IMAP Port:     ", **styles)
+        self.input_imap_host = TextInput(placeholder="imap.example.com", prompt=tr("IMAP Host:     "), **styles)
+        self.input_imap_port = TextInput(placeholder="993", prompt=tr("IMAP Port:     "), **styles)
         self.imap_security: SecurityType = SecurityType.SSL_TLS
-        self.input_smtp_host = TextInput(placeholder="smtp.example.com", prompt="SMTP Host:     ", **styles)
-        self.input_smtp_port = TextInput(placeholder="587", prompt="SMTP Port:     ", **styles)
+        self.input_smtp_host = TextInput(placeholder="smtp.example.com", prompt=tr("SMTP Host:     "), **styles)
+        self.input_smtp_port = TextInput(placeholder="587", prompt=tr("SMTP Port:     "), **styles)
         self.smtp_security: SecurityType = SecurityType.STARTTLS
-        self.input_sieve_host = TextInput(placeholder="sieve.example.com", prompt="Sieve Host:    ", **styles)
-        self.input_sieve_port = TextInput(placeholder="4190", prompt="Sieve Port:    ", **styles)
+        self.input_sieve_host = TextInput(placeholder="sieve.example.com", prompt=tr("Sieve Host:    "), **styles)
+        self.input_sieve_port = TextInput(placeholder="4190", prompt=tr("Sieve Port:    "), **styles)
         # Focus indices on Step 3:
         # 0=IMAP Host, 1=IMAP Port, 2=IMAP Security, 3=SMTP Host, 4=SMTP Port, 5=SMTP Security, 6=Sieve Host, 7=Sieve Port
         self.step3_focus = 0
@@ -278,8 +279,8 @@ class OnboardingWizard(Model):
                         # Reset provider_prompt so all options are visible and navigable again
                         curr_idx = self.provider_prompt.cursor
                         self.provider_prompt = SelectPrompt(
-                            question="Select your email server type or provider preset:",
-                            options=[p.label for p in PROVIDER_PRESETS],
+                            question=tr("Select your email server type or provider preset:"),
+                            options=[tr(p.label) for p in PROVIDER_PRESETS],
                             default_index=curr_idx,
                         )
                     self._sync_focus()
@@ -405,10 +406,10 @@ class OnboardingWizard(Model):
     def _advance_to_step3(self) -> tuple[OnboardingWizard, Cmd | None]:
         email_val = self.input_email.value.strip()
         if not email_val or "@" not in email_val:
-            self.error_msg = "Please enter a valid email address containing '@'."
+            self.error_msg = tr("Please enter a valid email address containing '@'.")
             return self, None
         if not self.input_password.value:
-            self.error_msg = "Password is required to authenticate with the mail server."
+            self.error_msg = tr("Password is required to authenticate with the mail server.")
             return self, None
 
         domain = email_val.split("@")[-1]
@@ -440,7 +441,7 @@ class OnboardingWizard(Model):
         imap_host = self.input_imap_host.value.strip()
         smtp_host = self.input_smtp_host.value.strip()
         if not imap_host or not smtp_host:
-            self.error_msg = "Both IMAP Host and SMTP Host are required."
+            self.error_msg = tr("Both IMAP Host and SMTP Host are required.")
             return self, None
         try:
             imap_port = int(self.input_imap_port.value.strip() or "993")
@@ -448,7 +449,7 @@ class OnboardingWizard(Model):
             if not (1 <= imap_port <= 65535 and 1 <= smtp_port <= 65535):
                 raise ValueError
         except ValueError:
-            self.error_msg = "IMAP and SMTP ports must be valid port numbers (1–65535)."
+            self.error_msg = tr("IMAP and SMTP ports must be valid port numbers (1–65535).")
             return self, None
 
         sieve_host = self.input_sieve_host.value.strip()
@@ -458,14 +459,14 @@ class OnboardingWizard(Model):
             if not (1 <= sieve_port <= 65535):
                 raise ValueError
         except ValueError:
-            self.error_msg = "Sieve port must be a valid port number (1–65535)."
+            self.error_msg = tr("Sieve port must be a valid port number (1–65535).")
             return self, None
 
         email_addr = self.input_email.value.strip()
         username = self.input_username.value.strip() or email_addr
         password = self.input_password.value
         if not password:
-            self.error_msg = "Password is required to validate account credentials."
+            self.error_msg = tr("Password is required to validate account credentials.")
             return self, None
 
         acc = AccountConfig(
@@ -519,7 +520,7 @@ class OnboardingWizard(Model):
         self.last_height = height
         step_badges = []
         for idx, title in enumerate(
-            ("1. Server Type", "2. Identity & Auth", "3. Endpoints & Verify"), start=1
+            (tr("1. Server Type"), tr("2. Identity & Auth"), tr("3. Endpoints & Verify")), start=1
         ):
             if idx == self.step:
                 step_badges.append(
@@ -539,41 +540,41 @@ class OnboardingWizard(Model):
         header_line = "  →  ".join(step_badges)
 
         if self.step == 1:
-            cancel_hint = "   [Esc] Skip to Client" if self.allow_cancel else ""
+            cancel_hint = f"   {tr('[Esc] Skip to Client')}" if self.allow_cancel else ""
             body = join_vertical(
                 Align.LEFT,
                 Style()
                 .foreground(self.theme.fg_secondary)
-                .render("Welcome to EspressoMail! Configure your IMAP & SMTP email account:"),
+                .render(tr("Welcome to EspressoMail! Configure your IMAP & SMTP email account:")),
                 "",
                 self.provider_prompt.view(),
                 "",
                 Style()
                 .foreground(self.theme.fg_muted)
                 .render(
-                    f"[↑/↓] Navigate   [Enter] Select Option{cancel_hint}   [q] Quit"
+                    f"{tr('[↑/↓] Navigate   [Enter] Select Option')}{cancel_hint}   {tr('[q] Quit')}"
                 ),
             )
         elif self.step == 2:
-            pwd_hint = "Plaintext (Ctrl+R to mask)" if self.show_password else "Masked (Ctrl+R to reveal)"
+            pwd_hint = tr("Plaintext (Ctrl+R to mask)") if self.show_password else tr("Masked (Ctrl+R to reveal)")
             body = join_vertical(
                 Align.LEFT,
                 Style()
                 .bold(True)
                 .foreground(self.theme.accent_secondary)
-                .render(f"Selected: {self.selected_preset.label}"),
+                .render(f"{tr('Selected:')} {tr(self.selected_preset.label)}"),
                 "",
                 self.input_account_name.view(),
                 self.input_full_name.view(),
                 self.input_email.view(),
                 self.input_username.view(),
                 self.input_password.view(),
-                Style().foreground(self.theme.fg_muted).render(f"  Password mode: {pwd_hint}"),
+                Style().foreground(self.theme.fg_muted).render(f"  {tr('Password mode:')} {pwd_hint}"),
                 "",
                 Style()
                 .foreground(self.theme.fg_muted)
                 .render(
-                    "[Tab/↑/↓] Next/Prev Field   [Ctrl+R] Show/Hide Password   [Enter] Next   [Esc] Back   [Ctrl+Q] Quit"
+                    tr("[Tab/↑/↓] Next/Prev Field   [Ctrl+R] Show/Hide Password   [Enter] Next   [Esc] Back   [Ctrl+Q] Quit")
                 ),
             )
         else:
@@ -587,15 +588,15 @@ class OnboardingWizard(Model):
                 if self.step3_focus == 5
                 else Style().foreground(self.theme.fg_primary)
             )
-            imap_sec_row = f"IMAP Security: ◀ {imap_sec_style.render(self.imap_security.value.upper())} ▶"
-            smtp_sec_row = f"SMTP Security: ◀ {smtp_sec_style.render(self.smtp_security.value.upper())} ▶"
+            imap_sec_row = f"{tr('IMAP Security:')} ◀ {imap_sec_style.render(self.imap_security.value.upper())} ▶"
+            smtp_sec_row = f"{tr('SMTP Security:')} ◀ {smtp_sec_style.render(self.smtp_security.value.upper())} ▶"
             pgp_mark = "[x]" if self.generate_pgp else "[ ]"
             body = join_vertical(
                 Align.LEFT,
                 Style()
                 .bold(True)
                 .foreground(self.theme.accent_secondary)
-                .render(f"Endpoints & TLS for {self.input_email.value}:"),
+                .render(f"{tr('Endpoints & TLS for')} {self.input_email.value}:"),
                 "",
                 self.input_imap_host.view(),
                 self.input_imap_port.view(),
@@ -608,12 +609,12 @@ class OnboardingWizard(Model):
                 "",
                 Style()
                 .foreground(self.theme.pgp_verified_fg if self.generate_pgp else self.theme.fg_muted)
-                .render(f"{pgp_mark} Generate Ed25519 OpenPGP key pair (Ctrl+G)"),
+                .render(f"{pgp_mark} {tr('Generate Ed25519 OpenPGP key pair (Ctrl+G)')}"),
                 "",
                 Style()
                 .foreground(self.theme.fg_muted)
                 .render(
-                    "[Tab/↑/↓] Field   [Space/←/→] Cycle TLS   [Ctrl+G] PGP   [Enter] Finish   [Esc] Back   [Ctrl+Q] Quit"
+                    tr("[Tab/↑/↓] Field   [Space/←/→] Cycle TLS   [Ctrl+G] PGP   [Enter] Finish   [Esc] Back   [Ctrl+Q] Quit")
                 ),
             )
 
@@ -642,7 +643,7 @@ class OnboardingWizard(Model):
                 .bold(True)
                 .foreground(self.theme.accent_secondary)
                 .background(self.theme.bg_secondary)
-                .render(" [ EspressoMail Account Onboarding ] "),
+                .render(tr(" [ EspressoMail Account Onboarding ] ")),
                 align=Align.CENTER,
             )
             .padding(1, 3)

@@ -17,6 +17,7 @@ from espresso.crema import (
 )
 
 from espressomail import __version__
+from espressomail.i18n import tr
 from espressomail.themes.engine import Theme
 
 STEAM_FRAMES: list[tuple[str, str, str]] = [
@@ -121,7 +122,7 @@ class SplashScreen(Model):
             len(STARTUP_STAGES) - 1,
             int(self.progress_ratio * len(STARTUP_STAGES)),
         )
-        return STARTUP_STAGES[idx]
+        return tr(STARTUP_STAGES[idx])
 
     def view(self, width: int = 100, height: int = 30) -> str:
         """Render the centered splash card inside the terminal viewport."""
@@ -144,7 +145,7 @@ class SplashScreen(Model):
             Style()
             .italic(True)
             .foreground(self.theme.fg_secondary)
-            .render("Fast, Declarative Terminal Email • IMAP/SMTP • Unified Inbox • PGP • Sieve")
+            .render(tr("Fast, Declarative Terminal Email • IMAP/SMTP • Unified Inbox • PGP • Sieve"))
         )
 
         bar_width = min(52, max(28, width - 28))
@@ -164,7 +165,7 @@ class SplashScreen(Model):
             Style()
             .foreground(self.theme.fg_muted)
             .render(
-                f"v{__version__}  •  Theme: {self.theme.name}  •  Press any key or click to continue"
+                f"v{__version__}  •  {tr('Theme')}: {self.theme.name}  •  {tr('Press any key or click to continue')}"
             )
         )
 

@@ -365,13 +365,13 @@ class DMARCInspectorPlugin(BasePlugin):
         settings_schema={
             "auto_expand_dmarc_reports": {
                 "type": "bool",
-                "label": "Auto-Render DMARC Aggregate Reports",
+                "label": "Auto-Render DMARC Reports",
                 "default": "true",
                 "description": "Automatically unpack and display DMARC XML/GZ/ZIP reports in the reading pane",
             },
             "always_show_auth_banner": {
                 "type": "bool",
-                "label": "Always Show Auth Details Banner",
+                "label": "Always Show Auth Details",
                 "default": "false",
                 "description": "Always display detailed SPF/DKIM/DMARC authentication box without pressing Ctrl+D",
             },

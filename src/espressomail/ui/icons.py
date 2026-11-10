@@ -98,30 +98,35 @@ def get_folder_icon(
 
 def get_pane_title(pane: str, mode: str = "emoji", extra: str = "") -> str:
     """Return the pane header title formatted according to active icon mode."""
+    from espressomail.i18n import tr
+
     m = normalize_icon_mode(mode)
     p = pane.lower().strip()
     extra_str = f" {extra}".rstrip() if extra else ""
 
     if p in ("folders", "mailboxes"):
+        lbl = tr("Mailboxes")
         if m == "emoji":
-            return f"📁\ufe0f Mailboxes{extra_str}"
+            return f"📁\ufe0f {lbl}{extra_str}"
         if m == "unicode":
-            return f"▪ Mailboxes{extra_str}"
-        return f"Mailboxes{extra_str}"
+            return f"▪ {lbl}{extra_str}"
+        return f"{lbl}{extra_str}"
 
     if p in ("messages", "list", "messagelist"):
+        lbl = tr("Message List")
         if m == "emoji":
-            return f"✉\ufe0f Message List{extra_str}"
+            return f"✉\ufe0f {lbl}{extra_str}"
         if m == "unicode":
-            return f"✉ Message List{extra_str}"
-        return f"Message List{extra_str}"
+            return f"✉ {lbl}{extra_str}"
+        return f"{lbl}{extra_str}"
 
     if p in ("reader", "readingpane"):
+        lbl = tr("Reading Pane")
         if m == "emoji":
-            return f"📖\ufe0f Reading Pane{extra_str}"
+            return f"📖\ufe0f {lbl}{extra_str}"
         if m == "unicode":
-            return f"≡ Reading Pane{extra_str}"
-        return f"Reading Pane{extra_str}"
+            return f"≡ {lbl}{extra_str}"
+        return f"{lbl}{extra_str}"
 
     return pane
 
@@ -181,64 +186,66 @@ def get_badge(badge_type: str, mode: str = "emoji") -> str:
 
 def get_modal_title(modal_id: str, mode: str = "emoji", extra: str = "") -> str:
     """Return formatted modal window title string according to icon mode."""
+    from espressomail.i18n import tr
+
     m = normalize_icon_mode(mode)
     mid = modal_id.lower().strip()
     extra_str = f" {extra}".rstrip() if extra else ""
 
     titles = {
-        "compose": ("✉️ Compose Email", "✉ Compose Email", "Compose Email"),
+        "compose": ("✉️", "✉", tr("Compose Email")),
         "search": (
-            "🔍 Instant Full-Text & Fuzzy Database Search",
-            "⌕ Instant Full-Text & Fuzzy Database Search",
-            "Instant Full-Text & Fuzzy Database Search",
+            "🔍",
+            "⌕",
+            tr("Instant Full-Text & Fuzzy Database Search"),
         ),
-        "address_book": ("📇 Local Address Book", "≡ Local Address Book", "Local Address Book"),
+        "address_book": ("📇", "≡", tr("Local Address Book")),
         "sieve": (
-            "⚙️ ManageSieve & Filter Rules",
-            "⚙ ManageSieve & Filter Rules",
-            "ManageSieve & Filter Rules",
+            "⚙️",
+            "⚙",
+            tr("ManageSieve & Filter Rules"),
         ),
         "pgp": (
-            "🔐\ufe0f OpenPGP / GnuPG Keyring Manager",
-            "§ OpenPGP / GnuPG Keyring Manager",
-            "OpenPGP / GnuPG Keyring Manager",
+            "🔐\ufe0f",
+            "§",
+            tr("OpenPGP / GnuPG Keyring Manager"),
         ),
         "account_settings": (
-            "⚙️ Account Settings & Credentials",
-            "⚙ Account Settings & Credentials",
-            "Account Settings & Credentials",
+            "⚙️",
+            "⚙",
+            tr("Account Settings & Credentials"),
         ),
         "preferences": (
-            "⚙️ Preferences & Configuration",
-            "⚙ Preferences & Configuration",
-            "Preferences & Configuration",
+            "⚙️",
+            "⚙",
+            tr("Preferences & Configuration"),
         ),
-        "confirm_exit": ("🚪 Confirm Exit", "✕ Confirm Exit", "Confirm Exit"),
+        "confirm_exit": ("🚪", "✕", tr("Confirm Exit")),
         "download_attachments": (
-            "💾 Download Attachments",
-            "⤓ Download Attachments",
-            "Download Attachments",
+            "💾",
+            "⤓",
+            tr("Download Attachments"),
         ),
         "rsvp": (
-            "📅\ufe0f RSVP to Calendar Invitation",
-            "📅 RSVP to Calendar Invitation",
-            "RSVP to Calendar Invitation",
+            "📅\ufe0f",
+            "📅",
+            tr("RSVP to Calendar Invitation"),
         ),
         "move_folder": (
-            "📁\ufe0f Move Message to Folder",
-            "▸ Move Message to Folder",
-            "Move Message to Folder",
+            "📁\ufe0f",
+            "▸",
+            tr("Move Message to Folder"),
         ),
         "preview": (
-            "👁 Markdown Live Preview (F4 to edit)",
-            "≡ Markdown Live Preview (F4 to edit)",
-            "Markdown Live Preview (F4 to edit)",
+            "👁",
+            "≡",
+            tr("Markdown Live Preview (F4 to edit)"),
         ),
     }
 
     if mid in titles:
-        t_emoji, t_unicode, t_none = titles[mid]
-        base = t_emoji if m == "emoji" else (t_unicode if m == "unicode" else t_none)
+        i_emoji, i_unicode, lbl = titles[mid]
+        base = f"{i_emoji} {lbl}" if m == "emoji" else (f"{i_unicode} {lbl}" if m == "unicode" else lbl)
         return f"{base}{extra_str}"
 
     return f"{modal_id}{extra_str}"

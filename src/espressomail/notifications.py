@@ -9,9 +9,89 @@ import subprocess
 import sys
 from typing import Sequence
 
-from espressomail.models.entities import EmailMessage
+from espressomail.models.entities import (
+    EmailMessage,
+    FolderType,
+    classify_folder_type,
+    split_folder_hierarchy,
+)
 
 logger = logging.getLogger(__name__)
+
+_NON_NOTIFIABLE_FOLDER_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "sent",
+        "sent items",
+        "sent messages",
+        "sent mail",
+        "draft",
+        "drafts",
+        "archive",
+        "archives",
+        "all mail",
+        "trash",
+        "deleted",
+        "deleted items",
+        "deleted messages",
+        "bin",
+        "spam",
+        "junk",
+        "junk e-mail",
+        "junk email",
+        "bulk mail",
+        "outbox",
+        "templates",
+    }
+)
+
+_NON_NOTIFIABLE_FOLDER_TYPES: frozenset[FolderType] = frozenset(
+    {
+        FolderType.SENT,
+        FolderType.DRAFTS,
+        FolderType.ARCHIVE,
+        FolderType.TRASH,
+        FolderType.SPAM,
+    }
+)
+
+
+def is_notifiable_folder(folder_name: str, flags: str = "") -> bool:
+    """Return True if newly synced messages in this folder should trigger desktop notifications.
+
+    Excludes Sent, Drafts, Archive/Archives, Trash, Spam/Junk, Outbox, and Templates
+    (including nested archive or sent hierarchies like 'Archives/2026' or 'INBOX.Sent').
+    """
+    if not folder_name or not folder_name.strip():
+        return True
+    parts = split_folder_hierarchy(folder_name)
+    if classify_folder_type(parts, flags) in _NON_NOTIFIABLE_FOLDER_TYPES:
+        return False
+    for part in parts:
+        if part.strip().lower() in _NON_NOTIFIABLE_FOLDER_SEGMENTS:
+            return False
+    return True
+
+
+def filter_notifiable_messages(
+    messages: Sequence[EmailMessage],
+    folder_name: str = "",
+    account_email: str = "",
+) -> list[EmailMessage]:
+    """Filter messages to only those eligible for desktop new-mail notifications."""
+    if folder_name and not is_notifiable_folder(folder_name):
+        return []
+    acc_email_norm = account_email.strip().lower() if account_email else ""
+    result: list[EmailMessage] = []
+    for m in messages:
+        if m.is_read or m.is_draft or m.is_trashed:
+            continue
+        msg_folder = m.folder or folder_name
+        if msg_folder and not is_notifiable_folder(msg_folder):
+            continue
+        if acc_email_norm and (m.sender_email or "").strip().lower() == acc_email_norm:
+            continue
+        result.append(m)
+    return result
 
 
 def is_notification_supported() -> bool:
@@ -161,24 +241,25 @@ def notify_new_messages(
     sound: bool = False,
 ) -> bool:
     """Format and dispatch a desktop notification for newly arrived email messages."""
-    if not messages:
+    eligible = filter_notifiable_messages(messages, folder_name=folder_name)
+    if not eligible:
         return False
 
     acc_label = f" ({account_name})" if account_name else ""
 
-    if len(messages) == 1:
-        m = messages[0]
+    if len(eligible) == 1:
+        m = eligible[0]
         sender = m.sender_short
         title = f"New Email from {sender}{acc_label}"
         clean_snippet = " ".join(m.snippet.split()) if m.snippet else ""
         body = f"{m.subject}\n{clean_snippet}".strip() if clean_snippet else m.subject
     else:
-        title = f"{len(messages)} New Emails in {folder_name}{acc_label}"
-        senders = [m.sender_short for m in messages[:3]]
+        title = f"{len(eligible)} New Emails in {folder_name}{acc_label}"
+        senders = [m.sender_short for m in eligible[:3]]
         sample_senders = ", ".join(senders)
-        if len(messages) > 3:
-            sample_senders += f" (+{len(messages) - 3} more)"
-        top_subj = messages[0].subject
+        if len(eligible) > 3:
+            sample_senders += f" (+{len(eligible) - 3} more)"
+        top_subj = eligible[0].subject
         body = f"From {sample_senders}\nLatest: {top_subj}"
 
     return send_desktop_notification(

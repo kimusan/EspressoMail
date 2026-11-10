@@ -252,7 +252,7 @@ class PhishingScannerPlugin(BasePlugin):
         settings_schema={
             "auto_show_banner": {
                 "type": "bool",
-                "label": "Auto-Show Phishing Alert Banner",
+                "label": "Auto-Show Phishing Alerts",
                 "default": "true",
                 "description": "Automatically display a high-visibility warning banner when suspicious indicators are found",
             },

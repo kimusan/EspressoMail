@@ -16,6 +16,7 @@ from espresso.crema import (
     wrap_ansi,
 )
 
+from espressomail.i18n import tr
 from espressomail.models.entities import (
     Attachment,
     EmailMessage,
@@ -415,7 +416,9 @@ def format_message_for_reading_pane(
     val_style = Style().foreground(theme.fg_primary)
     muted_style = Style().foreground(theme.fg_muted)
 
-    safe_subject = sanitize_terminal_text(msg.subject or "(No Subject)", multiline=False)
+    from espressomail.i18n import tr
+
+    safe_subject = sanitize_terminal_text(msg.subject or tr("(No Subject)"), multiline=False)
     star_badge = (
         Style().foreground(theme.starred_fg).bold(True).render(get_badge("star", m_mode))
         if msg.is_starred
@@ -432,27 +435,28 @@ def format_message_for_reading_pane(
     safe_sender = sanitize_terminal_text(msg.sender_display, multiline=False)
     safe_recips = ", ".join(sanitize_terminal_text(r, multiline=False) for r in msg.recipients_to)
     header_rows = [
-        f"{lbl_style.render('From:    ')} {val_style.render(safe_sender)}",
-        f"{lbl_style.render('To:      ')} {val_style.render(safe_recips or '(undisclosed)')}",
+        f"{lbl_style.render(tr('From:    '))} {val_style.render(safe_sender)}",
+        f"{lbl_style.render(tr('To:      '))} {val_style.render(safe_recips or tr('(undisclosed)'))}",
     ]
     if msg.recipients_cc:
         safe_cc = ", ".join(sanitize_terminal_text(r, multiline=False) for r in msg.recipients_cc)
         header_rows.append(
-            f"{lbl_style.render('Cc:      ')} {val_style.render(safe_cc)}"
+            f"{lbl_style.render(tr('Cc:      '))} {val_style.render(safe_cc)}"
         )
 
     acc_name = account.name if account else msg.account_id
     acc_color = (account.color_badge if (account and account.color_badge) else theme.fg_muted)
     acc_badge = Style().foreground(acc_color).bold(True).render(f"● {acc_name}")
     header_rows.append(
-        f"{lbl_style.render('Date:    ')} {muted_style.render(msg.date_iso or msg.short_date)}  "
+        f"{lbl_style.render(tr('Date:    '))} {muted_style.render(msg.date_iso or msg.short_date)}  "
         f"{acc_badge} {muted_style.render(f'[{msg.folder}]')}"
     )
     if thread and thread.message_count > 1:
         participants_str = " → ".join(thread.participants)
+        thread_cnt_str = f"{thread.message_count} {tr('messages')}"
         header_rows.append(
-            f"{lbl_style.render('Thread:  ')} "
-            f"{Style().foreground(theme.unread_fg).render(f'{thread.message_count} messages')} "
+            f"{lbl_style.render(tr('Thread:  '))} "
+            f"{Style().foreground(theme.unread_fg).render(thread_cnt_str)} "
             f"{muted_style.render(f'({participants_str})')}"
         )
 
@@ -507,9 +511,9 @@ def format_message_for_reading_pane(
                 .render(f"{img_prefix}{len(html_img_tags)} embedded HTML image(s)")
             )
             att_chips.append(chip)
-        media_line = f"{lbl_style.render('Media:   ')} " + "  ".join(att_chips)
+        media_line = f"{lbl_style.render(tr('Media:   '))} " + "  ".join(att_chips)
         actions_line = muted_style.render(
-            f"          [w] Save attachments to disk   [i] Image mode: {image_renderer.label}"
+            f"          [w] {tr('Save attachments to disk')}   [i] {tr('Image mode')}: {image_renderer.label}"
         )
         att_bar = f"{truncate_ansi(media_line, inner_w)}\n{truncate_ansi(actions_line, inner_w)}"
         sections.append(att_bar)
@@ -568,7 +572,7 @@ def format_message_for_reading_pane(
                 Style()
                 .bold(True)
                 .foreground(theme.fg_secondary)
-                .render(f"╭─ {q_icon}{prev.sender_short} ({prev.short_date}) wrote:")
+                .render(f"╭─ {q_icon}{prev.sender_short} ({prev.short_date}) {tr('wrote:')}")
             )
             prev_body_raw = sanitize_terminal_text(prev.body_text or html_to_terminal_text(prev.body_html), multiline=True)
             prev_formatted = format_email_body(prev_body_raw, theme, max(24, inner_w - 4))
@@ -588,7 +592,7 @@ def format_message_for_reading_pane(
         body_source = msg.body_text.strip()
 
     body_source = sanitize_terminal_text(body_source, multiline=True)
-    body_formatted = format_email_body(body_source or "(Empty message body)", theme, inner_w)
+    body_formatted = format_email_body(body_source or tr("(Empty message body)"), theme, inner_w)
     for marker, box in rendered_marker_blocks.items():
         if marker in body_formatted:
             body_formatted = body_formatted.replace(marker, f"\n{box}\n")
@@ -610,7 +614,7 @@ def format_message_for_reading_pane(
             if box:
                 leftover_boxes.append(box)
         if leftover_boxes:
-            att_hdr = Style().bold(True).foreground(theme.accent_secondary).render("── Image Attachments ──")
+            att_hdr = Style().bold(True).foreground(theme.accent_secondary).render(tr("── Image Attachments ──"))
             sections.append(f"{att_hdr}\n\n" + "\n\n".join(leftover_boxes))
 
     return "\n\n".join(sections)
@@ -645,22 +649,22 @@ def _render_pgp_banner(msg: EmailMessage, theme: Theme, width: int, icon_mode: s
 
     if msg.pgp_status == PGPStatus.SIGNED_VERIFIED:
         color = theme.pgp_verified_fg
-        badge = f"{ok_icon}PGP VERIFIED SIGNATURE — Signed by {signer} [{fp_short}]"
+        badge = f"{ok_icon}{tr('PGP VERIFIED SIGNATURE — Signed by')} {signer} [{fp_short}]"
     elif msg.pgp_status == PGPStatus.DECRYPTED_VERIFIED:
         color = theme.pgp_verified_fg
-        badge = f"{lock_icon}PGP DECRYPTED & VERIFIED — Signed by {signer} [{fp_short}]"
+        badge = f"{lock_icon}{tr('PGP DECRYPTED & VERIFIED — Signed by')} {signer} [{fp_short}]"
     elif msg.pgp_status == PGPStatus.DECRYPTED:
         color = theme.pgp_verified_fg
-        badge = f"{lock_icon}PGP DECRYPTED MESSAGE — Confidentiality verified"
+        badge = f"{lock_icon}{tr('PGP DECRYPTED MESSAGE — Confidentiality verified')}"
     elif msg.pgp_status == PGPStatus.ENCRYPTED:
         color = theme.pgp_warning_fg
-        badge = f"{key_icon}PGP ENCRYPTED PAYLOAD — Press [x] to decrypt with local keyring"
+        badge = f"{key_icon}{tr('PGP ENCRYPTED PAYLOAD — Press [x] to decrypt with local keyring')}"
     elif msg.pgp_status == PGPStatus.SIGNED_UNVERIFIED:
         color = theme.pgp_warning_fg
-        badge = f"{warn_icon}PGP SIGNATURE UNVERIFIED — Signer key [{fp_short}] not in trusted ring (Press [v] to verify)"
+        badge = f"{warn_icon}{tr('PGP SIGNATURE UNVERIFIED — Signer key')} [{fp_short}] {tr('not in trusted ring (Press [v] to verify)')}"
     else:
         color = theme.pgp_error_fg
-        badge = f"{err_icon}PGP INVALID SIGNATURE — Warning: Message may have been tampered with!"
+        badge = f"{err_icon}{tr('PGP INVALID SIGNATURE — Warning: Message may have been tampered with!')}"
 
     return (
         Style()
@@ -697,19 +701,19 @@ def _render_calendar_banner(event: CalendarEvent, theme: Theme, width: int, icon
     if is_cancelled:
         b_color = theme.pgp_error_fg
         icon = cancel_icon
-        title_text = "Event Cancelled"
+        title_text = tr("Event Cancelled")
     elif is_reply:
         b_color = theme.accent_secondary
         icon = reply_icon
-        title_text = "Event RSVP Response"
+        title_text = tr("Event RSVP Response")
     elif event.method in ("REQUEST", "PUBLISH"):
         b_color = theme.accent_primary
         icon = title_icon
-        title_text = "Calendar Invitation"
+        title_text = tr("Calendar Invitation")
     else:
         b_color = theme.accent_primary
         icon = title_icon
-        title_text = "Calendar Event"
+        title_text = tr("Calendar Event")
 
     lbl_style = Style().bold(True).foreground(theme.accent_primary)
     val_style = Style().foreground(theme.fg_primary)
@@ -723,55 +727,55 @@ def _render_calendar_banner(event: CalendarEvent, theme: Theme, width: int, icon
 
     # Time range
     time_str = event.formatted_time_range()
-    rows.append(f"{lbl_style.render('When:        ')} {val_style.render(time_str)}")
+    rows.append(f"{lbl_style.render(tr('When:        '))} {val_style.render(time_str)}")
 
     # Location
     if event.location:
         loc_formatted = _apply_inline_formatting(event.location, theme)
-        rows.append(f"{lbl_style.render('Where:       ')} {loc_formatted}")
+        rows.append(f"{lbl_style.render(tr('Where:       '))} {loc_formatted}")
 
     # Organizer
     if event.organizer_display:
-        rows.append(f"{lbl_style.render('Organizer:   ')} {val_style.render(event.organizer_display)}")
+        rows.append(f"{lbl_style.render(tr('Organizer:   '))} {val_style.render(event.organizer_display)}")
 
     # Status
     if is_cancelled:
         rows.append(
-            f"{lbl_style.render('Status:      ')} "
-            f"{Style().bold(True).foreground(theme.pgp_error_fg).render('Cancelled by Organizer')}"
+            f"{lbl_style.render(tr('Status:      '))} "
+            f"{Style().bold(True).foreground(theme.pgp_error_fg).render(tr('Cancelled by Organizer'))}"
         )
     elif is_reply:
         first_att = event.attendees[0] if event.attendees else None
-        reply_stat = first_att.partstat if first_att else "Replied"
+        reply_stat = first_att.partstat if first_att else tr("Replied")
         rows.append(
-            f"{lbl_style.render('Status:      ')} "
+            f"{lbl_style.render(tr('Status:      '))} "
             f"{Style().bold(True).foreground(theme.accent_secondary).render(reply_stat)}"
         )
     else:
-        rows.append(f"{lbl_style.render('Status:      ')} {muted_style.render(event.status or 'Confirmed')}")
+        rows.append(f"{lbl_style.render(tr('Status:      '))} {muted_style.render(event.status or tr('Confirmed'))}")
 
     # Attendees snippet
     if event.attendees:
         att_names = [a.cn or a.email for a in event.attendees[:6]]
         att_str = ", ".join(att_names)
         if len(event.attendees) > 6:
-            att_str += f" (+{len(event.attendees) - 6} more)"
-        rows.append(f"{lbl_style.render('Attendees:   ')} {muted_style.render(att_str)}")
+            att_str += f" (+{len(event.attendees) - 6} {tr('more')})"
+        rows.append(f"{lbl_style.render(tr('Attendees:   '))} {muted_style.render(att_str)}")
 
     # Description (if present)
     if event.description:
         desc_line = " ".join(event.description.splitlines())
         if desc_line.strip():
             desc_cut = desc_line[:120] + ("…" if len(desc_line) > 120 else "")
-            rows.append(f"{lbl_style.render('Details:     ')} {val_style.render(desc_cut)}")
+            rows.append(f"{lbl_style.render(tr('Details:     '))} {val_style.render(desc_cut)}")
 
     # RSVP Action options
     if event.method in ("REQUEST", "PUBLISH") and not is_cancelled:
         rows.append("")
-        btn_accept = Style().bold(True).foreground(theme.unread_fg).render("[1] Accept")
-        btn_tentative = Style().bold(True).foreground(theme.starred_fg).render("[2] Tentative")
-        btn_decline = Style().bold(True).foreground(theme.pgp_error_fg).render("[3] Decline")
-        hint = muted_style.render("(Press '1', '2', or '3' to respond)")
+        btn_accept = Style().bold(True).foreground(theme.unread_fg).render(tr("[1] Accept"))
+        btn_tentative = Style().bold(True).foreground(theme.starred_fg).render(tr("[2] Tentative"))
+        btn_decline = Style().bold(True).foreground(theme.pgp_error_fg).render(tr("[3] Decline"))
+        hint = muted_style.render(tr("(Press '1', '2', or '3' to respond)"))
         rows.append(f"{btn_accept}   {btn_tentative}   {btn_decline}")
         rows.append(hint)
 

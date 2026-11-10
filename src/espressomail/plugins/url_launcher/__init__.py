@@ -136,13 +136,13 @@ class URLLauncherPlugin(BasePlugin):
         settings_schema={
             "always_show_links_table": {
                 "type": "bool",
-                "label": "Always Show Links Table in Reader",
+                "label": "Always Show Links in Reader",
                 "default": "false",
                 "description": "Automatically append the numbered links reference table at the bottom of emails",
             },
             "open_on_toggle_single": {
                 "type": "bool",
-                "label": "Auto-Open When Email Has Only 1 Link",
+                "label": "Auto-Open Single Link Emails",
                 "default": "false",
                 "description": "Immediately open the link in system browser when pressing Ctrl+O on a 1-link email",
             },

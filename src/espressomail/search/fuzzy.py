@@ -26,6 +26,8 @@ class SearchQuery:
     is_unread: bool | None = None
     is_starred: bool | None = None
     is_pgp: bool | None = None
+    since_date: str = ""
+    before_date: str = ""
 
 
 @dataclass
@@ -118,6 +120,10 @@ def parse_search_query(raw_query: str) -> SearchQuery:
                 sq.folder_filter = val
             elif k in ("account", "acc"):
                 sq.account_filter = val
+            elif k in ("since", "after"):
+                sq.since_date = val
+            elif k in ("before", "until"):
+                sq.before_date = val
             elif k == "has" and val in ("attachment", "att", "file", "image"):
                 sq.has_attachment = True
             elif k == "is":
@@ -256,6 +262,11 @@ class FuzzySearchEngine:
                         continue
                     if parsed.is_pgp is True and msg.pgp_status == PGPStatus.NONE:
                         continue
+                    msg_dt = msg.date_iso[:10] if msg.date_iso else ""
+                    if parsed.since_date and msg_dt and msg_dt < parsed.since_date:
+                        continue
+                    if parsed.before_date and msg_dt and msg_dt > parsed.before_date:
+                        continue
 
                     seen_ids.add(msg.id)
                     results.append(
@@ -299,6 +310,11 @@ class FuzzySearchEngine:
             if parsed.is_starred is True and not msg.is_starred:
                 continue
             if parsed.is_pgp is True and msg.pgp_status == PGPStatus.NONE:
+                continue
+            msg_dt = msg.date_iso[:10] if msg.date_iso else ""
+            if parsed.since_date and msg_dt and msg_dt < parsed.since_date:
+                continue
+            if parsed.before_date and msg_dt and msg_dt > parsed.before_date:
                 continue
             if parsed.from_filter:
                 sender_blob = f"{msg.sender_name} {msg.sender_email}".lower()

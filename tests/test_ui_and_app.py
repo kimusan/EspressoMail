@@ -511,6 +511,9 @@ class TestUIAndApp(unittest.TestCase):
             app, _ = app.update(KeyMsg("enter"))
             self.assertIsNone(app.active_modal)
             self.assertIn("Saved preferences", app.status_message)
+            self.assertTrue(app.toasts.has_toasts)
+            self.assertIn("Saved preferences", app.toasts.view())
+            self.assertNotIn("Saved preferences", app._render_status_bar())
             self.assertEqual(app.download_dir, new_dl.resolve())
             self.assertEqual(app.theme.id, chosen_theme)
             self.assertEqual(app.image_renderer.backend.value, chosen_backend)
@@ -2132,6 +2135,71 @@ class TestUIAndApp(unittest.TestCase):
         self.assertIsInstance(act_msg, CardActivateMsg)
         self.assertEqual(act_msg.item.id, "2")
 
+    def test_upstream_espresso_1_4_0_beans_integration(self) -> None:
+        """Verify integration and availability of upstream Espresso 1.4.0 beans."""
+        from espresso.beans import (
+            Checkbox,
+            Confetti,
+            ConfettiMode,
+            DatePicker,
+            DetailItem,
+            DetailSelector,
+            ImageViewer,
+            MarkdownViewer,
+            PipelineProgress,
+            PipelineStage,
+            Switch,
+            TabChangeMsg,
+            Tabs,
+            TabStyle,
+            VirtualList,
+        )
+
+        # 1. Tabs bean
+        tabs = Tabs(["General", "Mail", "Plugins"], active_tab=0, tab_style=TabStyle.PILL)
+        self.assertEqual(tabs.active_tab, 0)
+        tabs, cmd = tabs.update(KeyMsg("2"))
+        self.assertEqual(tabs.active_tab, 1)
+        self.assertIsNotNone(cmd)
+        change_msg = cmd()
+        self.assertIsInstance(change_msg, TabChangeMsg)
+        self.assertEqual(change_msg.index, 1)
+        self.assertIn("General", tabs.view())
+
+        # 2. Confetti particle bean (Inbox Zero celebration)
+        confetti = Confetti(width=80, height=24)
+        self.assertFalse(confetti.is_active)
+        burst_cmd = confetti.fire(count=30, mode=ConfettiMode.BURST)
+        self.assertTrue(confetti.is_active)
+        self.assertIsNotNone(burst_cmd)
+        bg = " " * 80 + "\n" + " " * 80
+        overlaid = confetti.overlay(bg)
+        self.assertIsInstance(overlaid, str)
+
+        # 3. MarkdownViewer bean
+        md = MarkdownViewer("# Subject\n\n- Task 1\n- Task 2", width=60, height=10)
+        md_view = md.view()
+        self.assertIn("Subject", md_view)
+
+        # 4. DatePicker bean
+        from datetime import date
+        dp = DatePicker(value=date(2026, 11, 5))
+        self.assertIn("2026", dp.view())
+
+        # 5. Switch & Checkbox beans
+        sw = Switch(value=True, label="IMAP Push")
+        self.assertTrue(sw.value)
+        cb = Checkbox(label="Generate PGP Key", checked=True)
+        self.assertTrue(cb.checked)
+
+        # 6. PipelineProgress bean
+        stages = [
+            PipelineStage(title="IMAP Auth", description="Validating IMAP credentials"),
+            PipelineStage(title="SMTP Auth", description="Validating SMTP credentials"),
+        ]
+        pipeline = PipelineProgress(stages=stages, title="Account Verification")
+        self.assertEqual(len(pipeline.stages), 2)
+
 
     def test_sync_responsiveness_and_message_navigation_optimization(self) -> None:
         """Verify UI responsiveness during sync: non-interfering sync steps and fast navigation."""
@@ -3213,28 +3281,24 @@ class TestUIAndApp(unittest.TestCase):
         modal, _ = modal.update(KeyMsg("["))
         self.assertEqual(modal.active_tab, 4)
 
-        # Test mouse clicks on tab bar (row 0 = pos_y + 2)
+        # Test mouse clicks across the entire width (left, middle, right edge) of every tab button
+        pos_x = modal.last_pos_x
         pos_y = modal.last_pos_y
         tab_y = pos_y + 2
-        # Click Tab 0 (Appearance)
-        modal, _ = modal.update(MouseMsg(x=10, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
-        self.assertEqual(modal.active_tab, 0)
-
-        # Click Tab 1 (Mail & View)
-        modal, _ = modal.update(MouseMsg(x=22, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
-        self.assertEqual(modal.active_tab, 1)
-
-        # Click Tab 2 (Sync & Network)
-        modal, _ = modal.update(MouseMsg(x=38, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
-        self.assertEqual(modal.active_tab, 2)
-
-        # Click Tab 3 (Keys & System)
-        modal, _ = modal.update(MouseMsg(x=52, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
-        self.assertEqual(modal.active_tab, 3)
-
-        # Click Tab 4 (Plugins)
-        modal, _ = modal.update(MouseMsg(x=66, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
-        self.assertEqual(modal.active_tab, 4)
+        self.assertEqual(len(modal.tab_bounds), 5)
+        for expected_tab_idx, (start_rel_x, end_rel_x) in enumerate(modal.tab_bounds):
+            # Switch to a different tab first so we verify the click actually activates expected_tab_idx
+            for rel_x in range(start_rel_x, end_rel_x):
+                modal.active_tab = (expected_tab_idx + 1) % 5
+                click_x = pos_x + rel_x
+                modal, _ = modal.update(
+                    MouseMsg(x=click_x, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT)
+                )
+                self.assertEqual(
+                    modal.active_tab,
+                    expected_tab_idx,
+                    f"Click at rel_x={rel_x} (bounds {start_rel_x}..{end_rel_x}) activated tab {modal.active_tab} instead of {expected_tab_idx}",
+                )
 
     def test_preferences_icon_mode_cycling_persistence_and_propagation(self) -> None:
         """Verify icon_mode cycles between emoji/unicode/none, saves to store, and applies to app."""
@@ -3494,6 +3558,90 @@ class TestUIAndApp(unittest.TestCase):
             self.assertEqual(count2, 1)
             self.assertEqual(len(client.last_newly_arrived), 1)
             self.assertEqual(client.last_newly_arrived[0].id, m_second_new.id)
+
+            # 5. Verify Sent, Drafts, Archive/Archives, Trash, and Spam folders never populate last_newly_arrived or trigger notifications
+            for non_notify_folder in (
+                "Sent",
+                "INBOX.Sent",
+                "[Gmail]/Sent Mail",
+                "Drafts",
+                "INBOX.Drafts",
+                "Archive",
+                "Archives",
+                "Archives/2026",
+                "INBOX.Archives.2026",
+                "Trash",
+                "Spam",
+                "Junk",
+            ):
+                m_folder_msg = EmailMessage(
+                    id=f"acc_notify_test:{non_notify_folder}:200",
+                    account_id=acc.id,
+                    folder=non_notify_folder,
+                    subject=f"Unread in {non_notify_folder}",
+                    sender_name="Someone",
+                    sender_email="someone@corp.org",
+                    recipients_to=["notify@test.org"],
+                    body_text="Should not trigger desktop notification",
+                    is_read=False,
+                )
+                mock_fetch.return_value = [m_folder_msg]
+                synced_cnt = client.sync_single_folder(self.store, non_notify_folder)
+                self.assertEqual(synced_cnt, 1)
+                self.assertEqual(
+                    client.last_newly_arrived,
+                    [],
+                    f"Expected no newly_arrived notifications for folder {non_notify_folder}",
+                )
+
+                with patch("espressomail.ui.app.notify_new_messages") as mock_notify:
+                    app, _ = app.update(
+                        SyncProgressMsg(
+                            account_id=acc.id,
+                            account_name=acc.name,
+                            action="synced_folder",
+                            folder_name=non_notify_folder,
+                            new_messages=1,
+                            newly_arrived_messages=(m_folder_msg,),
+                            remaining_steps=(),
+                            is_done=True,
+                        )
+                    )
+                    mock_notify.assert_not_called()
+
+            # 6. Verify syncing an already-read message into INBOX (new_messages=1, newly_arrived_messages=())
+            # does NOT fall back to notifying about older unread messages in INBOX
+            with patch("espressomail.ui.app.notify_new_messages") as mock_notify:
+                app, _ = app.update(
+                    SyncProgressMsg(
+                        account_id=acc.id,
+                        account_name=acc.name,
+                        action="synced_folder",
+                        folder_name="INBOX",
+                        new_messages=1,
+                        newly_arrived_messages=(),
+                        remaining_steps=(),
+                        is_done=True,
+                    )
+                )
+                mock_notify.assert_not_called()
+
+            # 7. Verify messages sent by the account's own email address do not trigger notifications
+            m_self_sent = EmailMessage(
+                id="acc_notify_test:INBOX:300",
+                account_id=acc.id,
+                folder="INBOX",
+                subject="Note to self",
+                sender_name="Notify User",
+                sender_email="notify@test.org",
+                recipients_to=["notify@test.org"],
+                body_text="Sent from my own address",
+                is_read=False,
+            )
+            mock_fetch.return_value = [m_self_sent]
+            synced_self = client.sync_single_folder(self.store, "INBOX")
+            self.assertEqual(synced_self, 1)
+            self.assertEqual(client.last_newly_arrived, [])
 
     def test_sanitize_terminal_text_and_dec_graphics_prevention(self) -> None:
         """Verify sanitize_terminal_text strips control codes, ANSI escapes, and DEC graphics triggers."""
@@ -3911,11 +4059,319 @@ class TestUIAndApp(unittest.TestCase):
         self.assertIsNotNone(palette_item)
         self.assertIn("Check for Updates", palette_item.title)
 
+    def test_localization_danish_german_spanish_and_preferences(self) -> None:
+        """Verify external JSON locale files, custom user locale discovery, English fallback, and persistent language configuration."""
+        import json
+        import tempfile
+
+        from espressomail.i18n import (
+            BUILTIN_LOCALES_DIR,
+            SUPPORTED_LANGUAGES,
+            get_available_languages,
+            get_language,
+            reload_locales,
+            set_language,
+            tr,
+        )
+        from espressomail.ui.modals import PreferencesModal
+
+        try:
+            # 1. Verify built-in external JSON files exist and have matching keys
+            for code in ("en", "da", "de", "es"):
+                json_path = BUILTIN_LOCALES_DIR / f"{code}.json"
+                self.assertTrue(json_path.is_file(), f"Missing locale file: {json_path}")
+
+            en_data = json.loads((BUILTIN_LOCALES_DIR / "en.json").read_text(encoding="utf-8"))
+            en_keys = set(en_data["strings"].keys())
+            for code in ("da", "de", "es"):
+                lang_data = json.loads((BUILTIN_LOCALES_DIR / f"{code}.json").read_text(encoding="utf-8"))
+                self.assertEqual(set(lang_data["strings"].keys()), en_keys)
+
+            self.assertEqual(SUPPORTED_LANGUAGES[:4], ("en", "da", "de", "es"))
+            self.assertEqual(tr("Unified Inbox", lang="en"), "Unified Inbox")
+            self.assertEqual(tr("Unified Inbox", lang="da"), "Samlet indbakke")
+            self.assertEqual(tr("Unified Inbox", lang="de"), "Gemeinsamer Posteingang")
+            self.assertEqual(tr("Unified Inbox", lang="es"), "Bandeja unificada")
+
+            # 2. Verify custom external JSON language file discovery and fallback to English
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                custom_dir = Path(tmp_dir)
+                fr_file = custom_dir / "fr.json"
+                fr_file.write_text(
+                    json.dumps(
+                        {
+                            "_meta": {"code": "fr", "name": "Français (French)"},
+                            "strings": {
+                                "Unified Inbox": "Boîte de réception unifiée",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                langs = reload_locales(extra_dirs=[custom_dir])
+                self.assertIn("fr", langs)
+                self.assertEqual(tr("Unified Inbox", lang="fr"), "Boîte de réception unifiée")
+                # Unmatched key in fr.json falls back to English
+                self.assertEqual(tr("Reading Pane", lang="fr"), "Reading Pane")
+                self.assertEqual(tr("Unregistered Dynamic String", lang="fr"), "Unregistered Dynamic String")
+
+            reload_locales()
+
+            app = EspressoMailApp(self.store, show_splash=False)
+            app.show_onboarding = False
+            app.update(WindowSizeMsg(width=120, height=34))
+            self.assertEqual(app.language, "en")
+
+            # Open PreferencesModal and verify Language row on Tab 0 (row 7)
+            app, _ = app._execute_action("preferences")
+            self.assertIsInstance(app.active_modal, PreferencesModal)
+            pref_modal: PreferencesModal = app.active_modal
+            self.assertEqual(pref_modal.active_tab, 0)
+            self.assertEqual(pref_modal.language, "en")
+
+            # Navigate to row 7 (Language) and cycle through da -> de -> es
+            pref_modal.cursor_row = 7
+            pref_modal._cycle_row(7, 1)
+            self.assertEqual(pref_modal.language, "da")
+            self.assertIn("Dansk", pref_modal.view(120, 34))
+
+            pref_modal._cycle_row(7, 1)
+            self.assertEqual(pref_modal.language, "de")
+            self.assertIn("Deutsch", pref_modal.view(120, 34))
+
+            pref_modal._cycle_row(7, 1)
+            self.assertEqual(pref_modal.language, "es")
+            self.assertIn("Español", pref_modal.view(120, 34))
+
+            # Cycle back to Danish ('da') and save preferences with Enter
+            pref_modal._cycle_row(7, 1)  # wraps to 'en'
+            pref_modal._cycle_row(7, 1)  # 'da'
+            self.assertEqual(pref_modal.language, "da")
+            _, save_cmd = pref_modal.update(KeyMsg(key="enter"))
+            self.assertIsNotNone(save_cmd)
+            saved_msg = save_cmd()
+            app, _ = app.update(saved_msg)
+
+            self.assertEqual(app.language, "da")
+            self.assertEqual(self.store.get_setting("language", "en"), "da")
+            self.assertEqual(get_language(), "da")
+
+            view_da = app.view()
+            self.assertIn("Postkasser", view_da)
+            self.assertIn("Samlet indbakke", view_da)
+            self.assertIn("Læserude", view_da)
+            self.assertIn("Filer", view_da)
+            self.assertIn("Hjælp", view_da)
+
+            # Verify PreferencesModal help texts across all 5 tabs in Danish
+            app, _ = app._execute_action("preferences")
+            pref_da: PreferencesModal = app.active_modal
+            pref_da.active_tab = 0
+            self.assertIn("Tema- & visningsindstillinger:", pref_da.view(120, 34))
+            pref_da.active_tab = 1
+            self.assertIn("Indstillinger for mail & læsning:", pref_da.view(120, 34))
+            pref_da.active_tab = 2
+            self.assertIn("Synkroniserings- & netværksindstillinger:", pref_da.view(120, 34))
+            pref_da.active_tab = 3
+            self.assertIn("Genveje & systemadvarsler:", pref_da.view(120, 34))
+            pref_da.active_tab = 4
+            self.assertIn("Indbyggede plugin-genveje & funktioner:", pref_da.view(120, 34))
+
+            # Switch to German ('de') and verify rendered UI + Preferences help text
+            self.store.set_setting("language", "de")
+            app_de = EspressoMailApp(self.store, show_splash=False)
+            app_de.show_onboarding = False
+            app_de.update(WindowSizeMsg(width=120, height=34))
+            view_de = app_de.view()
+            self.assertIn("Postfächer", view_de)
+            self.assertIn("Gemeinsamer Posteingang", view_de)
+            self.assertIn("Lesebereich", view_de)
+            self.assertIn("Datei", view_de)
+            self.assertIn("Hilfe", view_de)
+            app_de, _ = app_de._execute_action("preferences")
+            pref_de: PreferencesModal = app_de.active_modal
+            pref_de.active_tab = 0
+            self.assertIn("Themen- & Anzeigeeinstellungen:", pref_de.view(120, 34))
+
+            # Switch to Spanish ('es') and verify rendered UI + Preferences help text
+            self.store.set_setting("language", "es")
+            app_es = EspressoMailApp(self.store, show_splash=False)
+            app_es.show_onboarding = False
+            app_es.update(WindowSizeMsg(width=120, height=34))
+            view_es = app_es.view()
+            self.assertIn("Buzones", view_es)
+            self.assertIn("Bandeja unificada", view_es)
+            self.assertIn("Panel de lectura", view_es)
+            self.assertIn("Archivo", view_es)
+            self.assertIn("Ayuda", view_es)
+            app_es, _ = app_es._execute_action("preferences")
+            pref_es: PreferencesModal = app_es.active_modal
+            pref_es.active_tab = 0
+            self.assertIn("Ajustes de tema y visualización:", pref_es.view(120, 34))
+
+            # Verify every static tr("...") call in src/espressomail exists in en/da/de/es JSON files
+            import ast
+            src_root = Path(__file__).resolve().parent.parent / "src" / "espressomail"
+            tr_literals: set[str] = set()
+            for py_file in src_root.rglob("*.py"):
+                tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+                for node in ast.walk(tree):
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "tr"
+                        and node.args
+                        and isinstance(node.args[0], ast.Constant)
+                        and isinstance(node.args[0].value, str)
+                    ):
+                        tr_literals.add(node.args[0].value)
+
+            for lang_code in ("en", "da", "de", "es"):
+                json_file = BUILTIN_LOCALES_DIR / f"{lang_code}.json"
+                data = json.loads(json_file.read_text(encoding="utf-8"))
+                missing = tr_literals - set(data["strings"].keys())
+                self.assertEqual(
+                    missing,
+                    set(),
+                    f"Missing translations in {lang_code}.json: {sorted(missing)}",
+                )
+        finally:
+            reload_locales()
+            self.store.set_setting("language", "en")
+            set_language("en")
+
+    def test_espresso_1_4_0_beans_and_utils_full_adoption(self) -> None:
+        """Verify comprehensive adoption of Tabs, MarkdownViewer, DatePicker, and utils/i18n."""
+        from datetime import date
+        from espresso.beans import DatePicker, DateSelectMsg, MarkdownViewer, TabChangeMsg, Tabs
+        from espresso.crema import Style
+        from espressomail.i18n import normalize_language, validate_catalogs
+        from espressomail.themes.engine import THEMES
+        from espressomail.ui.modals import ComposeModal, PreferencesModal, SearchModal
+
+        populate_test_store(self.store)
+        theme = THEMES["espresso"]
+
+        # 1. Verify Tabs bean in PreferencesModal
+        pref = PreferencesModal(self.store, current_theme=theme, download_dir="/tmp/downloads")
+        self.assertIsInstance(pref.tabs, Tabs)
+        self.assertEqual(pref.tabs.active_tab, 0)
+        self.assertEqual(pref.active_tab, 0)
+
+        # Tab switching updates pref.tabs and pref.active_tab
+        pref, _ = pref.update(KeyMsg("2"))
+        self.assertEqual(pref.active_tab, 1)
+        self.assertEqual(pref.tabs.active_tab, 1)
+
+        pref, _ = pref.update(KeyMsg("]"))
+        self.assertEqual(pref.active_tab, 2)
+        self.assertEqual(pref.tabs.active_tab, 2)
+
+        # TabChangeMsg synchronization
+        pref, _ = pref.update(TabChangeMsg(index=4, title="Plugins"))
+        self.assertEqual(pref.active_tab, 4)
+        self.assertEqual(pref.tabs.active_tab, 4)
+
+        # Mouse click hit on row 0 delegates to pref.tabs
+        pos_x = pref.last_pos_x
+        pos_y = pref.last_pos_y
+        tab_y = pos_y + 2
+        first_tab_x = pos_x + pref.tab_bounds[0][0] + 1
+        pref, _ = pref.update(MouseMsg(x=first_tab_x, y=tab_y, action=MouseAction.PRESS, button=MouseButton.LEFT))
+        self.assertEqual(pref.active_tab, 0)
+        self.assertEqual(pref.tabs.active_tab, 0)
+
+        # 2. Verify MarkdownViewer in ComposeModal
+        acc = self.store.list_accounts()[0]
+        compose = ComposeModal(accounts=[acc], contacts=[], theme=theme)
+        self.assertIsInstance(compose.md_viewer, MarkdownViewer)
+        compose.editor.value = "# Team Update\n\n- Milestone 1 done\n- Milestone 2 in progress"
+
+        # Toggle preview mode with F4
+        self.assertFalse(compose.preview_mode)
+        compose, _ = compose.update(KeyMsg("f4"))
+        self.assertTrue(compose.preview_mode)
+
+        # Scrolling keys delegated to md_viewer
+        compose, _ = compose.update(KeyMsg("down"))
+        compose, _ = compose.update(KeyMsg("pgdown"))
+        compose, _ = compose.update(MouseMsg(x=10, y=10, action=MouseAction.PRESS, button=MouseButton.WHEEL_DOWN))
+
+        # View rendering includes MarkdownViewer content
+        view_comp = compose.view(90, 30)
+        self.assertIn("Markdown Live Preview", view_comp)
+        self.assertIn("Milestone 1 done", view_comp)
+
+        # Toggle preview off
+        compose, _ = compose.update(KeyMsg("f4"))
+        self.assertFalse(compose.preview_mode)
+
+        # 3. Verify DatePicker in SearchModal
+        search = SearchModal(store=self.store, theme=theme)
+        self.assertIsInstance(search.date_picker, DatePicker)
+        self.assertFalse(search.show_date_picker)
+
+        # Press Ctrl+D to toggle DatePicker
+        search, _ = search.update(KeyMsg("ctrl+d"))
+        self.assertTrue(search.show_date_picker)
+        view_search_dp = search.view(85)
+        self.assertIn("Pick Date Filter", view_search_dp)
+
+        # Pick date via DateSelectMsg
+        search, _ = search.update(DateSelectMsg(date(2026, 11, 1)))
+        self.assertFalse(search.show_date_picker)
+        self.assertIn("since:2026-11-01", search.query_input.value)
+
+        # Pick second date -> becomes before:
+        search, _ = search.update(KeyMsg("ctrl+d"))
+        self.assertTrue(search.show_date_picker)
+        search, _ = search.update(DateSelectMsg(date(2026, 11, 30)))
+        self.assertFalse(search.show_date_picker)
+        self.assertIn("since:2026-11-01", search.query_input.value)
+        self.assertIn("before:2026-11-30", search.query_input.value)
+
+        # Verify SearchQuery parses date filters
+        from espressomail.search.fuzzy import parse_search_query
+        sq = parse_search_query(search.query_input.value)
+        self.assertEqual(sq.since_date, "2026-11-01")
+        self.assertEqual(sq.before_date, "2026-11-30")
+
+        # 4. Verify highlight_matches_ansi in SearchModal results
+        search.query_input.value = "invoice"
+        search._refresh_results()
+        if search.results:
+            view_hl = search.view(85)
+            self.assertIn("invoice", view_hl.lower())
+
+        # 5. Verify copy_to_clipboard integration in app
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.desktop_notifications = False
+        app.active_account_id = "acc_work"
+        app.active_folder = "INBOX"
+        app.refresh_data()
+        self.assertIsNotNone(app.selected_message)
+
+        # Press 'Y' to copy message text to clipboard
+        with mock.patch("espresso.utils.copy_to_clipboard", return_value=True) as mock_copy:
+            app, _ = app.update(KeyMsg("Y"))
+            mock_copy.assert_called_once()
+            self.assertIn("Message body copied to clipboard", app.status_message)
+
+        # In reader pane, pressing 'y' also copies message text
+        app.focused_pane = "reader"
+        with mock.patch("espresso.utils.copy_to_clipboard", return_value=True) as mock_copy_reader:
+            app, _ = app.update(KeyMsg("y"))
+            mock_copy_reader.assert_called_once()
+
+        # 6. Verify detect_system_locale and validate_catalogs in i18n
+        issues = validate_catalogs()
+        self.assertIsInstance(issues, list)
+        with mock.patch.dict("os.environ", {"LANG": "da_DK.UTF-8", "LC_ALL": ""}):
+            detected = normalize_language("auto")
+            self.assertEqual(detected, "da")
+
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-
 

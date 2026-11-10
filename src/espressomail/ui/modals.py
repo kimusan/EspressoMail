@@ -10,13 +10,20 @@ from typing import Any, Callable, Sequence
 
 from espresso import Cmd, KeyMsg, Model, MouseAction, MouseButton, MouseMsg, Msg
 from espresso.beans import (
+    DatePicker,
+    DateSelectMsg,
     EchoMode,
     FilePicker,
     FileSelectMsg,
+    MarkdownViewer,
+    TabChangeMsg,
+    Tabs,
+    TabStyle,
     TextArea,
     TextInput,
     format_file_size,
 )
+from espresso.utils import highlight_matches_ansi
 from espresso.crema import (
     DOUBLE_BORDER,
     ROUNDED_BORDER,
@@ -50,6 +57,14 @@ from espressomail.protocols.sieve import (
     validate_sieve_script,
 )
 from espressomail.protocols.smtp_client import validate_account_credentials
+from espressomail.i18n import (
+    LANGUAGE_LABELS,
+    SUPPORTED_LANGUAGES,
+    get_language,
+    normalize_language,
+    set_language,
+    tr,
+)
 from espressomail.search.fuzzy import FuzzySearchEngine, SearchResult
 from espressomail.storage.database import LocalStore
 from espressomail.themes.engine import COLOR_MODES, THEME_FAMILIES, THEMES, Theme, ThemeEngine
@@ -151,6 +166,7 @@ class PreferencesSavedMsg(Msg):
     icon_mode: str = "emoji"
     check_updates_startup: bool = True
     update_notice_mode: str = "toast"
+    language: str = "en"
 
 
 
@@ -219,6 +235,13 @@ class ComposeModal(Model):
         self.pgp_encrypt = False
         self.render_markdown = True
         self.preview_mode = False
+        self.md_viewer = MarkdownViewer(
+            content=self.editor.value or tr("(Empty body)"),
+            width=60,
+            height=10,
+            show_scrollbar=True,
+            show_footer=True,
+        )
         self.show_file_picker = False
         self.file_picker = FilePicker(
             directory=".",
@@ -374,6 +397,16 @@ class ComposeModal(Model):
                     self.account_idx = (self.account_idx + step) % len(self.accounts)
                 return self, None
 
+        if self.preview_mode:
+            if isinstance(msg, KeyMsg):
+                k_low = str(msg.key).lower()
+                if k_low in ("up", "down", "pageup", "pagedown", "home", "end", "g", "j", "k"):
+                    self.md_viewer, cmd = self.md_viewer.update(msg)
+                    return self, cmd
+            elif isinstance(msg, MouseMsg) and msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
+                self.md_viewer, cmd = self.md_viewer.update(msg)
+                return self, cmd
+
         if self.focus_idx == 1:
             self.input_to, cmd = self.input_to.update(msg)
             return self, cmd
@@ -429,46 +462,46 @@ class ComposeModal(Model):
                 Style()
                 .bold(True)
                 .foreground(self.theme.accent_secondary)
-                .render("📎 Select File to Attach:"),
+                .render(tr("📎 Select File to Attach:")),
                 "",
                 self.file_picker.view(),
                 "",
                 Style()
                 .foreground(self.theme.fg_muted)
-                .render(truncate_ansi("[↑/↓] Navigate   [Enter] Select File / Open Dir   [Backspace] Parent   [Esc] Cancel", content_w)),
+                .render(truncate_ansi(tr("[↑/↓] Navigate   [Enter] Select File / Open Dir   [Backspace] Parent   [Esc] Cancel"), content_w)),
             )
-            return self.theme.modal_style(modal_w, "Attach File").render(picker_content)
+            return self.theme.modal_style(modal_w, tr("Attach File")).render(picker_content)
 
         acc = self.active_account
-        acc_label = f"{acc.name} <{acc.email}>" if acc else "None"
+        acc_label = f"{acc.name} <{acc.email}>" if acc else tr("None")
         from_style = (
             Style().bold(True).foreground(self.theme.accent_secondary)
             if self.focus_idx == 0
             else Style().foreground(self.theme.fg_primary)
         )
-        from_row = truncate_ansi(f"From:    ◀ {from_style.render(acc_label)} ▶", content_w)
+        from_row = truncate_ansi(f"{tr('From:    ')}◀ {from_style.render(acc_label)} ▶", content_w)
 
         sign_badge = (
-            Style().bold(True).foreground(self.theme.pgp_verified_fg).render("[x] Sign (Ctrl+G)")
+            Style().bold(True).foreground(self.theme.pgp_verified_fg).render(tr("[x] Sign (Ctrl+G)"))
             if self.pgp_sign
-            else Style().foreground(self.theme.fg_muted).render("[ ] Sign (Ctrl+G)")
+            else Style().foreground(self.theme.fg_muted).render(tr("[ ] Sign (Ctrl+G)"))
         )
         enc_badge = (
-            Style().bold(True).foreground(self.theme.pgp_warning_fg).render("[x] Encrypt (Ctrl+E)")
+            Style().bold(True).foreground(self.theme.pgp_warning_fg).render(tr("[x] Encrypt (Ctrl+E)"))
             if self.pgp_encrypt
-            else Style().foreground(self.theme.fg_muted).render("[ ] Encrypt (Ctrl+E)")
+            else Style().foreground(self.theme.fg_muted).render(tr("[ ] Encrypt (Ctrl+E)"))
         )
         md_badge = (
-            Style().bold(True).foreground(self.theme.accent_primary).render("[x] MD (Ctrl+M)")
+            Style().bold(True).foreground(self.theme.accent_primary).render(tr("[x] MD (Ctrl+M)"))
             if self.render_markdown
-            else Style().foreground(self.theme.fg_muted).render("[ ] MD (Ctrl+M)")
+            else Style().foreground(self.theme.fg_muted).render(tr("[ ] MD (Ctrl+M)"))
         )
         preview_badge = (
-            Style().bold(True).foreground(self.theme.accent_secondary).render("[F4] Preview: ON")
+            Style().bold(True).foreground(self.theme.accent_secondary).render(tr("[F4] Preview: ON"))
             if self.preview_mode
-            else Style().foreground(self.theme.fg_muted).render("[F4] Preview: OFF")
+            else Style().foreground(self.theme.fg_muted).render(tr("[F4] Preview: OFF"))
         )
-        ext_badge = Style().bold(True).foreground(self.theme.accent_secondary).render("[Ctrl+O] Editor ($EDITOR)")
+        ext_badge = Style().bold(True).foreground(self.theme.accent_secondary).render(tr("[Ctrl+O] Editor ($EDITOR)"))
 
         att_names: list[str] = []
         for p_str in self.attachments:
@@ -478,7 +511,7 @@ class ComposeModal(Model):
         att_line = (
             Style().foreground(self.theme.attachment_fg).render(truncate_ansi("  ".join(att_names), max(20, content_w - 9)))
             if att_names
-            else Style().foreground(self.theme.fg_muted).render("(No attachments — Ctrl+A to attach)")
+            else Style().foreground(self.theme.fg_muted).render(tr("(No attachments — Ctrl+A to attach)"))
         )
 
         to_view = self.input_to.view()
@@ -494,7 +527,7 @@ class ComposeModal(Model):
                     chip = Style().foreground(self.theme.fg_secondary).render(f"[{disp}]")
                 chips.append(chip)
             sugg_str = truncate_ansi(
-                Style().foreground(self.theme.fg_muted).render("         Suggestions (Tab/Enter): ") + " ".join(chips),
+                Style().foreground(self.theme.fg_muted).render(tr("         Suggestions (Tab/Enter): ")) + " ".join(chips),
                 content_w,
             )
             if self.focus_idx == 1:
@@ -506,14 +539,18 @@ class ComposeModal(Model):
             self.theme.border_focused if self.focus_idx == 4 else self.theme.border_unfocused
         )
         if self.preview_mode:
-            preview_rendered = format_email_body(self.editor.value or "(Empty body)", self.theme, content_w - 4)
+            viewer_h = max(6, self.editor.height)
+            viewer_w = max(20, content_w - 4)
+            self.md_viewer.set_size(viewer_w, viewer_h)
+            self.md_viewer.set_content(self.editor.value or tr("(Empty body)"))
+            preview_rendered = self.md_viewer.view()
             editor_box = (
                 Style()
                 .border(ROUNDED_BORDER)
                 .border_foreground(self.theme.accent_secondary)
                 .border_background(self.theme.bg_primary)
                 .background(self.theme.bg_primary)
-                .border_title(" 👁 Markdown Live Preview (F4 to edit) ", align=Align.LEFT)
+                .border_title(f" 👁 {tr('Markdown Live Preview (F4 to edit)')} ", align=Align.LEFT)
                 .width(content_w)
                 .render(preview_rendered)
             )
@@ -524,18 +561,18 @@ class ComposeModal(Model):
                 .border_foreground(body_border_fg)
                 .border_background(self.theme.bg_primary)
                 .background(self.theme.bg_primary)
-                .border_title(" Message Body (Markdown supported) ", align=Align.LEFT)
+                .border_title(f" {tr('Message Body (Markdown supported)')} ", align=Align.LEFT)
                 .width(content_w)
                 .render(self.editor.view())
             )
 
-        footer_text = "[F5] Send  [Ctrl+S] Draft  [Ctrl+O] Editor  [Ctrl+T] Translate  [Ctrl+B] Polish  [Ctrl+L] Grammar  [F4] Preview  [Esc] Close"
+        footer_text = tr("[F5] Send  [Ctrl+S] Draft  [Ctrl+O] Editor  [Ctrl+T] Translate  [Ctrl+B] Polish  [Ctrl+L] Grammar  [F4] Preview  [Esc] Close")
         footer = Style().foreground(self.theme.fg_muted).render(truncate_ansi(footer_text, content_w))
 
         badge_line_1 = f"{sign_badge}   {enc_badge}   {md_badge}"
-        trans_badge = Style().bold(True).foreground(self.theme.accent_primary).render("[Ctrl+T] Translate")
-        ai_badge = Style().bold(True).foreground(self.theme.accent_secondary).render("[Ctrl+B] AI Polish")
-        lt_badge = Style().bold(True).foreground(self.theme.accent_primary).render("[Ctrl+L] Grammar")
+        trans_badge = Style().bold(True).foreground(self.theme.accent_primary).render(tr("[Ctrl+T] Translate"))
+        ai_badge = Style().bold(True).foreground(self.theme.accent_secondary).render(tr("[Ctrl+B] AI Polish"))
+        lt_badge = Style().bold(True).foreground(self.theme.accent_primary).render(tr("[Ctrl+L] Grammar"))
         badge_line_2 = f"{preview_badge}   {ext_badge}   {trans_badge}   {ai_badge}   {lt_badge}"
         if string_width(f"{badge_line_1}   {badge_line_2}") <= content_w:
             badges_row = [f"{badge_line_1}   {badge_line_2}"]
@@ -548,14 +585,14 @@ class ComposeModal(Model):
             cc_view,
             self.input_subject.view(),
             *badges_row,
-            f"Files:   {att_line}",
+            f"{tr('Files:   ')}{att_line}",
         ]
         if self.editor_status_msg:
             content_rows.append(Style().foreground(self.theme.accent_secondary).render(truncate_ansi(self.editor_status_msg, content_w)))
         content_rows.extend([editor_box, footer])
 
         content = join_vertical(Align.LEFT, *content_rows)
-        return self.theme.modal_style(modal_w, "✉️ Compose Email").render(content)
+        return self.theme.modal_style(modal_w, f"✉️ {tr('Compose Email')}").render(content)
 
 
 # ---------------------------------------------------------------------------
@@ -571,41 +608,124 @@ class SearchModal(Model):
         self.engine = FuzzySearchEngine(store)
         self.theme = theme
         self.query_input = TextInput(
-            placeholder="Type fuzzy query or operators (from:elena has:attachment is:unread)...",
-            prompt="🔍 Search: ",
+            placeholder=tr("Type fuzzy query or operators (from:elena has:attachment is:unread)..."),
+            prompt=f"🔍 {tr('Search')}: ",
             **self.theme.text_input_styles(),
         )
         self.query_input.value = initial_query
         self.query_input.focus()
         self.results: list[SearchResult] = []
         self.cursor = 0
+        self.scroll_offset = 0
+        self.page_size = 8
         self.status_msg = ""
-        self._refresh_results()
+        self.last_app_w = 80
+        self.last_app_h = 24
+        self.last_modal_w = 74
+        self.last_modal_h = 20
+        self.last_pos_x = 3
+        self.last_pos_y = 2
+        self.result_line_to_index: dict[int, int] = {}
+        import datetime
 
-    def _refresh_results(self) -> None:
-        self.results = self.engine.search(self.query_input.value, limit=25)
-        self.cursor = min(self.cursor, max(0, len(self.results) - 1))
+        self.show_date_picker = False
+        self.date_picker = DatePicker(
+            value=datetime.date.today(),
+            border_foreground=self.theme.accent_primary,
+        )
+        self._refresh_results(reset_cursor=True)
+
+    def _adjust_scroll(self) -> None:
+        if not self.results:
+            self.cursor = 0
+            self.scroll_offset = 0
+            return
+        self.cursor = max(0, min(self.cursor, len(self.results) - 1))
+        effective_page = max(1, self.page_size)
+        if self.cursor < self.scroll_offset:
+            self.scroll_offset = self.cursor
+        elif self.cursor >= self.scroll_offset + effective_page:
+            self.scroll_offset = self.cursor - effective_page + 1
+        max_scroll = max(0, len(self.results) - effective_page)
+        self.scroll_offset = max(0, min(self.scroll_offset, max_scroll))
+
+    def _refresh_results(self, reset_cursor: bool = False) -> None:
+        self.results = self.engine.search(self.query_input.value, limit=100)
+        if reset_cursor or not self.results:
+            self.cursor = 0
+            self.scroll_offset = 0
+        else:
+            self.cursor = min(self.cursor, max(0, len(self.results) - 1))
+            self._adjust_scroll()
 
     def init(self) -> Cmd | None:
         return None
 
     def update(self, msg: Msg) -> tuple[SearchModal, Cmd | None]:
+        if self.show_date_picker:
+            if isinstance(msg, KeyMsg) and str(msg.key).lower() == "esc":
+                self.show_date_picker = False
+                return self, None
+            self.date_picker, cmd = self.date_picker.update(msg)
+            selected_date = None
+            if isinstance(msg, DateSelectMsg):
+                selected_date = msg.date
+            elif cmd is not None:
+                res = cmd() if callable(cmd) else None
+                if isinstance(res, DateSelectMsg):
+                    selected_date = res.date
+            if selected_date is not None:
+                dt_str = selected_date.isoformat()
+                q = self.query_input.value.strip()
+                tag = f"before:{dt_str}" if "since:" in q else f"since:{dt_str}"
+                self.query_input.value = f"{q} {tag}".strip()
+                self.show_date_picker = False
+                self._refresh_results(reset_cursor=True)
+                return self, None
+            return self, cmd
+
         if isinstance(msg, KeyMsg):
-            k = str(msg.key)
+            k = str(msg.key).lower()
             if k == "esc":
                 return self, lambda: ModalClosedMsg()
+            if k in ("ctrl+d", "f3"):
+                self.show_date_picker = not self.show_date_picker
+                return self, None
             if k in ("ctrl+r", "f5"):
                 q = self.query_input.value.strip()
                 if q:
-                    self.status_msg = "⟳ Searching remote IMAP servers (MULTISEARCH)..."
+                    self.status_msg = tr("⟳ Searching remote IMAP servers (MULTISEARCH)...")
                     return self, lambda: SearchRemoteMsg(query=q)
+                return self, None
             if k == "down":
                 if self.results:
-                    self.cursor = (self.cursor + 1) % len(self.results)
+                    self.cursor = min(len(self.results) - 1, self.cursor + 1)
+                    self._adjust_scroll()
                 return self, None
             if k == "up":
                 if self.results:
-                    self.cursor = (self.cursor - 1) % len(self.results)
+                    self.cursor = max(0, self.cursor - 1)
+                    self._adjust_scroll()
+                return self, None
+            if k in ("pagedown", "pgdown"):
+                if self.results:
+                    self.cursor = min(len(self.results) - 1, self.cursor + max(1, self.page_size))
+                    self._adjust_scroll()
+                return self, None
+            if k in ("pageup", "pgup"):
+                if self.results:
+                    self.cursor = max(0, self.cursor - max(1, self.page_size))
+                    self._adjust_scroll()
+                return self, None
+            if k == "ctrl+home":
+                if self.results:
+                    self.cursor = 0
+                    self._adjust_scroll()
+                return self, None
+            if k == "ctrl+end":
+                if self.results:
+                    self.cursor = max(0, len(self.results) - 1)
+                    self._adjust_scroll()
                 return self, None
             if k == "enter":
                 if self.results and 0 <= self.cursor < len(self.results):
@@ -613,91 +733,218 @@ class SearchModal(Model):
                     return self, lambda: SearchSelectMessageMsg(chosen)
                 return self, None
 
+        if isinstance(msg, MouseMsg):
+            if msg.button == MouseButton.WHEEL_UP:
+                if self.results:
+                    self.cursor = max(0, self.cursor - 1)
+                    self._adjust_scroll()
+                return self, None
+            if msg.button == MouseButton.WHEEL_DOWN:
+                if self.results:
+                    self.cursor = min(len(self.results) - 1, self.cursor + 1)
+                    self._adjust_scroll()
+                return self, None
+            if msg.action in (MouseAction.PRESS, MouseAction.DOUBLE_CLICK) and msg.button == MouseButton.LEFT:
+                rel_x = msg.x - getattr(self, "last_pos_x", 0)
+                rel_y = msg.y - getattr(self, "last_pos_y", 0)
+                if 0 <= rel_x < getattr(self, "last_modal_w", 80) and 0 <= rel_y < getattr(self, "last_modal_h", 24):
+                    content_y = rel_y - 2
+                    if hasattr(self, "result_line_to_index") and content_y in self.result_line_to_index:
+                        clicked_idx = self.result_line_to_index[content_y]
+                        if msg.action == MouseAction.DOUBLE_CLICK or self.cursor == clicked_idx:
+                            chosen = self.results[clicked_idx].message
+                            return self, lambda: SearchSelectMessageMsg(chosen)
+                        else:
+                            self.cursor = clicked_idx
+                            self._adjust_scroll()
+                            return self, None
+
         prev_val = self.query_input.value
         self.query_input, cmd = self.query_input.update(msg)
         if self.query_input.value != prev_val:
-            self._refresh_results()
+            self._refresh_results(reset_cursor=True)
         return self, cmd
 
-    def view(self, width: int = 80) -> str:
-        modal_w = min(82, max(58, width - 6))
-        inner_w = modal_w - 6
-        self.query_input.width = inner_w
+    def view(self, width: int = 80, height: int = 24) -> str:
+        self.last_app_w = width
+        self.last_app_h = height
+        modal_w = min(84, max(58, width - 6))
+        modal_h = min(24, max(16, height - 4)) if height >= 20 else max(12, height - 2)
+        self.last_modal_w = modal_w
+        self.last_modal_h = modal_h
+        self.last_pos_x = max(0, (width - modal_w) // 2)
+        self.last_pos_y = max(0, (height - modal_h) // 2)
 
-        tips_raw = "Operators: from:<name>  to:<addr>  subject:<word>  body:<text>  att:<file>  has:attachment  is:unread"
+        inner_w = modal_w - 6
+        inner_h = modal_h - 4
+        self.query_input.width = inner_w
+        self.result_line_to_index = {}
+
+        tips_raw = tr("Operators: from:<name>  to:<addr>  subject:<word>  body:<text>  since:<YYYY-MM-DD>  before:<YYYY-MM-DD>  att:<file>  has:attachment  is:unread")
         if inner_w >= string_width(tips_raw):
             tips_content = tips_raw
+            tips_lines_count = 1
         else:
-            tips_line_1 = truncate_ansi("Operators: from:<name>  to:<addr>  subject:<word>  body:<text>", inner_w)
-            tips_line_2 = truncate_ansi("           att:<file>  has:attachment  is:unread", inner_w)
+            tips_line_1 = truncate_ansi(tr("Operators: from:<name>  to:<addr>  subject:<word>  body:<text>"), inner_w)
+            tips_line_2 = truncate_ansi("           since:<YYYY-MM-DD>  before:<YYYY-MM-DD>  att:<file>  has:attachment  is:unread", inner_w)
             tips_content = f"{tips_line_1}\n{tips_line_2}"
+            tips_lines_count = 2
         tips = Style().foreground(self.theme.fg_muted).render(tips_content)
 
-        rows: list[str] = []
-        visible_slice = self.results[:10]
-        if not visible_slice:
-            rows.append(
-                Style()
-                .italic(True)
-                .foreground(self.theme.fg_muted)
-                .render("  No matching emails found in local SQLite database.")
+        status_line = ""
+        status_lines_count = 0
+        if self.status_msg:
+            status_line = Style().bold(True).foreground(self.theme.accent_secondary).render(
+                truncate_ansi(self.status_msg, inner_w)
             )
+            status_lines_count = 1
+
+        overhead = 1 + tips_lines_count + 1 + 1 + 1 + status_lines_count
+        list_height = max(3, inner_h - overhead)
+        self.page_size = max(2, list_height - 1)
+        self._adjust_scroll()
+
+        if self.show_date_picker:
+            dp_lines = self.date_picker.view().split("\n")
+            content_elements = [self.query_input.view(), ""]
+            content_elements.extend(dp_lines)
+            while len(content_elements) < inner_h - 2:
+                content_elements.append(" " * inner_w)
+            dp_footer = Style().foreground(self.theme.fg_muted).render(
+                truncate_ansi(tr("Pick Date Filter (Enter: Apply, Esc: Cancel)"), inner_w)
+            )
+            content_elements.extend(["", dp_footer])
+            content = "\n".join(content_elements[:inner_h])
+            return (
+                self.theme.modal_style(modal_w, f"🔍 {tr('Instant Full-Text & Fuzzy Database Search')} (FTS5)")
+                .height(modal_h)
+                .render(content)
+            )
+
+        raw_q = self.query_input.value.strip()
+        search_terms = [
+            t.strip()
+            for t in raw_q.split()
+            if t.strip()
+            and not any(
+                t.lower().startswith(p)
+                for p in ("from:", "to:", "subject:", "body:", "att:", "has:", "is:", "since:", "before:")
+            )
+        ]
+
+        has_scrollbar = len(self.results) > self.page_size
+        content_w = inner_w - 2 if has_scrollbar else inner_w
+
+        raw_rows: list[tuple[str, int | None]] = []
+        if not self.results:
+            empty_msg = Style().italic(True).foreground(self.theme.fg_muted).render(
+                pad_cell(tr("  No matching emails found in local SQLite database."), content_w)
+            )
+            raw_rows.append((empty_msg, None))
         else:
-            for idx, hit in enumerate(visible_slice):
+            visible_slice = self.results[self.scroll_offset : self.scroll_offset + self.page_size]
+            for rel_idx, hit in enumerate(visible_slice):
+                abs_idx = self.scroll_offset + rel_idx
                 m = hit.message
-                marker = "▸ " if idx == self.cursor else "  "
+                is_cursor = (abs_idx == self.cursor)
+                marker = "▸ " if is_cursor else "  "
                 score_badge = f"[{int(hit.score)}%]"
                 fields_str = f"({','.join(hit.matched_fields[:2])})" if hit.matched_fields else ""
                 meta_suffix = f"{score_badge} {fields_str}".strip()
 
                 date_cell = pad_cell(m.short_date, 6)
                 sender_cell = pad_cell(m.sender_short, 16)
-                avail_subj = max(8, inner_w - 2 - 6 - 3 - 16 - 3 - string_width(meta_suffix) - 1)
+                avail_subj = max(8, content_w - 2 - 6 - 3 - 16 - 3 - string_width(meta_suffix) - 1)
                 subj_cell = pad_cell(m.subject, avail_subj)
 
                 line = f"{marker}{date_cell} │ {sender_cell} │ {subj_cell} {meta_suffix}".rstrip()
-                truncated = truncate_ansi(line, inner_w)
-                if idx == self.cursor:
-                    rows.append(
+                padded = pad_cell(line, content_w)
+                if is_cursor:
+                    styled_line = (
                         Style()
                         .bold(True)
                         .foreground(self.theme.bg_primary)
                         .background(self.theme.accent_primary)
-                        .width(inner_w)
-                        .render(truncated)
+                        .render(padded)
                     )
-                    if hit.snippet:
-                        snippet_line = f"    ↳ {hit.snippet.strip()}"
-                        rows.append(
-                            Style()
-                            .italic(True)
-                            .foreground(self.theme.accent_secondary)
-                            .render(truncate_ansi(snippet_line, inner_w))
-                        )
                 else:
-                    rows.append(Style().foreground(self.theme.fg_primary).render(truncated))
+                    styled_line = Style().foreground(self.theme.fg_primary).render(padded)
+                raw_rows.append((styled_line, abs_idx))
 
-        if self.status_msg:
-            rows.append("")
-            rows.append(
-                Style().bold(True).foreground(self.theme.accent_secondary).render(
-                    truncate_ansi(self.status_msg, inner_w)
-                )
+                if is_cursor and hit.snippet and list_height >= 3:
+                    snippet_line = f"    ↳ {hit.snippet.strip()}"
+                    for t in search_terms:
+                        if len(t) >= 2:
+                            snippet_line = highlight_matches_ansi(
+                                snippet_line,
+                                t,
+                                Style().bold(True).foreground(self.theme.accent_primary),
+                            )
+                    styled_snippet = (
+                        Style()
+                        .italic(True)
+                        .foreground(self.theme.accent_secondary)
+                        .render(pad_cell(snippet_line, content_w))
+                    )
+                    raw_rows.append((styled_snippet, abs_idx))
+
+        raw_rows = raw_rows[:list_height]
+        while len(raw_rows) < list_height:
+            raw_rows.append((Style().render(" " * content_w), None))
+
+        track_char = Style().foreground(self.theme.border_unfocused).render("│")
+        thumb_char = Style().bold(True).foreground(self.theme.accent_primary).render("█")
+
+        if has_scrollbar:
+            total_items = len(self.results)
+            capacity = self.page_size
+            track_len = list_height
+            thumb_size = max(1, int(round(track_len * (capacity / total_items))))
+            max_scroll = max(1, total_items - capacity)
+            ratio = min(1.0, max(0.0, self.scroll_offset / max_scroll))
+            thumb_top = int(round(ratio * (track_len - thumb_size)))
+            thumb_bottom = min(track_len, thumb_top + thumb_size)
+
+        final_rows: list[str] = []
+        for i in range(list_height):
+            row_content, abs_idx = raw_rows[i]
+            if has_scrollbar:
+                sb = thumb_char if (thumb_top <= i < thumb_bottom) else track_char
+                final_rows.append(f"{row_content} {sb}")
+            else:
+                final_rows.append(row_content)
+
+        list_start_line = 1 + tips_lines_count + 1
+        for i in range(list_height):
+            _, abs_idx = raw_rows[i]
+            if abs_idx is not None:
+                self.result_line_to_index[list_start_line + i] = abs_idx
+
+        if has_scrollbar:
+            scroll_info = tr("Showing {start}–{end} of {total} matches").format(
+                start=self.scroll_offset + 1,
+                end=min(len(self.results), self.scroll_offset + self.page_size),
+                total=len(self.results),
             )
-
-        footer_text = f"{len(self.results)} matches [FTS5]   [Ctrl+R] Remote IMAP   [↑/↓] Navigate   [Enter] Open   [Esc] Close"
+            shortcuts = tr("[Ctrl+D] Date   [Ctrl+R] Remote   [↑/↓/PgUp/PgDn] Scroll   [Enter] Open   [Esc] Close")
+            footer_text = f"{scroll_info} [FTS5]   {shortcuts}"
+        else:
+            footer_text = f"{len(self.results)} {tr('matches [FTS5]   [Ctrl+D] Date Filter   [Ctrl+R] Remote IMAP   [↑/↓] Navigate   [Enter] Open   [Esc] Close')}"
         footer = Style().foreground(self.theme.fg_muted).render(truncate_ansi(footer_text, inner_w))
 
-        content = join_vertical(
-            Align.LEFT,
-            self.query_input.view(),
-            tips,
-            "",
-            "\n".join(rows),
-            "",
-            footer,
+        content_elements = [self.query_input.view(), tips, ""]
+        content_elements.extend(final_rows)
+        content_elements.append("")
+        if status_line:
+            content_elements.append(status_line)
+        content_elements.append(footer)
+
+        content = "\n".join(content_elements[:inner_h])
+        return (
+            self.theme.modal_style(modal_w, f"🔍 {tr('Instant Full-Text & Fuzzy Database Search')} (FTS5)")
+            .height(modal_h)
+            .render(content)
         )
-        return self.theme.modal_style(modal_w, "🔍 Instant Full-Text & Fuzzy Database Search (FTS5)").render(content)
 
 
 # ---------------------------------------------------------------------------
@@ -836,7 +1083,7 @@ class AddressBookModal(Model):
                     except Exception as exc:
                         self.status_msg = f"CardDAV sync failed: {exc}"
                 else:
-                    self.status_msg = "CardDAV server not configured. Set CardDAV URL in Account Settings."
+                    self.status_msg = tr("CardDAV server not configured. Set CardDAV URL in Account Settings.")
                 return self, None
             if k in ("enter", "c") and self.contacts:
                 target = self.contacts[self.cursor]
@@ -862,15 +1109,15 @@ class AddressBookModal(Model):
         if self.adding_mode:
             form_view = join_vertical(
                 Align.LEFT,
-                Style().bold(True).foreground(self.theme.accent_secondary).render("Add New Contact:"),
+                Style().bold(True).foreground(self.theme.accent_secondary).render(tr("Add New Contact:")),
                 "",
                 self.input_name.view(),
                 self.input_email.view(),
                 self.input_org.view(),
                 "",
-                Style().foreground(self.theme.fg_muted).render("[Tab] Next Field   [Enter] Save Contact   [Esc] Cancel"),
+                Style().foreground(self.theme.fg_muted).render(tr("[Tab] Next Field   [Enter] Save Contact   [Esc] Cancel")),
             )
-            return self.theme.modal_style(modal_w, "📇 Local Address Book").render(form_view)
+            return self.theme.modal_style(modal_w, f"📇 {tr('Local Address Book')}").render(form_view)
 
         rows: list[str] = []
         visible = self.contacts[self.scroll : self.scroll + self.page_size]
@@ -896,15 +1143,15 @@ class AddressBookModal(Model):
                 rows.append(Style().foreground(self.theme.fg_primary).render(truncated))
 
         if not rows:
-            rows.append(Style().italic(True).foreground(self.theme.fg_muted).render("  Address book is empty."))
+            rows.append(Style().italic(True).foreground(self.theme.fg_muted).render(tr("  Address book is empty.")))
 
         scroll_indicator = ""
         if len(self.contacts) > self.page_size:
             scroll_indicator = (
-                f"Showing {self.scroll + 1}–{min(len(self.contacts), self.scroll + self.page_size)} of {len(self.contacts)} contacts"
+                f"Showing {self.scroll + 1}–{min(len(self.contacts), self.scroll + self.page_size)} of {len(self.contacts)} {tr('contacts')}"
             )
 
-        footer_text = (
+        footer_text = tr(
             "[↑/↓/PgUp/PgDn] Scroll   [s] Sync CardDAV   [Enter/c] Compose   [a] Add   [d] Delete   [Esc] Close"
         )
         footer_elements = [
@@ -915,7 +1162,7 @@ class AddressBookModal(Model):
         if scroll_indicator:
             footer_elements.insert(0, Style().foreground(self.theme.accent_secondary).render(truncate_ansi(scroll_indicator, inner_w)))
 
-        title = f"📇 Local Address Book ({len(self.contacts)} contacts)" if self.contacts else "📇 Local Address Book"
+        title = f"📇 {tr('Local Address Book')} ({len(self.contacts)} {tr('contacts')})" if self.contacts else f"📇 {tr('Local Address Book')}"
         content = join_vertical(Align.LEFT, "\n".join(rows), "", *footer_elements)
         return self.theme.modal_style(modal_w, title).render(content)
 
@@ -938,7 +1185,7 @@ class SieveModal(Model):
         self.page_size = 5
         self.adding_rule = False
         self.editor_focused = True
-        self.status_banner = "RFC 5228 Sieve Script valid and ready."
+        self.status_banner = tr("RFC 5228 Sieve Script valid and ready.")
         styles = self.theme.text_input_styles()
         self.input_name = TextInput(placeholder="Filter Name", prompt="Rule Name:   ", **styles)
         self.input_field = TextInput(placeholder="From / Subject / X-Spam-Flag", prompt="Header/Field:", **styles)
@@ -1020,11 +1267,11 @@ class SieveModal(Model):
                 client.connect()
                 client.put_script("active.sieve", expanded_content, activate=True)
                 client.close()
-                self.status_banner = "✔ Saved and uploaded active Sieve script to server."
+                self.status_banner = tr("✔ Saved and uploaded active Sieve script to server.")
             except Exception as ex:
                 self.status_banner = f"Saved script locally (upload notice: {ex})"
         else:
-            self.status_banner = "✔ Saved script locally."
+            self.status_banner = tr("✔ Saved script locally.")
 
     def _sync_from_server(self) -> None:
         accounts = self.store.list_accounts()
@@ -1070,7 +1317,7 @@ class SieveModal(Model):
             except Exception as ex:
                 self.status_banner = f"ManageSieve sync failed: {ex}"
         else:
-            self.status_banner = "No ManageSieve host configured for this account."
+            self.status_banner = tr("No ManageSieve host configured for this account.")
 
     def update(self, msg: Msg) -> tuple[SieveModal, Cmd | None]:
         if self.adding_rule:
@@ -1240,7 +1487,7 @@ class SieveModal(Model):
                 script_to_val = self.script_editor.value or compile_sieve_script(self.rules)
                 ok, errs = validate_sieve_script(script_to_val)
                 self.status_banner = (
-                    "✔ Sieve RFC 5228 syntax verified with 0 errors."
+                    tr("✔ Sieve RFC 5228 syntax verified with 0 errors.")
                     if ok
                     else f"✖ Validation error: {'; '.join(errs)}"
                 )
@@ -1282,16 +1529,16 @@ class SieveModal(Model):
         if self.adding_rule:
             form_view = join_vertical(
                 Align.LEFT,
-                Style().bold(True).foreground(self.theme.accent_secondary).render("Create New Sieve Filter Rule:"),
+                Style().bold(True).foreground(self.theme.accent_secondary).render(tr("Create New Sieve Filter Rule:")),
                 "",
                 self.input_name.view(),
                 self.input_field.view(),
                 self.input_pattern.view(),
                 self.input_folder.view(),
                 "",
-                Style().foreground(self.theme.fg_muted).render("[Tab] Next Field   [Enter] Save Rule   [Esc] Cancel"),
+                Style().foreground(self.theme.fg_muted).render(tr("[Tab] Next Field   [Enter] Save Rule   [Esc] Cancel")),
             )
-            return self.theme.modal_style(modal_w, "⚙️ ManageSieve & Filter Rules").render(form_view)
+            return self.theme.modal_style(modal_w, f"⚙️ {tr('ManageSieve & Filter Rules')}").render(form_view)
 
         rule_rows: list[str] = []
         visible_rules = self.rules[self.scroll : self.scroll + self.page_size]
@@ -1313,13 +1560,13 @@ class SieveModal(Model):
                 rule_rows.append(Style().foreground(self.theme.fg_primary).render(truncated))
 
         if not rule_rows:
-            rule_rows.append(Style().italic(True).foreground(self.theme.fg_muted).render("  No Sieve filter rules configured."))
+            rule_rows.append(Style().italic(True).foreground(self.theme.fg_muted).render(tr("  No Sieve filter rules configured.")))
 
         editor_border_color = self.theme.border_focused if self.editor_focused else self.theme.border_unfocused
         editor_title_str = (
-            Style().bold(True).foreground(self.theme.accent_primary).render(" Active Sieve Script Editor [Editing - Esc to unfocus] ")
+            Style().bold(True).foreground(self.theme.accent_primary).render(f" {tr('Active Sieve Script Editor [Editing - Esc to unfocus]')} ")
             if self.editor_focused
-            else Style().foreground(self.theme.fg_secondary).render(" Active Sieve Script Editor [Click or Tab to edit] ")
+            else Style().foreground(self.theme.fg_secondary).render(f" {tr('Active Sieve Script Editor [Click or Tab to edit]')} ")
         )
         editor_box = (
             Style()
@@ -1336,9 +1583,9 @@ class SieveModal(Model):
             truncate_ansi(self.status_banner, inner_w)
         )
         if inner_w >= 110:
-            footer_text = "[Tab/Click] Edit Script  [Esc] Unfocus/Close  [Space] Toggle  [a] Add  [d] Delete  [v] Validate  [u] Sync  [Ctrl+S] Save"
+            footer_text = tr("[Tab/Click] Edit Script  [Esc] Unfocus/Close  [Space] Toggle  [a] Add  [d] Delete  [v] Validate  [u] Sync  [Ctrl+S] Save")
         else:
-            footer_text = "[Tab/Click] Edit  [Esc] Back  [Space] Toggle  [a] Add  [d] Del  [u] Sync  [Ctrl+S] Save"
+            footer_text = tr("[Tab/Click] Edit  [Esc] Back  [Space] Toggle  [a] Add  [d] Del  [u] Sync  [Ctrl+S] Save")
         footer = Style().foreground(self.theme.fg_muted).render(truncate_ansi(footer_text, inner_w))
 
         content = join_vertical(
@@ -1349,7 +1596,7 @@ class SieveModal(Model):
             status_line,
             footer,
         )
-        return self.theme.modal_style(modal_w, "⚙️ ManageSieve & Filter Rules").render(content)
+        return self.theme.modal_style(modal_w, f"⚙️ {tr('ManageSieve & Filter Rules')}").render(content)
 
 
 # ---------------------------------------------------------------------------
@@ -1373,7 +1620,7 @@ class PGPModal(Model):
         self.active_message = active_message
         self.keys = self.pgp.list_keys()
         self.cursor = 0
-        self.status_note = "OpenPGP keyring loaded."
+        self.status_note = tr("OpenPGP keyring loaded.")
 
     def init(self) -> Cmd | None:
         return None
@@ -1407,7 +1654,7 @@ class PGPModal(Model):
                 elif self.active_message.pgp_status in (PGPStatus.SIGNED_VERIFIED, PGPStatus.DECRYPTED_VERIFIED):
                     self.status_note = f"✔ Verified signature from {self.active_message.pgp_signer or self.active_message.sender_email}"
                 else:
-                    self.status_note = "Active message does not contain an OpenPGP signature."
+                    self.status_note = tr("Active message does not contain an OpenPGP signature.")
                 return self, None
             if k == "x" and self.active_message:
                 if self.active_message.pgp_raw_payload and "BEGIN PGP MESSAGE" in self.active_message.pgp_raw_payload:
@@ -1418,7 +1665,7 @@ class PGPModal(Model):
                         self.store.save_message(self.active_message)
                     self.status_note = res.summary
                 else:
-                    self.status_note = "✔ Message payload is already decrypted in reading pane."
+                    self.status_note = tr("✔ Message payload is already decrypted in reading pane.")
                 return self, None
 
         return self, None
@@ -1446,10 +1693,10 @@ class PGPModal(Model):
             else:
                 rows.append(Style().foreground(self.theme.fg_primary).render(truncated))
 
-        selected_fp = self.keys[self.cursor].fingerprint if self.keys else "None"
-        fp_line = Style().foreground(self.theme.accent_secondary).render(truncate_ansi(f"Fingerprint: {selected_fp}", inner_w))
+        selected_fp = self.keys[self.cursor].fingerprint if self.keys else tr("None")
+        fp_line = Style().foreground(self.theme.accent_secondary).render(truncate_ansi(f"{tr('Fingerprint')}: {selected_fp}", inner_w))
         status_line = Style().bold(True).foreground(self.theme.pgp_verified_fg).render(truncate_ansi(self.status_note, inner_w))
-        footer_text = "[g] Generate Key   [v] Verify Email   [x] Decrypt Email   [Esc] Close"
+        footer_text = tr("[g] Generate Key   [v] Verify Email   [x] Decrypt Email   [Esc] Close")
         footer = Style().foreground(self.theme.fg_muted).render(truncate_ansi(footer_text, inner_w))
 
         content = join_vertical(
@@ -1460,7 +1707,7 @@ class PGPModal(Model):
             status_line,
             footer,
         )
-        return self.theme.modal_style(modal_w, "🔐\ufe0f OpenPGP / GnuPG Keyring Manager").render(content)
+        return self.theme.modal_style(modal_w, f"🔐\ufe0f {tr('OpenPGP / GnuPG Keyring Manager')}").render(content)
 
 
 # ---------------------------------------------------------------------------
@@ -1790,8 +2037,8 @@ class AccountSettingsModal(Model):
         modal_w = min(84, max(58, width - 6))
         acc = self.current_account
         if acc is None:
-            return self.theme.modal_style(modal_w, "⚙️ Account Settings").render(
-                "No accounts configured. Press Esc to close or O to add an account."
+            return self.theme.modal_style(modal_w, f"⚙️ {tr('Account Settings & Credentials')}").render(
+                tr("No accounts configured. Press Esc to close or O to add an account.")
             )
 
         sel_style = (
@@ -1800,7 +2047,7 @@ class AccountSettingsModal(Model):
             else Style().bold(True).foreground(self.theme.accent_secondary)
         )
         acc_selector = (
-            f"Account ({self.account_idx + 1}/{len(self.accounts)}): "
+            f"{tr('Account')} ({self.account_idx + 1}/{len(self.accounts)}): "
             f"◀ {sel_style.render(f'{acc.name} <{acc.email}>')} ▶"
         )
 
@@ -1814,7 +2061,7 @@ class AccountSettingsModal(Model):
             if self.focus_idx == 11
             else Style().foreground(self.theme.fg_primary)
         )
-        pwd_mode = "Plaintext (Ctrl+R to mask)" if self.show_password else "Masked (Ctrl+R to reveal)"
+        pwd_mode = tr("Plaintext (Ctrl+R to mask)") if self.show_password else tr("Masked (Ctrl+R to reveal)")
 
         rows = [
             acc_selector,
@@ -1826,10 +2073,10 @@ class AccountSettingsModal(Model):
             f"{self.input_password.view()}   {Style().foreground(self.theme.fg_muted).render(f'[{pwd_mode}]')}",
             self.input_imap_host.view(),
             self.input_imap_port.view(),
-            f"IMAP Security: ◀ {imap_sec_style.render(self.imap_security.value.upper())} ▶",
+            f"{tr('IMAP Security:')} ◀ {imap_sec_style.render(self.imap_security.value.upper())} ▶",
             self.input_smtp_host.view(),
             self.input_smtp_port.view(),
-            f"SMTP Security: ◀ {smtp_sec_style.render(self.smtp_security.value.upper())} ▶",
+            f"{tr('SMTP Security:')} ◀ {smtp_sec_style.render(self.smtp_security.value.upper())} ▶",
             self.input_sieve_host.view(),
             self.input_sieve_port.view(),
             self.input_carddav_url.view(),
@@ -1838,25 +2085,25 @@ class AccountSettingsModal(Model):
             "",
             Style().bold(True).foreground(
                 self.theme.accent_primary if self.focus_idx == 17 else self.theme.accent_secondary
-            ).render("Email Signature (appended to messages):"),
+            ).render(tr("Email Signature (appended to messages):")),
             self.input_signature.view(),
         ]
 
         if self.error_msg:
-            rows.append(Style().bold(True).foreground(self.theme.pgp_error_fg).render(f"⚠ {self.error_msg}"))
+            rows.append(Style().bold(True).foreground(self.theme.pgp_error_fg).render(f"⚠ {tr(self.error_msg)}"))
         if self.status_msg:
-            rows.append(Style().bold(True).foreground(self.theme.pgp_verified_fg).render(f"✔ {self.status_msg}"))
+            rows.append(Style().bold(True).foreground(self.theme.pgp_verified_fg).render(f"✔ {tr(self.status_msg)}"))
 
         rows.append("")
         rows.append(
             Style()
             .foreground(self.theme.fg_muted)
             .render(
-                "[Enter/Ctrl+S] Validate & Save  [Ctrl+T] Test Auth  [Ctrl+F] Save Offline  [Ctrl+D] Delete  [Esc] Close"
+                tr("[Enter/Ctrl+S] Validate & Save  [Ctrl+T] Test Auth  [Ctrl+F] Save Offline  [Ctrl+D] Delete  [Esc] Close")
             )
         )
 
-        return self.theme.modal_style(modal_w, "⚙️ Account Settings & Credentials").render(
+        return self.theme.modal_style(modal_w, f"⚙️ {tr('Account Settings & Credentials')}").render(
             join_vertical(Align.LEFT, *rows)
         )
 
@@ -1899,39 +2146,39 @@ class HelpModal(Model):
             return default
 
         lines = [
-            h_style.render("Navigation & Layout"),
-            f"  {k_style.render('Tab / Shift+Tab')}   Cycle focus across Folders, List, and Reader",
-            f"  {k_style.render('j / k / ↑ / ↓')}     Navigate folders, threads, or scroll reading pane",
-            f"  {k_style.render('Enter / Space')}     Select folder, open message, or toggle thread",
-            f"  {k_style.render('[ / ]')}             Resize splitter (widen reading pane / list)",
-            f"  {k_style.render(_k('unified_inbox', 'U'))}                 Jump directly to Unified Inbox",
-            f"  {k_style.render('F10 / m')}           Open interactive top drop-down Menu Bar",
+            h_style.render(tr("Navigation & Layout")),
+            f"  {k_style.render('Tab / Shift+Tab')}   {tr('Cycle focus across Folders, List, and Reader')}",
+            f"  {k_style.render('j / k / ↑ / ↓')}     {tr('Navigate folders, threads, or scroll reading pane')}",
+            f"  {k_style.render('Enter / Space')}     {tr('Select folder, open message, or toggle thread')}",
+            f"  {k_style.render('[ / ]')}             {tr('Resize splitter (widen reading pane / list)')}",
+            f"  {k_style.render(_k('unified_inbox', 'U'))}                 {tr('Jump directly to Unified Inbox')}",
+            f"  {k_style.render('F10 / m')}           {tr('Open interactive top drop-down Menu Bar')}",
             "",
-            h_style.render("Inbox Zero & Single-Key Triaging"),
-            f"  {k_style.render(_k('archive_msg', 'e / y'))}  Archive message       {k_style.render(_k('trash_msg', 'd / #'))}  Move to Trash",
-            f"  {k_style.render(_k('toggle_star', 's'))}      Toggle Star / Flag    {k_style.render(_k('toggle_read', 'u'))}      Toggle Read / Unread",
-            f"  {k_style.render(_k('spam_msg', 'J'))}      Mark as Spam / Junk   {k_style.render(_k('move_to_folder', 'v'))}      Move to Folder...",
-            f"  {k_style.render(_k('select_message_toggle', 'x'))}      Select / mark message {k_style.render(_k('toggle_unread_filter', 'Ctrl+U'))} Toggle Unread Filter",
+            h_style.render(tr("Inbox Zero & Single-Key Triaging")),
+            f"  {k_style.render(_k('archive_msg', 'e / y'))}  {tr('Archive message'):<21} {k_style.render(_k('trash_msg', 'd / #'))}  {tr('Move to Trash')}",
+            f"  {k_style.render(_k('toggle_star', 's'))}      {tr('Toggle Star / Flag'):<21} {k_style.render(_k('toggle_read', 'u'))}      {tr('Toggle Read / Unread')}",
+            f"  {k_style.render(_k('spam_msg', 'J'))}      {tr('Mark as Spam / Junk'):<21} {k_style.render(_k('move_to_folder', 'v'))}      {tr('Move to Folder...')}",
+            f"  {k_style.render(_k('select_message_toggle', 'x'))}      {tr('Select / mark message'):<21} {k_style.render(_k('toggle_unread_filter', 'Ctrl+U'))} {tr('Toggle Unread Filter')}",
             "",
-            h_style.render("Mail Actions"),
-            f"  {k_style.render(_k('compose', 'c'))}  Compose new mail      {k_style.render(_k('reply', 'r / R'))}  Reply / Reply All",
-            f"  {k_style.render(_k('forward', 'f'))}  Forward message       {k_style.render(_k('save_attachments', 'w'))}      Save attachments",
-            f"  {k_style.render('1/2/3')} Calendar RSVP      {k_style.render(_k('fetch_more', 'M'))}      Fetch older messages",
-            f"  {k_style.render(_k('sync_folder', 'Ctrl+R'))} Sync current folder {k_style.render(_k('sync_all', 'S'))}  Sync all accounts",
-            f"  {k_style.render(_k('empty_trash', 'X'))}      Empty Trash",
+            h_style.render(tr("Mail Actions")),
+            f"  {k_style.render(_k('compose', 'c'))}  {tr('Compose new mail'):<21} {k_style.render(_k('reply', 'r / R'))}  {tr('Reply / Reply All')}",
+            f"  {k_style.render(_k('forward', 'f'))}  {tr('Forward message'):<21} {k_style.render(_k('save_attachments', 'w'))}      {tr('Save attachments')}",
+            f"  {k_style.render('1/2/3')} {tr('Calendar RSVP'):<18} {k_style.render(_k('fetch_more', 'M'))}      {tr('Fetch older messages')}",
+            f"  {k_style.render(_k('sync_folder', 'Ctrl+R'))} {tr('Sync current folder'):<19} {k_style.render(_k('sync_all', 'S'))}  {tr('Sync all accounts')}",
+            f"  {k_style.render(_k('empty_trash', 'X'))}      {tr('Empty Trash')}",
             "",
-            h_style.render("Accounts, Search, Security, Filters & Settings"),
-            f"  {k_style.render(_k('account_settings', 'A'))}      Edit Account Settings (Hosts, ports, TLS, auth)",
-            f"  {k_style.render(_k('new_account', 'O'))}      Add New Account (Onboarding Wizard)",
-            f"  {k_style.render(_k('preferences', 'p'))}      General Preferences (Keymaps, themes, storage)",
-            f"  {k_style.render(_k('fuzzy_search', '/'))}      Instant Fuzzy Search across local SQLite store",
-            f"  {k_style.render(_k('toggle_threading', 't'))}      Toggle Conversation Threading view",
-            f"  {k_style.render(_k('cycle_image_mode', 'i'))}      Cycle Image Renderer (Chafa / Sixel / Half-Block)",
-            f"  {k_style.render(_k('address_book', 'B'))}      Local Address Book    {k_style.render(_k('sieve_filters', 'F'))}  ManageSieve Filters",
-            f"  {k_style.render(_k('pgp_manager', 'G'))}      GPG/PGP Keyring       {k_style.render('Ctrl+P')} Command Palette",
-            f"  {k_style.render(_k('quit_app', 'q'))}      Quit EspressoMail",
+            h_style.render(tr("Accounts, Search, Security, Filters & Settings")),
+            f"  {k_style.render(_k('account_settings', 'A'))}      {tr('Edit Account Settings (Hosts, ports, TLS, auth)')}",
+            f"  {k_style.render(_k('new_account', 'O'))}      {tr('Add New Account (Onboarding Wizard)')}",
+            f"  {k_style.render(_k('preferences', 'p'))}      {tr('General Preferences (Keymaps, themes, storage)')}",
+            f"  {k_style.render(_k('fuzzy_search', '/'))}      {tr('Instant Fuzzy Search across local SQLite store')}",
+            f"  {k_style.render(_k('toggle_threading', 't'))}      {tr('Toggle Conversation Threading view')}",
+            f"  {k_style.render(_k('cycle_image_mode', 'i'))}      {tr('Cycle Image Renderer (Chafa / Sixel / Half-Block)')}",
+            f"  {k_style.render(_k('address_book', 'B'))}      {tr('Local Address Book'):<21} {k_style.render(_k('sieve_filters', 'F'))}  {tr('ManageSieve Filters')}",
+            f"  {k_style.render(_k('pgp_manager', 'G'))}      {tr('GPG/PGP Keyring'):<21} {k_style.render('Ctrl+P')} {tr('Command Palette')}",
+            f"  {k_style.render(_k('quit_app', 'q'))}      {tr('Quit EspressoMail')}",
         ]
-        return self.theme.modal_style(modal_w, f"⌨️ EspressoMail Shortcuts{preset_str}").render(
+        return self.theme.modal_style(modal_w, f"⌨️ {tr('EspressoMail Shortcuts')}{preset_str}").render(
             "\n".join(truncate_ansi(l, inner_w) for l in lines)
         )
 
@@ -1966,16 +2213,16 @@ class ConfirmExitModal(Model):
             Style()
             .bold(True)
             .foreground(self.theme.fg_primary)
-            .render("Are you sure you want to exit EspressoMail?")
+            .render(tr("Are you sure you want to exit EspressoMail?"))
         )
         actions_line = (
             Style().bold(True).foreground(self.theme.accent_primary).render("[y / Enter]")
-            + Style().foreground(self.theme.fg_secondary).render(" Exit    ")
+            + Style().foreground(self.theme.fg_secondary).render(tr(" Exit    "))
             + Style().bold(True).foreground(self.theme.accent_secondary).render("[n / Esc]")
-            + Style().foreground(self.theme.fg_secondary).render(" Stay in App")
+            + Style().foreground(self.theme.fg_secondary).render(tr(" Stay in App"))
         )
         content = join_vertical(Align.CENTER, msg_line, "", actions_line)
-        return self.theme.modal_style(modal_w, "🚪 Confirm Exit").render(content)
+        return self.theme.modal_style(modal_w, f"🚪 {tr('Confirm Exit')}").render(content)
 
 
 # ---------------------------------------------------------------------------
@@ -2089,7 +2336,7 @@ class DownloadAttachmentsModal(Model):
             Style()
             .bold(True)
             .foreground(self.theme.accent_secondary)
-            .render("Select attachments to save to disk:")
+            .render(tr("Select attachments to save to disk:"))
         )
         rows.append("")
 
@@ -2131,7 +2378,7 @@ class DownloadAttachmentsModal(Model):
                 Style()
                 .bold(True)
                 .foreground(self.theme.pgp_error_fg)
-                .render(f"⚠ {self.error_msg}")
+                .render(f"⚠ {tr(self.error_msg)}")
             )
 
         rows.append("")
@@ -2139,11 +2386,11 @@ class DownloadAttachmentsModal(Model):
             Style()
             .foreground(self.theme.fg_muted)
             .render(
-                "[Space] Toggle  [a] Select All  [Tab] Edit Folder  [Enter/d] Download  [Esc] Cancel"
+                tr("[Space] Toggle  [a] Select All  [Tab] Edit Folder  [Enter/d] Download  [Esc] Cancel")
             )
         )
 
-        return self.theme.modal_style(modal_w, "💾 Download Attachments").render(
+        return self.theme.modal_style(modal_w, f"💾 {tr('Download Attachments')}").render(
             join_vertical(Align.LEFT, *rows)
         )
 
@@ -2163,6 +2410,8 @@ class PreferencesModal(Model):
     FOLDER_COUNT_MODES: tuple[str, ...] = ("unread_only", "unread_and_total")
     FETCH_BATCH_SIZES: tuple[int, ...] = (25, 50, 100, 200)
     AUTO_SYNC_INTERVALS: tuple[int, ...] = (0, 60, 120, 180, 300, 600, 900, 1800, 3600)
+    LANGUAGES: tuple[str, ...] = SUPPORTED_LANGUAGES
+    LANGUAGE_LABELS: dict[str, str] = LANGUAGE_LABELS
     TABS: tuple[str, ...] = (
         "1. Appearance",
         "2. Mail & View",
@@ -2226,11 +2475,12 @@ class PreferencesModal(Model):
         show_raw_headers: bool = False,
         icon_mode: str = "",
         plugin_manager: Any = None,
+        language: str = "",
     ) -> None:
         self.store = store
         self.current_theme = current_theme
         self.active_tab = 0  # 0=Appearance, 1=Mail & View, 2=Sync & Network, 3=Keys & System, 4=Plugins
-        self.focus_idx = 0  # 0=tabs bar, 1..6=settings, 16/17=buttons
+        self.focus_idx = 0  # 0=tabs bar, 1..7=settings, 16/17=buttons
         self.status_msg = ""
         self.error_msg = ""
 
@@ -2267,6 +2517,16 @@ class PreferencesModal(Model):
         self.icon_mode_idx = (
             self.ICON_MODES.index(cur_icon_mode)
             if cur_icon_mode in self.ICON_MODES
+            else 0
+        )
+
+        from espressomail.i18n import get_available_languages
+
+        self.LANGUAGES = get_available_languages()
+        cur_lang = normalize_language(language or self.store.get_setting("language", "en"))
+        self.language_idx = (
+            self.LANGUAGES.index(cur_lang)
+            if cur_lang in self.LANGUAGES
             else 0
         )
 
@@ -2366,7 +2626,7 @@ class PreferencesModal(Model):
                 if s_type in ("str", "secret", "password", "text"):
                     label = str(s_spec.get("label", s_key))
                     desc = str(s_spec.get("description", ""))
-                    prompt_str = f"{label[:21] + ':':<23}"
+                    prompt_str = f"{label[:30] + ':':<32}"
                     ti = TextInput(
                         placeholder=desc or f"Enter {label}...",
                         prompt=prompt_str,
@@ -2403,7 +2663,42 @@ class PreferencesModal(Model):
             self.DEEPL_CACHE_OPTIONS.index(deepl_cache) if deepl_cache in self.DEEPL_CACHE_OPTIONS else 2
         )
 
+        # Tabs Bean (espresso 1.4.0)
+        self.tabs = Tabs(
+            titles=[tr(t) for t in self.TABS],
+            active_tab=self.active_tab,
+            tab_style=TabStyle.PILL,
+            show_numbers=False,
+        )
+        self._apply_theme_to_tabs()
+        tab_bounds: list[tuple[int, int]] = []
+        cur_tab_x = 3
+        for title in self.tabs.titles:
+            btn_w = string_width(title) + 2
+            tab_bounds.append((cur_tab_x, cur_tab_x + btn_w))
+            cur_tab_x += btn_w + 2
+        self.tab_bounds = tab_bounds
+
         self._sync_focus()
+
+    def _apply_theme_to_tabs(self) -> None:
+        self.tabs.active_pill = (
+            Style()
+            .bold(True)
+            .background(self.current_theme.accent_primary)
+            .foreground(self.current_theme.bg_primary)
+            .padding(0, 1)
+        )
+        self.tabs.inactive_pill = (
+            Style()
+            .background(self.current_theme.bg_highlight)
+            .foreground(self.current_theme.fg_muted)
+            .padding(0, 1)
+        )
+
+    @property
+    def language(self) -> str:
+        return self.LANGUAGES[self.language_idx]
 
     def _current_plugin_schema_items(self) -> list[tuple[str, dict[str, Any]]]:
         if not self.plugin_list:
@@ -2446,6 +2741,7 @@ class PreferencesModal(Model):
             ti.style = styles["style"]
             ti.placeholder_style = styles["placeholder_style"]
             ti.prompt_style = styles["prompt_style"]
+        self._apply_theme_to_tabs()
 
     def _sync_focus(self) -> None:
         if (self.active_tab == 1 and self.focus_idx == 1) or (self.focus_idx == 0 and self.active_tab == 1):
@@ -2465,7 +2761,11 @@ class PreferencesModal(Model):
     def _cycle_row(self, row_idx: int, delta: int = 1) -> None:
         """Cycle or toggle the setting on a specific row."""
         if row_idx == 0:
-            self.active_tab = (self.active_tab + delta) % len(self.TABS)
+            if delta > 0:
+                self.tabs.next_tab()
+            else:
+                self.tabs.prev_tab()
+            self.active_tab = self.tabs.active_tab
             self._sync_focus()
             return
 
@@ -2482,8 +2782,12 @@ class PreferencesModal(Model):
                 self.threading_enabled = not self.threading_enabled
             elif row_idx == 5:
                 self.icon_mode_idx = (self.icon_mode_idx + delta) % len(self.ICON_MODES)
-            elif row_idx in (6, 7):
+            elif row_idx == 6:
                 self.allow_remote_images = not self.allow_remote_images
+            elif row_idx == 7:
+                self.language_idx = (self.language_idx + delta) % len(self.LANGUAGES)
+                set_language(self.LANGUAGES[self.language_idx])
+                return
 
         elif self.active_tab == 1:
             if row_idx == 1:
@@ -2575,7 +2879,7 @@ class PreferencesModal(Model):
                                 pass
 
         # Direct legacy row compatibility regardless of active tab
-        if row_idx == 7:
+        if row_idx == 7 and self.active_tab != 0:
             self.allow_remote_images = not self.allow_remote_images
         elif row_idx == 8:
             self.count_mode_idx = (self.count_mode_idx + delta) % len(self.FOLDER_COUNT_MODES)
@@ -2598,6 +2902,13 @@ class PreferencesModal(Model):
         return None
 
     def update(self, msg: Msg) -> tuple[PreferencesModal, Cmd | None]:
+        if isinstance(msg, TabChangeMsg):
+            self.active_tab = msg.index
+            self.tabs.active_tab = msg.index
+            self.focus_idx = 1
+            self._sync_focus()
+            return self, None
+
         # 1. Mouse Interaction
         if isinstance(msg, MouseMsg):
             app_w = getattr(self, "last_app_w", 80)
@@ -2618,6 +2929,11 @@ class PreferencesModal(Model):
                 if msg.button in (MouseButton.WHEEL_UP, MouseButton.WHEEL_DOWN):
                     delta = -1 if msg.button == MouseButton.WHEEL_UP else 1
                     target_row = row_idx if 0 <= row_idx <= 15 else self.focus_idx
+                    if target_row == 0:
+                        self.tabs, tab_cmd = self.tabs.update(msg)
+                        self.active_tab = self.tabs.active_tab
+                        self._sync_focus()
+                        return self, tab_cmd
                     self._cycle_row(target_row, delta)
                     return self, None
 
@@ -2626,24 +2942,46 @@ class PreferencesModal(Model):
                     # Check button row
                     btn_row = getattr(self, "buttons_row_offset", 17)
                     if row_idx == btn_row:
-                        # Save button is on left half, Cancel on right half
+                        save_bounds = getattr(self, "save_btn_bounds", None)
+                        cancel_bounds = getattr(self, "cancel_btn_bounds", None)
+                        if save_bounds and save_bounds[0] <= rel_x < save_bounds[1]:
+                            return self._save_preferences()
+                        if cancel_bounds and cancel_bounds[0] <= rel_x < cancel_bounds[1]:
+                            return self, lambda: ModalClosedMsg("Closed preferences.")
                         if rel_x < modal_w // 2:
                             return self._save_preferences()
-                        else:
-                            return self, lambda: ModalClosedMsg("Closed preferences.")
+                        return self, lambda: ModalClosedMsg("Closed preferences.")
 
                     # Check tab bar click (row 0)
                     if row_idx == 0:
-                        if rel_x < 15:
-                            self.active_tab = 0
-                        elif rel_x < 30:
-                            self.active_tab = 1
-                        elif rel_x < 46:
-                            self.active_tab = 2
-                        elif rel_x < 60:
-                            self.active_tab = 3
-                        else:
-                            self.active_tab = 4
+                        tab_mouse = MouseMsg(x=rel_x - 3, y=0, button=msg.button, action=msg.action)
+                        self.tabs, tab_cmd = self.tabs.update(tab_mouse)
+                        if self.tabs.active_tab != self.active_tab:
+                            self.active_tab = self.tabs.active_tab
+                            self.focus_idx = 1
+                            self._sync_focus()
+                            return self, tab_cmd
+                        tab_bounds = getattr(self, "tab_bounds", None)
+                        if tab_bounds:
+                            for idx, (start_x, end_x) in enumerate(tab_bounds):
+                                if start_x <= rel_x < end_x:
+                                    self.tabs.set_active(idx)
+                                    self.active_tab = idx
+                                    self.focus_idx = 1
+                                    self._sync_focus()
+                                    return self, None
+                            if rel_x < tab_bounds[0][0]:
+                                self.tabs.set_active(0)
+                                self.active_tab = 0
+                            elif rel_x >= tab_bounds[-1][1]:
+                                self.tabs.set_active(len(tab_bounds) - 1)
+                                self.active_tab = len(tab_bounds) - 1
+                            else:
+                                for idx, (start_x, end_x) in enumerate(tab_bounds):
+                                    if rel_x == end_x or (idx + 1 < len(tab_bounds) and end_x <= rel_x < tab_bounds[idx + 1][0]):
+                                        self.tabs.set_active(idx)
+                                        self.active_tab = idx
+                                        break
                         self.focus_idx = 1
                         self._sync_focus()
                         return self, None
@@ -2667,28 +3005,31 @@ class PreferencesModal(Model):
             if k in ("enter", "ctrl+s"):
                 return self._save_preferences()
 
-            # Direct tab switching via 1, 2, 3, 4, 5
+            # Direct tab switching via 1, 2, 3, 4, 5 using Tabs bean
             if k in ("1", "2", "3", "4", "5"):
-                self.active_tab = int(k) - 1
+                self.tabs.set_active(int(k) - 1)
+                self.active_tab = self.tabs.active_tab
                 self.focus_idx = 1
                 self._sync_focus()
                 return self, None
 
             # Tab cycling with [ and ]
             if k in ("[", "alt+left"):
-                self.active_tab = (self.active_tab - 1) % len(self.TABS)
+                self.tabs.prev_tab()
+                self.active_tab = self.tabs.active_tab
                 self.focus_idx = 1
                 self._sync_focus()
                 return self, None
 
             if k in ("]", "alt+right"):
-                self.active_tab = (self.active_tab + 1) % len(self.TABS)
+                self.tabs.next_tab()
+                self.active_tab = self.tabs.active_tab
                 self.focus_idx = 1
                 self._sync_focus()
                 return self, None
 
             plugin_schema_len = len(self._current_plugin_schema_items())
-            tab_max = {0: 6, 1: 4, 2: 4, 3: 5, 4: max(2, 2 + plugin_schema_len)}.get(self.active_tab, 4)
+            tab_max = {0: 7, 1: 4, 2: 4, 3: 5, 4: max(2, 2 + plugin_schema_len)}.get(self.active_tab, 4)
 
             if k in ("tab", "down"):
                 if self.focus_idx == 0:
@@ -2720,7 +3061,11 @@ class PreferencesModal(Model):
             if k in ("left", "right", "h", "l", " ", "space"):
                 delta = 1 if k in ("right", "l", " ", "space") else -1
                 if self.focus_idx == 0:
-                    self.active_tab = (self.active_tab + delta) % len(self.TABS)
+                    if delta > 0:
+                        self.tabs.next_tab()
+                    else:
+                        self.tabs.prev_tab()
+                    self.active_tab = self.tabs.active_tab
                     self._sync_focus()
                     return self, None
                 active_ti = self._active_plugin_text_input()
@@ -2767,6 +3112,8 @@ class PreferencesModal(Model):
         batch_val = self.FETCH_BATCH_SIZES[self.batch_idx]
         keymap_val = self.KEYMAP_PRESETS[self.keymap_preset_idx]
         icon_mode_val = self.ICON_MODES[self.icon_mode_idx]
+        lang_val = self.LANGUAGES[self.language_idx]
+        set_language(lang_val)
 
         self.store.set_setting("download_dir", str(target_dl))
         self.store.set_setting("image_backend", backend_val)
@@ -2790,6 +3137,7 @@ class PreferencesModal(Model):
         self.store.set_setting("check_updates_startup", "1" if self.check_updates_startup else "0")
         unm_val = self.UPDATE_NOTICE_MODES[self.update_notice_mode_idx]
         self.store.set_setting("update_notice_mode", unm_val)
+        self.store.set_setting("language", lang_val)
 
         if self.plugin_manager:
             # Sync any direct edits to legacy DeepL properties if changed directly by tests/callers
@@ -2834,6 +3182,7 @@ class PreferencesModal(Model):
             icon_mode=icon_mode_val,
             check_updates_startup=self.check_updates_startup,
             update_notice_mode=unm_val,
+            language=lang_val,
         )
 
     def view(self, width: int = 80, height: int = 24) -> str:
@@ -2844,26 +3193,19 @@ class PreferencesModal(Model):
 
         rows: list[str] = []
 
-        # Row 0: Tabs Bar
-        tab_buttons: list[str] = []
-        for idx, tab_name in enumerate(self.TABS):
-            if idx == self.active_tab:
-                btn = (
-                    Style()
-                    .bold(True)
-                    .background(self.current_theme.accent_primary)
-                    .foreground(self.current_theme.bg_primary)
-                    .render(f" {tab_name} ")
-                )
-            else:
-                btn = (
-                    Style()
-                    .background(self.current_theme.bg_highlight)
-                    .foreground(self.current_theme.fg_muted)
-                    .render(f" {tab_name} ")
-                )
-            tab_buttons.append(btn)
-        rows.append(" ".join(tab_buttons))
+        # Row 0: Tabs Bar using espresso Tabs bean
+        self.tabs.titles = [tr(t) for t in self.TABS]
+        self.tabs.active_tab = self.active_tab
+        self._apply_theme_to_tabs()
+
+        tab_bounds: list[tuple[int, int]] = []
+        cur_tab_x = 3
+        for title in self.tabs.titles:
+            btn_w = string_width(title) + 2
+            tab_bounds.append((cur_tab_x, cur_tab_x + btn_w))
+            cur_tab_x += btn_w + 2
+        self.tab_bounds = tab_bounds
+        rows.append(self.tabs.view())
 
         def _opt_style(idx: int, text: str) -> str:
             if idx == self.focus_idx:
@@ -2873,45 +3215,48 @@ class PreferencesModal(Model):
         if self.active_tab == 0:
             # Tab 0: Appearance
             cur_b = self.IMAGE_BACKENDS[self.backend_idx].upper()
-            rows.append(f"Image Rendering Mode: ◀ {_opt_style(1, cur_b)} ▶")
+            rows.append(f"{tr('Image Rendering Mode:'):<21} ◀ {_opt_style(1, cur_b)} ▶")
 
             cur_fam_label = self.THEME_FAMILIES[self.theme_idx].title()
-            rows.append(f"Color Theme:          ◀ {_opt_style(2, cur_fam_label)} ▶")
+            rows.append(f"{tr('Color Theme:'):<21} ◀ {_opt_style(2, cur_fam_label)} ▶")
 
-            cur_mode_str = "Dark" if self.COLOR_MODES[self.color_mode_idx] == "dark" else "Light"
-            rows.append(f"Color Mode:           ◀ {_opt_style(3, cur_mode_str)} ▶")
+            cur_mode_str = tr("Dark") if self.COLOR_MODES[self.color_mode_idx] == "dark" else tr("Light")
+            rows.append(f"{tr('Color Mode:'):<21} ◀ {_opt_style(3, cur_mode_str)} ▶")
 
-            th_val = "[x] Enabled" if self.threading_enabled else "[ ] Disabled"
-            rows.append(f"Message Threading:    {_opt_style(4, th_val)}")
+            th_val = tr("[x] Enabled") if self.threading_enabled else tr("[ ] Disabled")
+            rows.append(f"{tr('Message Threading:'):<21} {_opt_style(4, th_val)}")
 
-            cur_im = self.ICON_MODE_LABELS.get(self.ICON_MODES[self.icon_mode_idx], "Emoji")
-            rows.append(f"Icons & Emojis:       ◀ {_opt_style(5, cur_im)} ▶")
+            cur_im = tr(self.ICON_MODE_LABELS.get(self.ICON_MODES[self.icon_mode_idx], "Emoji"))
+            rows.append(f"{tr('Icons & Emojis:'):<21} ◀ {_opt_style(5, cur_im)} ▶")
 
-            ri_val = "[x] Allowed" if self.allow_remote_images else "[ ] Blocked"
-            rows.append(f"Remote Image Fetch:   {_opt_style(6, ri_val)}")
+            ri_val = tr("[x] Allowed") if self.allow_remote_images else tr("[ ] Blocked")
+            rows.append(f"{tr('Remote Image Fetch:'):<21} {_opt_style(6, ri_val)}")
+
+            cur_lang_code = self.LANGUAGES[self.language_idx]
+            cur_lang_label = self.LANGUAGE_LABELS.get(cur_lang_code, cur_lang_code.upper())
+            rows.append(f"{tr('Language:'):<21} ◀ {_opt_style(7, cur_lang_label)} ▶")
 
             rows.append("")
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_secondary)
-                .render("  💡 Theme & Display Settings:")
+                .render(tr("  💡 Theme & Display Settings:"))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Themes apply TrueColor palettes across all panes and dialogs.")
+                .render(tr("  • Themes apply TrueColor palettes across all panes and dialogs."))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Icon mode selects between Color Emoji, Monochrome Unicode, or Plain Text.")
+                .render(tr("  • Icon mode selects between Color Emoji, Monochrome Unicode, or Plain Text."))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Sixel and Chafa render inline image attachments in terminal.")
+                .render(tr("  • Language localizes UI menus, panes, and settings (EN / DA / DE / ES)."))
             )
-            rows.append("")
             rows.append("")
             rows.append("")
             rows.append("")
@@ -2919,16 +3264,18 @@ class PreferencesModal(Model):
 
         elif self.active_tab == 1:
             # Tab 1: Mail & Reading
+            self.input_download_dir.prompt = f"{tr('Download Folder:'):<21}"
+            self.input_download_dir.placeholder = tr("Download folder path...")
             rows.append(self.input_download_dir.view())
 
-            rh_val = "[x] Enabled" if self.show_raw_headers else "[ ] Disabled"
-            rows.append(f"Show Raw RFC Headers: {_opt_style(2, rh_val)}")
+            rh_val = tr("[x] Enabled") if self.show_raw_headers else tr("[ ] Disabled")
+            rows.append(f"{tr('Show Raw RFC Headers:'):<21} {_opt_style(2, rh_val)}")
 
-            cur_cm = "Unread Only" if self.FOLDER_COUNT_MODES[self.count_mode_idx] == "unread_only" else "Unread & Total"
-            rows.append(f"Folder Email Counts:  ◀ {_opt_style(3, cur_cm)} ▶")
+            cur_cm = tr("Unread Only") if self.FOLDER_COUNT_MODES[self.count_mode_idx] == "unread_only" else tr("Unread & Total")
+            rows.append(f"{tr('Folder Email Counts:'):<21} ◀ {_opt_style(3, cur_cm)} ▶")
 
             cur_ee = self.EXTERNAL_EDITORS[self.external_editor_idx].upper()
-            rows.append(f"External Editor:       ◀ {_opt_style(4, cur_ee)} ▶")
+            rows.append(f"{tr('External Editor:'):<21}  ◀ {_opt_style(4, cur_ee)} ▶")
 
             rows.append("")
             rows.append("")
@@ -2936,22 +3283,22 @@ class PreferencesModal(Model):
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_secondary)
-                .render("  💡 Mail & Reading Settings:")
+                .render(tr("  💡 Mail & Reading Settings:"))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Press Ctrl+O in Compose to edit with your external terminal editor.")
+                .render(tr("  • Press Ctrl+O in Compose to edit with your external terminal editor."))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Raw RFC 5322 headers can be toggled with 'H' in the reading pane.")
+                .render(tr("  • Raw RFC 5322 headers can be toggled with 'H' in the reading pane."))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Download folder sets the target path when saving attachments ('w').")
+                .render(tr("  • Download folder sets the target path when saving attachments ('w')."))
             )
             rows.append("")
             rows.append("")
@@ -2960,18 +3307,18 @@ class PreferencesModal(Model):
 
         elif self.active_tab == 2:
             # Tab 2: Sync & Network
-            su_val = "[x] Enabled" if self.sync_on_startup else "[ ] Disabled"
-            rows.append(f"Sync On Startup:      {_opt_style(1, su_val)}")
+            su_val = tr("[x] Enabled") if self.sync_on_startup else tr("[ ] Disabled")
+            rows.append(f"{tr('Sync On Startup:'):<21} {_opt_style(1, su_val)}")
 
-            push_val = "[x] Enabled (Real-time)" if self.imap_push_enabled else "[ ] Disabled"
-            rows.append(f"IMAP Push (IDLE):     {_opt_style(2, push_val)}")
+            push_val = tr("[x] Enabled (Real-time)") if self.imap_push_enabled else tr("[ ] Disabled")
+            rows.append(f"{tr('IMAP Push (IDLE):'):<21} {_opt_style(2, push_val)}")
 
             cur_asi = self.AUTO_SYNC_INTERVALS[self.sync_interval_idx]
-            cur_asi_label = self.AUTO_SYNC_LABELS.get(cur_asi, f"{cur_asi}s")
-            rows.append(f"Auto-Sync Interval:    ◀ {_opt_style(3, cur_asi_label)} ▶")
+            cur_asi_label = tr(self.AUTO_SYNC_LABELS.get(cur_asi, f"{cur_asi}s"))
+            rows.append(f"{tr('Auto-Sync Interval:'):<21}  ◀ {_opt_style(3, cur_asi_label)} ▶")
 
-            cur_bs = f"{self.FETCH_BATCH_SIZES[self.batch_idx]} emails"
-            rows.append(f"Fetch Batch Size:     ◀ {_opt_style(4, cur_bs)} ▶")
+            cur_bs = f"{self.FETCH_BATCH_SIZES[self.batch_idx]} {tr('emails')}"
+            rows.append(f"{tr('Fetch Batch Size:'):<21} ◀ {_opt_style(4, cur_bs)} ▶")
 
             rows.append("")
             rows.append("")
@@ -2979,22 +3326,22 @@ class PreferencesModal(Model):
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_secondary)
-                .render("  💡 Sync & Network Settings:")
+                .render(tr("  💡 Sync & Network Settings:"))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • IMAP IDLE maintains real-time push for instant email delivery.")
+                .render(tr("  • IMAP IDLE maintains real-time push for instant email delivery."))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Auto-sync periodically polls subscribed folders in background.")
+                .render(tr("  • Auto-sync periodically polls subscribed folders in background."))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Fetch batch size controls messages fetched per IMAP page.")
+                .render(tr("  • Fetch batch size controls messages fetched per IMAP page."))
             )
             rows.append("")
             rows.append("")
@@ -3004,41 +3351,41 @@ class PreferencesModal(Model):
         elif self.active_tab == 3:
             # Tab 3: Keys & System
             cur_kp = self.KEYMAP_PRESETS[self.keymap_preset_idx].upper()
-            rows.append(f"Keyboard Shortcuts:    ◀ {_opt_style(1, cur_kp)} ▶")
+            rows.append(f"{tr('Keyboard Shortcuts:'):<22} ◀ {_opt_style(1, cur_kp)} ▶")
 
-            notif_val = "[x] Enabled" if self.desktop_notifications else "[ ] Disabled"
-            rows.append(f"Desktop Notifications: {_opt_style(2, notif_val)}")
+            notif_val = tr("[x] Enabled") if self.desktop_notifications else tr("[ ] Disabled")
+            rows.append(f"{tr('Desktop Notifications:'):<22} {_opt_style(2, notif_val)}")
 
-            sound_val = "[x] Enabled" if self.notification_sound else "[ ] Disabled"
-            rows.append(f"Notification Sound:    {_opt_style(3, sound_val)}")
+            sound_val = tr("[x] Enabled") if self.notification_sound else tr("[ ] Disabled")
+            rows.append(f"{tr('Notification Sound:'):<22} {_opt_style(3, sound_val)}")
 
-            updates_val = "[x] Enabled (On Startup)" if self.check_updates_startup else "[ ] Disabled"
-            rows.append(f"Check For Updates:     {_opt_style(4, updates_val)}")
+            updates_val = tr("[x] Enabled (On Startup)") if self.check_updates_startup else tr("[ ] Disabled")
+            rows.append(f"{tr('Check For Updates:'):<22} {_opt_style(4, updates_val)}")
 
-            unm_label = self.UPDATE_NOTICE_LABELS.get(self.UPDATE_NOTICE_MODES[self.update_notice_mode_idx], "Toast")
-            rows.append(f"Update Notice Mode:    ◀ {_opt_style(5, unm_label)} ▶")
+            unm_label = tr(self.UPDATE_NOTICE_LABELS.get(self.UPDATE_NOTICE_MODES[self.update_notice_mode_idx], "Toast"))
+            rows.append(f"{tr('Update Notice Mode:'):<22} ◀ {_opt_style(5, unm_label)} ▶")
 
             rows.append("")
             rows.append("")
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_secondary)
-                .render("  💡 Shortcuts & System Alerts:")
+                .render(tr("  💡 Shortcuts & System Alerts:"))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Keymap presets configure Vim, Gmail, Pine, or Default bindings.")
+                .render(tr("  • Keymap presets configure Vim, Gmail, Pine, or Default bindings."))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • System notifications dispatch via notify-send, osascript, or PowerShell.")
+                .render(tr("  • System notifications dispatch via notify-send, osascript, or PowerShell."))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Sound alerts trigger terminal bell cues on newly arrived messages.")
+                .render(tr("  • Sound alerts trigger terminal bell cues on newly arrived messages."))
             )
             rows.append("")
             rows.append("")
@@ -3051,18 +3398,18 @@ class PreferencesModal(Model):
                 p = self.plugin_list[self.plugin_idx % len(self.plugin_list)]
                 meta = p.metadata
                 pid = meta.id
-                p_label = f"{meta.icon} {meta.name} v{meta.version}"
-                rows.append(f"Select Plugin:         ◀ {_opt_style(1, p_label)} ▶")
+                p_label = f"{meta.icon} {tr(meta.name)} v{meta.version}"
+                rows.append(f"{tr('Select Plugin:'):<22} ◀ {_opt_style(1, p_label)} ▶")
 
-                en_val = "[x] Enabled" if self.plugin_enabled.get(pid, True) else "[ ] Disabled"
-                rows.append(f"Plugin Status:         {_opt_style(2, en_val)}")
+                en_val = tr("[x] Enabled") if self.plugin_enabled.get(pid, True) else tr("[ ] Disabled")
+                rows.append(f"{tr('Plugin Status:'):<22} {_opt_style(2, en_val)}")
 
                 schema_items = self._current_plugin_schema_items()
                 for s_offset, (s_key, s_spec) in enumerate(schema_items):
                     row_num = 3 + s_offset
                     s_type = str(s_spec.get("type", "str")).lower()
-                    s_label = str(s_spec.get("label", s_key))
-                    label_col = f"{s_label[:21] + ':':<22}"
+                    s_label = tr(str(s_spec.get("label", s_key)))
+                    label_col = f"{s_label[:30] + ':':<31}"
                     cur_val = str(
                         self.plugin_settings_values.get(pid, {}).get(
                             s_key, s_spec.get("default", "")
@@ -3072,23 +3419,26 @@ class PreferencesModal(Model):
                     if s_type in ("str", "secret", "password", "text"):
                         ti = self.plugin_text_inputs.get((pid, s_key))
                         if ti is not None:
+                            raw_lbl = "API Auth Key" if (pid == "deepl_translate" and s_key == "auth_key") else str(s_spec.get("label", s_key))
+                            p_lbl = tr(raw_lbl)
+                            ti.prompt = f"{p_lbl[:30] + ':':<32}"
                             ti.width = max(24, modal_w - 6)
                             rows.append(ti.view())
                         else:
                             rows.append(f"{label_col} {_opt_style(row_num, cur_val)}")
                     elif s_type == "bool":
                         is_true = cur_val.lower() in ("1", "true", "yes")
-                        b_str = "[x] Enabled" if is_true else "[ ] Disabled"
+                        b_str = tr("[x] Enabled") if is_true else tr("[ ] Disabled")
                         rows.append(f"{label_col} {_opt_style(row_num, b_str)}")
                     elif s_type == "choice":
                         disp_val = cur_val
                         if pid == "deepl_translate" and s_key == "target_lang":
                             lang_dict = dict(self.DEEPL_TARGET_LANGS)
                             if cur_val in lang_dict:
-                                disp_val = f"{cur_val} ({lang_dict[cur_val]})"
+                                disp_val = f"{cur_val} ({tr(lang_dict[cur_val])})"
                         rows.append(f"{label_col} ◀ {_opt_style(row_num, disp_val)} ▶")
                     elif s_type == "int":
-                        disp_val = f"{cur_val} days" if "days" in s_key else cur_val
+                        disp_val = f"{cur_val} {tr('days')}" if "days" in s_key else cur_val
                         rows.append(f"{label_col} ◀ {_opt_style(row_num, disp_val)} ▶")
                     else:
                         rows.append(f"{label_col} {_opt_style(row_num, cur_val)}")
@@ -3100,7 +3450,7 @@ class PreferencesModal(Model):
                     Style()
                     .italic(True)
                     .foreground(self.current_theme.fg_muted)
-                    .render("  No plugins installed or discovered.")
+                    .render(tr("  No plugins installed or discovered."))
                 )
                 rows.append("")
                 rows.append("")
@@ -3115,39 +3465,39 @@ class PreferencesModal(Model):
                     Style()
                     .bold(True)
                     .foreground(self.current_theme.fg_secondary)
-                    .render(truncate_ansi(f"  {sel_meta.icon} {sel_meta.name}: {sel_meta.description}", modal_w - 6))
+                    .render(truncate_ansi(f"  {sel_meta.icon} {tr(sel_meta.name)}: {tr(sel_meta.description)}", modal_w - 6))
                 )
             else:
                 rows.append("")
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_secondary)
-                .render("  💡 Built-in Plugin Shortcuts & Features:")
+                .render(tr("  💡 Built-in Plugin Shortcuts & Features:"))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • DeepL (Ctrl+T): Translate emails & drafts  │  AI Assistant (Ctrl+Y / Ctrl+B)")
+                .render(tr("  • DeepL (Ctrl+T): Translate emails & drafts  │  AI Assistant (Ctrl+Y / Ctrl+B)"))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • DMARC & Auth (Ctrl+D): Inspect SPF/DKIM/DMARC & XML/GZ/ZIP DMARC reports")
+                .render(tr("  • DMARC & Auth (Ctrl+D): Inspect SPF/DKIM/DMARC & XML/GZ/ZIP DMARC reports"))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • URL Launcher (Ctrl+O): Links list  │  Unsubscribe (Ctrl+K)  │  Grammar (Ctrl+L)")
+                .render(tr("  • URL Launcher (Ctrl+O): Links list  │  Unsubscribe (Ctrl+K)  │  Grammar (Ctrl+L)"))
             )
             rows.append(
                 Style()
                 .foreground(self.current_theme.fg_muted)
-                .render("  • Phishing Scanner: Automatic alerts for deceptive links & spoofed headers.")
+                .render(tr("  • Phishing Scanner: Automatic alerts for deceptive links & spoofed headers."))
             )
             rows.append("")
 
         if self.error_msg:
-            err_line = Style().bold(True).foreground(self.current_theme.pgp_error_fg).render(f"⚠ {self.error_msg}")
+            err_line = Style().bold(True).foreground(self.current_theme.pgp_error_fg).render(f"⚠ {tr(self.error_msg)}")
             if len(rows) > 0 and rows[-1] == "":
                 rows[-1] = err_line
             else:
@@ -3162,12 +3512,18 @@ class PreferencesModal(Model):
 
         # Row 17: Buttons row
         save_focused = (self.focus_idx in (16, 17))
+        save_lbl = tr(" [ Save Preferences (Enter) ] ")
+        cancel_lbl = tr(" [ Cancel (Esc) ] ")
+        save_w = string_width(save_lbl)
+        cancel_w = string_width(cancel_lbl)
+        self.save_btn_bounds = (3, 3 + save_w)
+        self.cancel_btn_bounds = (3 + save_w + 3, 3 + save_w + 3 + cancel_w)
         save_btn = (
-            Style().bold(True).background(self.current_theme.accent_primary).foreground(self.current_theme.bg_primary).render(" [ Save Preferences (Enter) ] ")
+            Style().bold(True).background(self.current_theme.accent_primary).foreground(self.current_theme.bg_primary).render(save_lbl)
             if save_focused
-            else Style().background(self.current_theme.bg_highlight).foreground(self.current_theme.accent_primary).render(" [ Save Preferences (Enter) ] ")
+            else Style().background(self.current_theme.bg_highlight).foreground(self.current_theme.accent_primary).render(save_lbl)
         )
-        cancel_btn = Style().background(self.current_theme.bg_highlight).foreground(self.current_theme.fg_muted).render(" [ Cancel (Esc) ] ")
+        cancel_btn = Style().background(self.current_theme.bg_highlight).foreground(self.current_theme.fg_muted).render(cancel_lbl)
         rows.append(f"{save_btn}   {cancel_btn}")
 
         rows.append("")
@@ -3175,7 +3531,7 @@ class PreferencesModal(Model):
             Style()
             .foreground(self.current_theme.fg_muted)
             .render(
-                "[1-4 / [/]] Tabs  [Tab/↑/↓] Navigate  [Space/Click] Toggle  [Enter] Save  [Esc] Cancel"
+                tr("[1-4 / [/]] Tabs  [Tab/↑/↓] Navigate  [Space/Click] Toggle  [Enter] Save  [Esc] Cancel")
             )
         )
 
@@ -3340,23 +3696,23 @@ class RSVPModal(Model):
         muted_style = Style().foreground(self.theme.fg_muted)
 
         rows: list[str] = [
-            f"{lbl_style.render('Event:       ')} {val_style.render(truncate_ansi(self.event.summary, modal_w - 18))}",
-            f"{lbl_style.render('When:        ')} {val_style.render(self.event.formatted_time_range())}",
+            f"{lbl_style.render(tr('Event:       '))} {val_style.render(truncate_ansi(self.event.summary, modal_w - 18))}",
+            f"{lbl_style.render(tr('When:        '))} {val_style.render(self.event.formatted_time_range())}",
         ]
         if self.event.location:
-            rows.append(f"{lbl_style.render('Where:       ')} {val_style.render(truncate_ansi(self.event.location, modal_w - 18))}")
+            rows.append(f"{lbl_style.render(tr('Where:       '))} {val_style.render(truncate_ansi(self.event.location, modal_w - 18))}")
         if self.event.organizer_display:
-            rows.append(f"{lbl_style.render('Organizer:   ')} {muted_style.render(truncate_ansi(self.event.organizer_display, modal_w - 18))}")
+            rows.append(f"{lbl_style.render(tr('Organizer:   '))} {muted_style.render(truncate_ansi(self.event.organizer_display, modal_w - 18))}")
 
         rows.append("")
-        rows.append(lbl_style.render("Your Response:"))
+        rows.append(lbl_style.render(tr("Your Response:")))
         self.options_y_offset = len(rows)
 
         # Radio options
         def _fmt_opt(key: str, label: str, shortcut: str, active_color: str) -> str:
             selected = self.selected_response == key
             marker = "●" if selected else "○"
-            box = f"[{marker}] [{shortcut}] {label}"
+            box = f"[{marker}] [{shortcut}] {tr(label)}"
             if selected:
                 return Style().bold(True).foreground(active_color).render(box)
             return Style().foreground(self.theme.fg_muted).render(box)
@@ -3369,8 +3725,8 @@ class RSVPModal(Model):
         rows.append(f"  {opt_accept}    {opt_tentative}    {opt_decline}{options_focus_highlight}")
 
         rows.append("")
-        comment_focus_str = " (focused)" if self.focused_field == "comment" else ""
-        rows.append(lbl_style.render(f"Optional Note / Comment{comment_focus_str}:"))
+        comment_focus_str = f" ({tr('focused')})" if self.focused_field == "comment" else ""
+        rows.append(lbl_style.render(f"{tr('Optional Note / Comment')}{comment_focus_str}:"))
         self.comment_y_offset = len(rows)
         comment_box = self.comment_input.view()
         rows.append(f"  {comment_box}")
@@ -3380,26 +3736,28 @@ class RSVPModal(Model):
         send_focus = self.focused_field == "send_btn"
         cancel_focus = self.focused_field == "cancel_btn"
 
+        send_lbl = tr(" [ Send Response (Enter) ] ")
+        cancel_lbl = tr(" [ Cancel (Esc) ] ")
         send_btn = (
-            Style().bold(True).background(self.theme.accent_primary).foreground(self.theme.bg_primary).render(" [ Send Response (Enter) ] ")
+            Style().bold(True).background(self.theme.accent_primary).foreground(self.theme.bg_primary).render(send_lbl)
             if send_focus
-            else Style().background(self.theme.bg_highlight).foreground(self.theme.accent_primary).render(" [ Send Response (Enter) ] ")
+            else Style().background(self.theme.bg_highlight).foreground(self.theme.accent_primary).render(send_lbl)
         )
         cancel_btn = (
-            Style().bold(True).background(self.theme.bg_highlight).foreground(self.theme.fg_primary).render(" [ Cancel (Esc) ] ")
+            Style().bold(True).background(self.theme.bg_highlight).foreground(self.theme.fg_primary).render(cancel_lbl)
             if cancel_focus
-            else Style().background(self.theme.bg_highlight).foreground(self.theme.fg_muted).render(" [ Cancel (Esc) ] ")
+            else Style().background(self.theme.bg_highlight).foreground(self.theme.fg_muted).render(cancel_lbl)
         )
         rows.append(f"  {send_btn}   {cancel_btn}")
 
         rows.append("")
         rows.append(
             muted_style.render(
-                "  [1/2/3] Quick response  [Tab/Arrows] Navigate  [Enter] Send  [Esc] Cancel"
+                tr("  [1/2/3] Quick response  [Tab/Arrows] Navigate  [Enter] Send  [Esc] Cancel")
             )
         )
 
-        rendered = self.theme.modal_style(modal_w, "📅\ufe0f RSVP to Calendar Invitation").render("\n".join(rows))
+        rendered = self.theme.modal_style(modal_w, f"📅\ufe0f {tr('RSVP to Calendar Invitation')}").render("\n".join(rows))
         modal_lines = rendered.replace("\r\n", "\n").replace("\r", "\n").split("\n")
         self.last_modal_h = len(modal_lines)
         self.last_modal_w = max((string_width(l) for l in modal_lines), default=modal_w)
@@ -3534,15 +3892,15 @@ class MoveFolderModal(Model):
         filtered = self._filtered_folders()
 
         rows: list[str] = []
-        subj = (self.message.subject or "(no subject)").strip()
-        rows.append(Style().bold(True).foreground(self.theme.accent_primary).render(f"Email: {subj[:inner_w - 8]}"))
-        filter_display = f"Filter: {self.filter_text}_" if self.filter_text else "Filter: (type to filter...)"
+        subj = (self.message.subject or tr("(No Subject)")).strip()
+        rows.append(Style().bold(True).foreground(self.theme.accent_primary).render(f"{tr('Email')}: {subj[:inner_w - 8]}"))
+        filter_display = f"{tr('Filter')}: {self.filter_text}_" if self.filter_text else tr("Filter: (type to filter...)")
         rows.append(Style().foreground(self.theme.fg_muted).render(filter_display))
         rows.append("")
 
         self.items_y_offset = len(rows) + 1
         if not filtered:
-            rows.append(Style().italic(True).foreground(self.theme.fg_muted).render("  No matching folders found."))
+            rows.append(Style().italic(True).foreground(self.theme.fg_muted).render(tr("  No matching folders found.")))
         else:
             for idx, f in enumerate(filtered[:8]):
                 name_display = f.display_name or f.name
@@ -3562,14 +3920,14 @@ class MoveFolderModal(Model):
 
         rows.append("")
         self.buttons_y_offset = len(rows) + 1
-        move_btn = Style().bold(True).background(self.theme.accent_primary).foreground(self.theme.bg_primary).render(" [ Move (Enter) ] ")
-        cancel_btn = Style().background(self.theme.bg_highlight).foreground(self.theme.fg_muted).render(" [ Cancel (Esc) ] ")
+        move_btn = Style().bold(True).background(self.theme.accent_primary).foreground(self.theme.bg_primary).render(tr(" [ Move (Enter) ] "))
+        cancel_btn = Style().background(self.theme.bg_highlight).foreground(self.theme.fg_muted).render(tr(" [ Cancel (Esc) ] "))
         rows.append(f"  {move_btn}   {cancel_btn}")
 
         rows.append("")
-        rows.append(Style().foreground(self.theme.fg_muted).render("  [↑/↓/j/k] Navigate  [Type] Filter  [Enter] Move  [Esc] Cancel"))
+        rows.append(Style().foreground(self.theme.fg_muted).render(tr("  [↑/↓/j/k] Navigate  [Type] Filter  [Enter] Move  [Esc] Cancel")))
 
-        rendered = self.theme.modal_style(modal_w, "📁\ufe0f Move Message to Folder").render("\n".join(rows))
+        rendered = self.theme.modal_style(modal_w, f"📁\ufe0f {tr('Move Message to Folder')}").render("\n".join(rows))
         modal_lines = rendered.replace("\r\n", "\n").replace("\r", "\n").split("\n")
         self.last_modal_h = len(modal_lines)
         self.last_modal_w = max((string_width(l) for l in modal_lines), default=modal_w)
@@ -3631,32 +3989,32 @@ class UpdateNoticeModal(Model):
         inner_w = max(38, modal_w - 4)
 
         title_icon = "📦" if self.icon_mode == "emoji" else ("⊞" if self.icon_mode == "unicode" else "")
-        title_str = f"{title_icon} Update Available" if title_icon else "Update Available"
+        title_str = f"{title_icon} {tr('Update Available')}" if title_icon else tr("Update Available")
 
         rows = [
-            Style().bold(True).foreground(self.theme.accent_secondary).render("  A newer version of EspressoMail has been released!"),
+            Style().bold(True).foreground(self.theme.accent_secondary).render(tr("  A newer version of EspressoMail has been released!")),
             "",
-            f"  Installed version: {Style().bold(True).render(self.current_version)}",
-            f"  Latest release:    {Style().bold(True).foreground(self.theme.accent_primary).render(self.latest_version)}",
+            f"  {tr('Installed version:')} {Style().bold(True).render(self.current_version)}",
+            f"  {tr('Latest release:   ')} {Style().bold(True).foreground(self.theme.accent_primary).render(self.latest_version)}",
         ]
         if self.release_name and self.release_name.strip() not in (f"v{self.latest_version}", self.latest_version):
             clean_name = sanitize_terminal_text(self.release_name, multiline=False)
-            rows.append(f"  Release name:      {Style().foreground(self.theme.fg_primary).render(truncate_ansi(clean_name, inner_w - 20))}")
+            rows.append(f"  {tr('Release name:     ')} {Style().foreground(self.theme.fg_primary).render(truncate_ansi(clean_name, inner_w - 20))}")
 
         rows.append("")
-        rows.append("  Download & Changelog:")
+        rows.append(f"  {tr('Download & Changelog:')}")
         rows.append(f"  {Style().foreground(self.theme.accent_secondary).render(truncate_ansi(self.release_url, inner_w - 4))}")
 
         if self.release_body:
             body_lines = [l.strip() for l in self.release_body.splitlines() if l.strip() and not l.strip().startswith("#")]
             if body_lines:
                 rows.append("")
-                rows.append(Style().foreground(self.theme.fg_muted).render("  Highlights:"))
+                rows.append(Style().foreground(self.theme.fg_muted).render(f"  {tr('Highlights:')}"))
                 for bl in body_lines[:3]:
                     rows.append(f"    {Style().foreground(self.theme.fg_secondary).render(truncate_ansi(bl, inner_w - 6))}")
 
         rows.append("")
-        ok_btn = Style().bold(True).background(self.theme.accent_primary).foreground(self.theme.bg_primary).render(" [ OK (Enter / Esc) ] ")
+        ok_btn = Style().bold(True).background(self.theme.accent_primary).foreground(self.theme.bg_primary).render(tr(" [ OK (Enter / Esc) ] "))
         rows.append(f"  {ok_btn}")
         rows.append("")
 

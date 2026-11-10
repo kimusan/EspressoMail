@@ -342,6 +342,134 @@ class TestStorageAndSearch(unittest.TestCase):
         self.assertIn("↳", view_out)
         self.assertIn("rasterization", view_out.lower())
 
+    def test_search_modal_fixed_size_and_scrollable_list(self) -> None:
+        """Verify SearchModal maintains strictly fixed dimensions and supports smooth scrolling."""
+        from espresso import KeyMsg, MouseAction, MouseButton, MouseMsg
+        from espressomail.models.entities import EmailMessage
+        from espressomail.themes.engine import THEMES
+        from espressomail.ui.modals import SearchModal, SearchSelectMessageMsg
+
+        theme = THEMES["espresso"]
+
+        # Insert 30 test messages to ensure plenty of searchable items
+        for i in range(30):
+            msg = EmailMessage(
+                id=f"msg_scroll_test_{i:02d}",
+                account_id="acc_work",
+                folder="INBOX",
+                sender_email="team@example.com",
+                sender_name=f"Colleague {i}",
+                subject=f"Project sprint update item {i:02d}",
+                body_text=f"Detailed status report for workstream number {i:02d} with lots of text.",
+                date_iso=f"2026-11-{(i % 28) + 1:02d}T10:00:00Z",
+                snippet=f"Status report for workstream {i:02d}",
+            )
+            self.store.save_message(msg)
+
+        modal = SearchModal(self.store, theme, initial_query="sprint update")
+        self.assertGreaterEqual(len(modal.results), 20)
+
+        # 1. Verify fixed height across different states (80x24 terminal -> modal_h = 20)
+        view_default = modal.view(80, 24)
+        lines_default = view_default.split("\n")
+        self.assertEqual(len(lines_default), 20, "Modal height must be exactly 20 lines")
+
+        # Outer dimensions must remain fixed even with 0 results
+        modal.query_input.value = "nonexistentquerystringxyz123"
+        modal._refresh_results(reset_cursor=True)
+        self.assertEqual(len(modal.results), 0)
+        view_empty = modal.view(80, 24)
+        self.assertEqual(len(view_empty.split("\n")), 20, "Modal height must be exactly 20 lines for 0 results")
+        self.assertIn("No matching emails found", view_empty)
+
+        # Date picker open must also maintain fixed height
+        modal, _ = modal.update(KeyMsg("ctrl+d"))
+        self.assertTrue(modal.show_date_picker)
+        view_dp = modal.view(80, 24)
+        self.assertEqual(len(view_dp.split("\n")), 20, "Modal height must remain exactly 20 lines with DatePicker open")
+
+        # Close date picker
+        modal, _ = modal.update(KeyMsg("esc"))
+        self.assertFalse(modal.show_date_picker)
+
+        # 2. Reset query to have 30 matches
+        modal.query_input.value = "sprint update"
+        modal._refresh_results(reset_cursor=True)
+        self.assertEqual(modal.cursor, 0)
+        self.assertEqual(modal.scroll_offset, 0)
+        self.assertGreater(len(modal.results), modal.page_size)
+
+        # View rendering must display scrollbar thumb and track
+        view_matches = modal.view(80, 24)
+        self.assertEqual(len(view_matches.split("\n")), 20)
+        self.assertIn("█", view_matches, "Scrollbar thumb must be rendered")
+        self.assertIn("│", view_matches, "Scrollbar track must be rendered")
+        self.assertIn("Showing 1–", view_matches, "Footer must show scroll indicator")
+
+        # 3. Keyboard navigation & scrolling
+        # Press Down until scrolling triggers
+        initial_scroll = modal.scroll_offset
+        for _ in range(modal.page_size + 2):
+            modal, _ = modal.update(KeyMsg("down"))
+        self.assertGreater(modal.scroll_offset, initial_scroll, "Scroll offset must advance when cursor moves past page_size")
+        self.assertGreater(modal.cursor, 0)
+
+        # Press Page Down
+        cur_before_pgdn = modal.cursor
+        modal, _ = modal.update(KeyMsg("pagedown"))
+        self.assertGreater(modal.cursor, cur_before_pgdn)
+
+        # Press Ctrl+End to go to last item
+        modal, _ = modal.update(KeyMsg("ctrl+end"))
+        self.assertEqual(modal.cursor, len(modal.results) - 1)
+        self.assertEqual(modal.scroll_offset, len(modal.results) - modal.page_size)
+
+        # Press Ctrl+Home to return to top
+        modal, _ = modal.update(KeyMsg("ctrl+home"))
+        self.assertEqual(modal.cursor, 0)
+        self.assertEqual(modal.scroll_offset, 0)
+
+        # 4. Mouse wheel scrolling
+        modal, _ = modal.update(MouseMsg(0, 0, button=MouseButton.WHEEL_DOWN, action=MouseAction.PRESS))
+        self.assertEqual(modal.cursor, 1)
+
+        modal, _ = modal.update(MouseMsg(0, 0, button=MouseButton.WHEEL_UP, action=MouseAction.PRESS))
+        self.assertEqual(modal.cursor, 0)
+
+        # 5. Mouse click selection & opening
+        modal.view(80, 24)
+        self.assertIn(modal.cursor, modal.result_line_to_index.values())
+
+        # Find line of a non-cursor item in result_line_to_index
+        target_line = None
+        target_idx = None
+        for line_idx, res_idx in modal.result_line_to_index.items():
+            if res_idx != modal.cursor:
+                target_line = line_idx
+                target_idx = res_idx
+                break
+        self.assertIsNotNone(target_line)
+
+        # Absolute screen Y = pos_y + top_border(1) + top_padding(1) + line_idx = modal.last_pos_y + 2 + target_line
+        click_y = modal.last_pos_y + 2 + target_line
+        click_x = modal.last_pos_x + 5
+
+        # Single click selects item
+        modal, cmd = modal.update(MouseMsg(click_x, click_y, button=MouseButton.LEFT, action=MouseAction.PRESS))
+        self.assertIsNone(cmd)
+        self.assertEqual(modal.cursor, target_idx)
+
+        # Double click opens item
+        modal, cmd = modal.update(MouseMsg(click_x, click_y, button=MouseButton.LEFT, action=MouseAction.DOUBLE_CLICK))
+        self.assertIsNotNone(cmd)
+        selected_msg = cmd()
+        self.assertIsInstance(selected_msg, SearchSelectMessageMsg)
+        self.assertEqual(selected_msg.message.id, modal.results[target_idx].message.id)
+
+        # 6. Screen height adaptability
+        view_30 = modal.view(80, 30)
+        self.assertEqual(len(view_30.split("\n")), 24, "Modal height in 30-line terminal must be 24 lines")
+
 
 if __name__ == "__main__":
     unittest.main()
