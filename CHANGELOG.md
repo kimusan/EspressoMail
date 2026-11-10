@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-10
+
+
+> Release v0.4.0: Polyglot Baristas, Priority Roasts, and Flag Telemetry
+
+Fresh pull, hotter queue, zero `&APg-` ghosts. v0.4.0 teaches EspressoMail four languages, puts the folder you actually clicked at the front of the sync line, syncs read/star state both ways without hammering IMAP, and packs fresh `espressoTUI 1.4.0` beans.
+
+### Added
+- **External JSON Internationalization (i18n)**: Your terminal email client finally speaks more than fluent ASCII. Added external JSON locale catalogs (`en`, `da`, `de`, `es`) with automatic system locale detection, transparent English fallback for missing keys, catalog validation, user overrides in `~/.espressomail/locales/`, a Language switcher in Preferences, and translated UI, help, and plugin strings across the app.
+- **`espressoTUI 1.4.0` Beans & Ergonomics**:
+  - **Tabbed Preferences**: Adopted the new `Tabs` bean in Settings, fixed left-skewed tab click hit-testing so the full width of every tab actually works, and eliminated truncation on plugin setting labels (like DMARC's *"Always Show Auth Details"*).
+  - **Live Markdown Compose Preview**: Toggle rendered Markdown in `ComposeModal` with `F4` before unleashing raw asterisks on innocent recipients.
+  - **Interactive Search DatePicker & Highlighting**: Press `Ctrl+D` or `F3` inside `SearchModal` for an interactive `DatePicker` (`since:` / `before:` filtering), backed by `highlight_matches_ansi` match highlighting.
+  - **Single-Keystroke Clipboard Copy**: Added `copy_to_clipboard` bindings (`Y` / `Ctrl+Y`, plus `y` in the reader pane) so copying text no longer requires terminal mouse gymnastics.
+- **VIP Folder Sync Queue**: Entering a folder during an active sync—or pressing `Ctrl+R` / `r` on another folder—promotes it straight to the front of `sync_queue`. No more waiting behind ten years of `Archive` to read today's mail.
+
+### Changed
+- **Bidirectional `\Seen` & Lightweight Flag Telemetry**: Opening an unread mail (`Enter`, `Space`, `l`, `Right`) now pushes `\Seen` back to the IMAP server alongside batch read toggling (`u`). Background sync fetches compact `(UID FLAGS)` across all cached UIDs (even beyond `fetch_batch_size`) so mails read or starred on another device update locally without re-downloading `BODY.PEEK[]`.
+- **Fixed-Size Scrollable `SearchModal`**: Locked modal dimensions regardless of 0 hits, 100 hits, or an open `DatePicker`. Added an ANSI-styled scrollable results viewport (`█`/`│`), a `Showing X–Y of Z matches` counter, keyboard navigation (`Up`/`Down`/`PgUp`/`PgDn`/`Ctrl+Home`/`Ctrl+End`), mouse wheel scrolling, and click/double-click selection.
+- **Calmer Notifications & Toast Dispatch**: Excluded Sent, Drafts, Archive, Trash, Spam, Outbox, Templates, and self-sent messages from desktop notifications, and routed UI confirmations (like saved preferences) to non-blocking toasts instead of overwriting the status bar.
+
+### Fixed
+- **Human-Readable IMAP Folder Names**: Decoded Modified UTF-7, UTF-8, and CP1252 IMAP folder names so folders like `Inkøb` show up as `Inkøb` instead of eldritch `Ink&APg-b` sequences in footer sync progress and status texts.
+- **Release Tooling Environment Selection**: Updated `scripts/release.py` to select the right Python environment per task (`PIL` + `espresso` for tests; `build` + `setuptools` for packaging without `build/` directory shadowing).
 ## [0.3.0] - 2026-11-03
 
 
@@ -103,7 +127,8 @@ A massive shoutout to the Espresso TUI framework (espressoTUI) and The Elm Archi
 - Modals and Dialogs: Full-screen and modal overlays for Compose, Preferences, Account Setup & Editing, Attachment Downloader, and Exit Confirmation.
 - Packaging and CI/CD: Standalone single-binary executables (Linux x86_64 and Windows x86_64.exe), native Linux packages (Debian .deb, RPM, Arch Linux), PyPI publication, and automated release management.
 
-[Unreleased]: https://github.com/kimusan/EspressoMail/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/kimusan/EspressoMail/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/kimusan/EspressoMail/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kimusan/EspressoMail/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kimusan/EspressoMail/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/kimusan/EspressoMail/compare/v0.1.0...v0.1.1
