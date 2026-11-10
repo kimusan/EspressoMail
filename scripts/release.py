@@ -168,12 +168,22 @@ def check_tag_exists(tag: str) -> bool:
     return tag in res.stdout.split()
 
 
-def get_python_exe() -> str:
-    """Find a Python executable with PIL/Pillow and build dependencies installed."""
-    candidates = ["/usr/bin/python3", sys.executable, "python3"]
+def get_python_exe(
+    required_modules: tuple[str, ...] = ("PIL",),
+    cwd: Path | None = None,
+) -> str:
+    """Find a Python executable with all required_modules installed."""
+    candidates = [sys.executable, "/usr/bin/python3", "python3"]
+    import_stmt = f"import {', '.join(required_modules)}"
     for cand in candidates:
+        if not cand:
+            continue
         try:
-            res = subprocess.run([cand, "-c", "import PIL"], capture_output=True)
+            res = subprocess.run(
+                [cand, "-c", import_stmt],
+                capture_output=True,
+                cwd=cwd,
+            )
             if res.returncode == 0:
                 return cand
         except Exception:
@@ -184,11 +194,7 @@ def get_python_exe() -> str:
 def run_tests() -> None:
     """Run full test suite."""
     log("Running test suite...")
-    # Find scratch espresso if not in environment
     extra_paths = [str(REPO_ROOT / "src")]
-    scratch_espresso = Path("/home/kim/.gemini/antigravity/brain/72e763bc-c9c9-4823-82f6-6d58cd3e84ee/scratch/espresso/src")
-    if scratch_espresso.is_dir():
-        extra_paths.append(str(scratch_espresso))
 
     existing_pythonpath = os.environ.get("PYTHONPATH", "")
     if existing_pythonpath:
@@ -197,7 +203,7 @@ def run_tests() -> None:
     pythonpath_val = ":".join(extra_paths)
     env = {"PYTHONPATH": pythonpath_val}
 
-    py_exe = get_python_exe()
+    py_exe = get_python_exe(("PIL", "espresso", "espresso.utils"))
     test_cmd = [py_exe, "-m", "unittest", "discover", "-s", "tests", "-v"]
     run_cmd(test_cmd, env=env)
     log_success("All tests passed.")
@@ -206,7 +212,7 @@ def run_tests() -> None:
 def run_build_check() -> None:
     """Test building wheel and sdist to ensure package configuration is valid."""
     log("Verifying package build (sdist & wheel)...")
-    py_exe = get_python_exe()
+    py_exe = get_python_exe(("build", "setuptools"), cwd=Path("/tmp"))
     build_cmd = [py_exe, "-m", "build", "--no-isolation"]
     run_cmd(build_cmd)
     log_success("Package build verification succeeded.")
@@ -284,7 +290,9 @@ def update_changelog(
         if blocks:
             header_pattern = rf"(##\s*\[{re.escape(new_version)}\][^\n]*\n)"
             msg_block = "\n" + "\n\n".join(blocks) + "\n\n"
-            new_content = re.sub(header_pattern, rf"\1{msg_block}", content, count=1)
+            new_content = re.sub(
+                header_pattern, lambda m: m.group(1) + msg_block, content, count=1
+            )
             if not dry_run:
                 CHANGELOG_FILE.write_text(new_content, encoding="utf-8")
             return True
@@ -304,7 +312,7 @@ def update_changelog(
         f"## [{new_version}] - {today}\n"
         f"{msg_block}"
     )
-    new_content = re.sub(unreleased_pattern, replacement, content, count=1)
+    new_content = re.sub(unreleased_pattern, lambda _: replacement, content, count=1)
 
     # Update bottom comparison links if present
     repo_url = "https://github.com/kimusan/EspressoMail"
@@ -313,9 +321,10 @@ def update_changelog(
     new_version_link = f"[{new_version}]: {repo_url}/compare/v{prev_version}...v{new_version}"
 
     if re.search(unreleased_link_pattern, new_content):
+        link_block = f"{new_unreleased_link}\n{new_version_link}"
         new_content = re.sub(
             unreleased_link_pattern,
-            f"{new_unreleased_link}\n{new_version_link}",
+            lambda _: link_block,
             new_content,
             count=1,
         )
