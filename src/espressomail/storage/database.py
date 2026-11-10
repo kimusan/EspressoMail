@@ -877,6 +877,71 @@ class LocalStore:
                 return int(row["min_u"])
             return 0
 
+    def get_folder_uid_flags(
+        self, account_id: str, folder: str
+    ) -> dict[int, tuple[str, bool, bool, bool]]:
+        """Return {uid: (msg_id, is_read, is_starred, is_answered)} for cached UIDs in a folder."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, uid, is_read, is_starred, is_answered "
+                "FROM messages WHERE account_id = ? AND folder = ? AND uid > 0",
+                (account_id, folder),
+            ).fetchall()
+            return {
+                int(r["uid"]): (
+                    str(r["id"]),
+                    bool(r["is_read"]),
+                    bool(r["is_starred"]),
+                    bool(r["is_answered"]),
+                )
+                for r in rows
+            }
+
+    def sync_uid_flags(
+        self,
+        account_id: str,
+        folder: str,
+        remote_flags: Sequence[tuple[int, bool, bool, bool]],
+    ) -> int:
+        """Update local read/starred/answered flags from server UID flag states.
+
+        Returns the number of messages whose local flags changed.
+        """
+        if not remote_flags:
+            return 0
+        with self._lock:
+            local = {
+                int(r["uid"]): (
+                    bool(r["is_read"]),
+                    bool(r["is_starred"]),
+                    bool(r["is_answered"]),
+                )
+                for r in self._conn.execute(
+                    "SELECT uid, is_read, is_starred, is_answered "
+                    "FROM messages WHERE account_id = ? AND folder = ? AND uid > 0",
+                    (account_id, folder),
+                ).fetchall()
+            }
+            updates: list[tuple[int, int, int, str, str, int]] = []
+            for uid, is_read, is_starred, is_answered in remote_flags:
+                cur = local.get(uid)
+                if cur is None:
+                    continue
+                target = (bool(is_read), bool(is_starred), bool(is_answered))
+                if cur != target:
+                    updates.append(
+                        (int(target[0]), int(target[1]), int(target[2]), account_id, folder, uid)
+                    )
+            if not updates:
+                return 0
+            with self._conn:
+                self._conn.executemany(
+                    "UPDATE messages SET is_read = ?, is_starred = ?, is_answered = ? "
+                    "WHERE account_id = ? AND folder = ? AND uid = ?",
+                    updates,
+                )
+            return len(updates)
+
     # ------------------------------------------------------------------
     # Messages & Attachments CRUD
     # ------------------------------------------------------------------

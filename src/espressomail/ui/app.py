@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 logger = logging.getLogger("espressomail.app")
 
@@ -220,6 +220,7 @@ class SyncProgressMsg(Msg):
     folder_name: str = ""
     new_messages: int = 0
     newly_arrived_messages: tuple[EmailMessage, ...] | None = None
+    flags_updated: int = 0
     total_synced: int = 0
     total_folders: int = 0
     step_index: int = 0
@@ -418,6 +419,11 @@ class EspressoMailApp(Model):
         self.is_syncing: bool = False
         self.sync_progress_text: str = ""
         self._last_folder_sync: dict[tuple[str, str], float] = {}
+        self.sync_queue: list[tuple[str, str, str]] = []
+        self._sync_in_flight: tuple[str, str, str] | None = None
+        self._sync_prioritized: set[tuple[str, str, str]] = set()
+        self._sync_completed_steps: set[tuple[str, str, str]] = set()
+        self._sync_queue_active: bool = False
 
         # Command Palette (Ctrl+P)
         self.command_palette = self._build_command_palette()
@@ -1206,9 +1212,10 @@ class EspressoMailApp(Model):
                     )
                     return self, batch(*cmds) if cmds else None
                 if any(acc.imap_password for acc in self.store.list_accounts(enabled_only=True)):
-                    self.is_syncing = True
-                    self.sync_progress_text = "Starting sync..."
-                    self.status_message = "⟳ Synchronizing IMAP accounts in background..."
+                    self._start_full_sync_state(
+                        progress_text="Starting sync...",
+                        status_text="⟳ Synchronizing IMAP accounts in background...",
+                    )
                     cmds.append(self._sync_accounts_cmd)
                 return self, batch(*cmds) if cmds else None
             self.splash, cmd = self.splash.update(msg)
@@ -1234,10 +1241,9 @@ class EspressoMailApp(Model):
                             sieve_client.close()
                         except Exception:
                             pass
-                    self.is_syncing = True
-                    self.sync_progress_text = "Starting sync..."
-                    self.status_message = (
-                        f"✔ Verified and configured account {msg.account.email}! ⟳ Synchronizing in background..."
+                    self._start_full_sync_state(
+                        progress_text="Starting sync...",
+                        status_text=f"✔ Verified and configured account {msg.account.email}! ⟳ Synchronizing in background...",
                     )
                     self.refresh_data()
                     return self, self._sync_accounts_cmd
@@ -1367,9 +1373,10 @@ class EspressoMailApp(Model):
                     )
                     return self, None
                 if msg.trigger_sync:
-                    self.is_syncing = True
-                    self.sync_progress_text = "Starting sync..."
-                    self.status_message = "⟳ Synchronizing IMAP accounts in background..."
+                    self._start_full_sync_state(
+                        progress_text="Starting sync...",
+                        status_text="⟳ Synchronizing IMAP accounts in background...",
+                    )
                     return self, self._sync_accounts_cmd
                 return self, None
             if isinstance(msg, MoveFolderSubmittedMsg):
@@ -1429,6 +1436,14 @@ class EspressoMailApp(Model):
 
         # 7. Background Sync progress & steps
         if isinstance(msg, SyncProgressMsg):
+            if msg.action == "synced_folder" and msg.account_id and msg.folder_name:
+                done_key = (msg.account_id, "sync_folder", msg.folder_name)
+                self._sync_completed_steps.add(done_key)
+                self._sync_prioritized.discard(done_key)
+                self._last_folder_sync[(msg.account_id, msg.folder_name)] = time.time()
+                self.sync_queue = [s for s in self.sync_queue if s != done_key]
+            self._sync_in_flight = None
+
             # Trigger desktop notification ONLY for newly arrived messages in incoming/notifiable folders
             if (
                 self.desktop_notifications
@@ -1461,7 +1476,7 @@ class EspressoMailApp(Model):
 
             # Only rebuild message rows and reader viewport if this synced folder affects the current view
             folder_affects_view = False
-            if msg.new_messages > 0 or msg.newly_arrived_messages:
+            if msg.new_messages > 0 or msg.newly_arrived_messages or msg.flags_updated > 0:
                 if self.active_account_id == "*":
                     if self.active_folder == "INBOX" and msg.folder_name.upper() == "INBOX":
                         folder_affects_view = True
@@ -1484,7 +1499,13 @@ class EspressoMailApp(Model):
 
             self._rebuild_folder_rows()
 
-            if msg.is_done or not msg.remaining_steps:
+            if msg.action == "discovered_folders" or not self._sync_queue_active:
+                self._merge_discovered_into_queue(msg.remaining_steps)
+                if self.sync_queue:
+                    self._sync_queue_active = True
+
+            if not self.sync_queue:
+                self._reset_sync_queue()
                 self.is_syncing = False
                 self.sync_progress_text = ""
                 err_suffix = f" (Warnings: {'; '.join(msg.errors)})" if msg.errors else ""
@@ -1498,34 +1519,29 @@ class EspressoMailApp(Model):
                     return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
                 return self, None
 
-            self.is_syncing = True
-            next_step = msg.remaining_steps[0]
-            remaining = msg.remaining_steps[1:]
-            folder_display = format_folder_display(next_step[2]) or tr("folders")
-            syncing_label = tr("Syncing")
-            self.sync_progress_text = f"{syncing_label} {msg.account_name} / {folder_display}"
-            step_idx = msg.step_index + 1
-            self.status_message = (
-                f"⟳ [{step_idx}/{msg.total_steps}] {syncing_label} {msg.account_name} "
-                f"({folder_display})..."
-            )
-            cmd = self._make_sync_step_cmd(
-                next_step=next_step,
-                remaining_steps=remaining,
+            return self._schedule_next_sync_step(
                 total_synced=msg.total_synced,
                 total_folders=msg.total_folders,
                 errors=msg.errors,
-                step_index=step_idx,
-                total_steps=msg.total_steps,
+                step_index=msg.step_index + 1,
+                total_steps=max(msg.total_steps, msg.step_index + 1 + len(self.sync_queue)),
+                fallback_account_name=msg.account_name,
             )
-            return self, cmd
 
         # 7b. Background Sync completion
         if isinstance(msg, SyncCompletedMsg):
-            self.is_syncing = False
-            self.sync_progress_text = ""
+            self._sync_in_flight = None
             self.status_message = msg.summary
             self.refresh_data()
+            if self.sync_queue:
+                return self._schedule_next_sync_step(
+                    total_synced=msg.synced_count,
+                    step_index=1,
+                    total_steps=len(self.sync_queue),
+                )
+            self._reset_sync_queue()
+            self.is_syncing = False
+            self.sync_progress_text = ""
             if self.auto_sync_interval > 0:
                 return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
             return self, None
@@ -1540,30 +1556,49 @@ class EspressoMailApp(Model):
                 and not self.show_onboarding
                 and any(acc.imap_password for acc in self.store.list_accounts(enabled_only=True))
             ):
-                self.is_syncing = True
-                self.sync_progress_text = "Background auto-sync..."
-                self.status_message = "⟳ Background auto-sync started..."
+                self._start_full_sync_state(
+                    progress_text="Background auto-sync...",
+                    status_text="⟳ Background auto-sync started...",
+                )
                 return self, self._sync_accounts_cmd
             return self, tick(float(self.auto_sync_interval), AutoSyncTickMsg())
 
         # Single folder sync completion
         if isinstance(msg, FolderSyncedMsg):
-            self.is_syncing = False
-            self.sync_progress_text = ""
+            done_key = (msg.account_id, "sync_folder", msg.folder)
+            self._sync_completed_steps.add(done_key)
+            self._sync_prioritized.discard(done_key)
+            self._sync_in_flight = None
+            self._last_folder_sync[(msg.account_id, msg.folder)] = time.time()
+            self.sync_queue = [s for s in self.sync_queue if s != done_key]
             self.status_message = msg.message
             lvl = ToastLevel.WARNING if msg.message.startswith(("⚠", "Could not")) else ToastLevel.SUCCESS
             self._notify_toast(msg.message, level=lvl)
             self.refresh_data()
+            if self.sync_queue:
+                return self._schedule_next_sync_step(
+                    total_synced=msg.synced_count,
+                    total_folders=1 + len(self.sync_queue),
+                    step_index=2,
+                    total_steps=1 + len(self.sync_queue),
+                )
+            self._reset_sync_queue()
+            self.is_syncing = False
+            self.sync_progress_text = ""
             return self, None
 
         # 7b. More messages fetched
         if isinstance(msg, MoreMessagesFetchedMsg):
-            self.is_syncing = False
-            self.sync_progress_text = ""
+            self._sync_in_flight = None
             self.status_message = msg.message
             lvl = ToastLevel.WARNING if msg.message.startswith(("⚠", "Could not")) else ToastLevel.INFO
             self._notify_toast(msg.message, level=lvl)
             self.refresh_data()
+            if self.sync_queue:
+                return self._schedule_next_sync_step(step_index=1, total_steps=len(self.sync_queue))
+            self._reset_sync_queue()
+            self.is_syncing = False
+            self.sync_progress_text = ""
             return self, None
 
         # 7d. Real-time IMAP PUSH event (RFC 2177 IDLE)
@@ -1818,11 +1853,9 @@ class EspressoMailApp(Model):
                 m = self.selected_message
                 if m and m.is_draft:
                     return self._open_draft_in_composer(m)
-                if m and not m.is_read:
-                    self.store.mark_read(m.id, True)
-                    self.refresh_data()
+                cmd = self._on_message_selection_changed(mark_read=True)
                 self.focused_pane = "reader"
-                return self, None
+                return self, cmd
             return self, None
 
         if self.focused_pane == "reader":
@@ -2088,6 +2121,12 @@ class EspressoMailApp(Model):
                     else " / ".join(split_folder_hierarchy(row.folder_name))
                 )
                 self.status_message = f"Opened {path_label} ({len(self.message_rows)} items)"
+                if self.is_syncing:
+                    if self._prioritize_folder_sync(row.account_id, row.folder_name):
+                        self.status_message = (
+                            f"Opened {path_label} ({len(self.message_rows)} items) — prioritized in sync queue"
+                        )
+                    return cmd
                 if row.account_id != "*" and not row.subscribed:
                     acc = self.store.get_account(row.account_id)
                     if acc and acc.imap_password:
@@ -2152,6 +2191,7 @@ class EspressoMailApp(Model):
 
         def _runner() -> Msg:
             try:
+                ok = False
                 with IMAPClient(acc, timeout=15.0) as client:
                     ok = client.set_flag(folder, uid, flag, enable)
                     if not ok:
@@ -2162,7 +2202,8 @@ class EspressoMailApp(Model):
                     uid=uid,
                     flag=flag,
                     enabled=enable,
-                    success=True,
+                    success=bool(ok),
+                    error="" if ok else f"Server rejected flag update ({flag})",
                 )
             except Exception as exc:
                 logger.error(
@@ -2622,16 +2663,31 @@ class EspressoMailApp(Model):
             return self, None
 
         if action_id == "toggle_read":
-            m = self.selected_message
-            if m:
-                new_read = not m.is_read
-                self.store.mark_read(m.id, new_read)
-                m.is_read = new_read
+            if self.selected_message_ids:
+                targets = [self.store.get_message(mid) for mid in list(self.selected_message_ids)]
+                valid_targets = [t for t in targets if t is not None]
+                self.selected_message_ids.clear()
+            else:
+                m = self.selected_message
+                valid_targets = [m] if m else []
+
+            if valid_targets:
+                new_read = any(not t.is_read for t in valid_targets)
+                cmds: list[Cmd] = []
+                for t in valid_targets:
+                    self.store.mark_read(t.id, new_read)
+                    t.is_read = new_read
+                    cmd = self._make_flag_sync_cmd(t.account_id, t.folder, t.uid, r"\Seen", new_read)
+                    if cmd is not None:
+                        cmds.append(cmd)
                 self.refresh_data()
-                self.status_message = "Marked as read." if new_read else "Marked as unread."
+                if len(valid_targets) == 1:
+                    self.status_message = "Marked as read." if new_read else "Marked as unread."
+                else:
+                    state_txt = "read" if new_read else "unread"
+                    self.status_message = f"Marked {len(valid_targets)} messages as {state_txt}."
                 self._notify_toast(self.status_message, level=ToastLevel.INFO)
-                cmd = self._make_flag_sync_cmd(m.account_id, m.folder, m.uid, r"\Seen", new_read)
-                return self, cmd
+                return self, batch(*cmds) if cmds else None
             return self, None
 
         if action_id == "archive_msg":
@@ -2790,9 +2846,10 @@ class EspressoMailApp(Model):
                 self.status_message = "⟳ Synchronization already in progress in background."
                 self._notify_toast("Synchronization already in progress", level=ToastLevel.INFO)
                 return self, None
-            self.is_syncing = True
-            self.sync_progress_text = "Starting sync..."
-            self.status_message = "⟳ Synchronizing IMAP accounts in background..."
+            self._start_full_sync_state(
+                progress_text="Starting sync...",
+                status_text="⟳ Synchronizing IMAP accounts in background...",
+            )
             return self, self._sync_accounts_cmd
 
         if action_id == "toggle_auto_sync":
@@ -3106,6 +3163,140 @@ class EspressoMailApp(Model):
             message=f"No older messages found on server for {folder_display}.{err_suffix}",
         )
 
+    def _reset_sync_queue(self) -> None:
+        self.sync_queue.clear()
+        self._sync_in_flight = None
+        self._sync_prioritized.clear()
+        self._sync_completed_steps.clear()
+        self._sync_queue_active = False
+
+    def _start_full_sync_state(self, progress_text: str, status_text: str) -> None:
+        self._reset_sync_queue()
+        self.is_syncing = True
+        self._sync_queue_active = True
+        self.sync_progress_text = progress_text
+        self.status_message = status_text
+        if self.active_account_id != "*" and self.active_folder:
+            acc = self.store.get_account(self.active_account_id)
+            if acc and acc.imap_password:
+                self._sync_prioritized.add((self.active_account_id, "sync_folder", self.active_folder))
+
+    def _merge_discovered_into_queue(self, steps: Sequence[tuple[str, str, str]]) -> None:
+        existing_set = set(self.sync_queue)
+        prioritized_front: list[tuple[str, str, str]] = []
+        regular_tail: list[tuple[str, str, str]] = []
+
+        for s in self.sync_queue:
+            if s in self._sync_prioritized:
+                prioritized_front.append(s)
+            else:
+                regular_tail.append(s)
+
+        for s in steps:
+            if s in existing_set or s == self._sync_in_flight or s in self._sync_completed_steps:
+                continue
+            existing_set.add(s)
+            if s in self._sync_prioritized:
+                prioritized_front.append(s)
+            else:
+                regular_tail.append(s)
+
+        self.sync_queue = prioritized_front + regular_tail
+
+    def _resolve_folder_sync_steps(
+        self, account_id: str, folder_name: str
+    ) -> list[tuple[str, str, str]]:
+        raw_folder = folder_name or "INBOX"
+        if account_id == "*":
+            accounts = [a for a in self.store.list_accounts(enabled_only=True) if a.imap_password]
+            target = "INBOX" if raw_folder in ("INBOX", "All Unread", "") else raw_folder
+            return [(acc.id, "sync_folder", target) for acc in accounts]
+        acc = self.store.get_account(account_id)
+        if acc and acc.imap_password and raw_folder not in ("All Unread", "Starred"):
+            return [(acc.id, "sync_folder", raw_folder)]
+        return []
+
+    def _is_step_in_flight(self, account_id: str, folder_name: str) -> bool:
+        if self._sync_in_flight is None:
+            return False
+        targets = self._resolve_folder_sync_steps(account_id, folder_name)
+        if not targets:
+            return False
+        if account_id == "*" and self._sync_in_flight[0] == "*":
+            return self._sync_in_flight[2] == targets[0][2]
+        return self._sync_in_flight in targets
+
+    def _prioritize_folder_sync(
+        self,
+        account_id: str,
+        folder_name: str,
+        force_resync: bool = False,
+    ) -> bool:
+        """Promote entered folder(s) to the front of self.sync_queue."""
+        targets = self._resolve_folder_sync_steps(account_id, folder_name)
+        if not targets:
+            return False
+
+        changed = False
+        for idx, step in enumerate(targets):
+            if step == self._sync_in_flight:
+                continue
+            if force_resync:
+                self._sync_completed_steps.discard(step)
+            elif step in self._sync_completed_steps:
+                continue
+            self._sync_prioritized.add(step)
+            if step in self.sync_queue:
+                cur_pos = self.sync_queue.index(step)
+                if cur_pos != idx:
+                    self.sync_queue.remove(step)
+                    self.sync_queue.insert(min(idx, len(self.sync_queue)), step)
+                    changed = True
+            else:
+                self.sync_queue.insert(min(idx, len(self.sync_queue)), step)
+                changed = True
+        return changed
+
+    def _schedule_next_sync_step(
+        self,
+        *,
+        total_synced: int = 0,
+        total_folders: int = 0,
+        errors: tuple[str, ...] = (),
+        step_index: int = 1,
+        total_steps: int | None = None,
+        fallback_account_name: str = "",
+    ) -> tuple[EspressoMailApp, Cmd | None]:
+        if not self.sync_queue:
+            return self, None
+        next_step = self.sync_queue.pop(0)
+        self._sync_in_flight = next_step
+        self._sync_prioritized.discard(next_step)
+        self._sync_queue_active = True
+        self.is_syncing = True
+
+        acc_id, _, raw_folder = next_step
+        acc = self.store.get_account(acc_id)
+        acc_label = acc.name if acc else (fallback_account_name or acc_id)
+        folder_display = format_folder_display(raw_folder) or tr("folders")
+        syncing_label = tr("Syncing")
+        eff_total = total_steps if total_steps is not None else (step_index + len(self.sync_queue))
+        self.sync_progress_text = f"{syncing_label} {acc_label} / {folder_display}"
+        self.status_message = (
+            f"⟳ [{step_index}/{eff_total}] {syncing_label} {acc_label} "
+            f"({folder_display})..."
+        )
+        cmd = self._make_sync_step_cmd(
+            next_step=next_step,
+            remaining_steps=tuple(self.sync_queue),
+            total_synced=total_synced,
+            total_folders=total_folders,
+            errors=errors,
+            step_index=step_index,
+            total_steps=eff_total,
+        )
+        return self, cmd
+
     def _make_sync_step_cmd(
         self,
         next_step: tuple[str, str, str],
@@ -3169,9 +3360,15 @@ class EspressoMailApp(Model):
                             else:
                                 cand_folders = self.store.list_folders(acc.id)
                             selectable = [f for f in cand_folders if f.selectable and f.subscribed]
+                            active_pref = (
+                                self.active_folder
+                                if self.active_account_id in (acc.id, "*") and self.active_folder
+                                else ""
+                            )
                             sorted_folders = sorted(
                                 selectable,
                                 key=lambda f: (
+                                    0 if active_pref and f.name == active_pref else 1,
                                     0 if f.name.upper() == "INBOX" else 1,
                                     len(f.path_parts),
                                     f.name.lower(),
@@ -3201,6 +3398,7 @@ class EspressoMailApp(Model):
 
                 elif action == "sync_folder":
                     newly_arrived: tuple[EmailMessage, ...] = ()
+                    flags_updated = 0
                     try:
                         client = IMAPClient(acc, timeout=20.0)
                         client.connect()
@@ -3211,6 +3409,7 @@ class EspressoMailApp(Model):
                                 limit=self.fetch_batch_size,
                             )
                             newly_arrived = tuple(getattr(client, "last_newly_arrived", []))
+                            flags_updated = int(getattr(client, "last_flags_updated", 0) or 0)
                         finally:
                             client.disconnect()
                     except Exception as exc:
@@ -3223,6 +3422,7 @@ class EspressoMailApp(Model):
                         folder_name=folder_name,
                         new_messages=step_synced,
                         newly_arrived_messages=newly_arrived,
+                        flags_updated=flags_updated,
                         total_synced=total_synced + step_synced,
                         total_folders=total_folders,
                         step_index=step_index,
@@ -3364,10 +3564,6 @@ class EspressoMailApp(Model):
         return _push_runner
 
     def _sync_current_folder(self) -> tuple[EspressoMailApp, Cmd | None]:
-        if self.is_syncing:
-            self.status_message = "⟳ Synchronization already in progress in background."
-            return self, None
-
         target_acc_id = self.active_account_id
         target_folder = self.active_folder or "INBOX"
         target_label = format_folder_display(target_folder) or target_folder
@@ -3393,11 +3589,24 @@ class EspressoMailApp(Model):
             folder_to_sync = target_folder
             folder_display = target_label
 
+        if self.is_syncing:
+            if self._is_step_in_flight(target_acc_id, folder_to_sync):
+                self.status_message = "⟳ Synchronization already in progress in background."
+                return self, None
+            if accounts and self._prioritize_folder_sync(target_acc_id, folder_to_sync, force_resync=True):
+                self.status_message = f"⟳ Prioritized '{folder_display}' next in sync queue..."
+                self._notify_toast(self.status_message, level=ToastLevel.INFO)
+                return self, None
+            self.status_message = "⟳ Synchronization already in progress in background."
+            return self, None
+
         if not accounts:
             self.status_message = "⚠ Cannot sync: account has no configured IMAP password."
             return self, None
 
+        self._reset_sync_queue()
         self.is_syncing = True
+        self._sync_in_flight = (target_acc_id, "sync_folder", folder_to_sync)
         self.sync_progress_text = f"{tr('Syncing')} {folder_display}..."
         self.status_message = f"⟳ Synchronizing '{folder_display}' in background..."
 

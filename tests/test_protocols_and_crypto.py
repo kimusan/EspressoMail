@@ -354,6 +354,100 @@ class TestProtocolsAndCrypto(unittest.TestCase):
         self.assertIn("UID 1:99", searched_criteria)
         self.assertEqual(msgs[-1].subject, "Older Email 99")
 
+    def test_sync_single_folder_updates_remote_flags_across_cached_uids(self) -> None:
+        """Verify previously synced emails (even outside recent limit) reflect Seen/Flagged changes made on another client."""
+        from espressomail.models.entities import EmailMessage
+        from espressomail.protocols.imap_client import IMAPClient
+        from espressomail.storage import LocalStore
+
+        store = LocalStore(":memory:")
+        store.save_account(self.account)
+
+        # Pre-populate 3 already-synced messages (UIDs 10, 50, 90), all initially unread/unstarred
+        for u in (10, 50, 90):
+            store.save_message(
+                EmailMessage(
+                    id=f"{self.account.id}:INBOX:{u}",
+                    account_id=self.account.id,
+                    folder="INBOX",
+                    uid=u,
+                    subject=f"Previously synced {u}",
+                    sender_email="alice@example.com",
+                    body_text=f"Cached body {u}",
+                    is_read=False,
+                    is_starred=False,
+                )
+            )
+
+        raw_91 = (
+            b"From: Bob <bob@example.com>\r\n"
+            b"To: Kim <kim@schulz.dk>\r\n"
+            b"Subject: New UID 91\r\n"
+            b"Date: Mon, 12 Jan 2026 11:00:00 +0000\r\n"
+            b"Message-ID: <new-91@example.com>\r\n"
+            b"\r\n"
+            b"Fresh incoming body 91\r\n"
+        )
+        fetch_calls: list[tuple[str, str]] = []
+
+        class FlagTrackingIMAP:
+            def select(self, mailbox: str, readonly: bool = True) -> tuple[str, list[bytes]]:
+                return ("OK", [b"4"])
+
+            def uid(self, command: str, *args: str) -> tuple[str, list[object]]:
+                if command == "SEARCH":
+                    return ("OK", [b"10 50 90 91"])
+                if command == "FETCH":
+                    uid_set, spec = args[0], args[1]
+                    fetch_calls.append((uid_set, spec))
+                    if spec == "(UID FLAGS)":
+                        # Another client read UID 10 (outside limit=2!) and starred UID 50
+                        return (
+                            "OK",
+                            [
+                                b"1 (UID 10 FLAGS (\\Seen))",
+                                b"2 (UID 50 FLAGS (\\Flagged))",
+                                b"3 (UID 90 FLAGS ())",
+                            ],
+                        )
+                    if spec == "(UID FLAGS BODY.PEEK[])":
+                        return (
+                            "OK",
+                            [
+                                (
+                                    b"4 (UID 91 FLAGS () BODY[] {" + str(len(raw_91)).encode() + b"}",
+                                    raw_91,
+                                ),
+                                b")",
+                            ],
+                        )
+                return ("OK", [])
+
+        client = IMAPClient(self.account)
+        client._conn = FlagTrackingIMAP()  # type: ignore[assignment]
+
+        # Sync with limit=2 (covers only UIDs 90 and 91 for new messages, yet UIDs 10 and 50 must still update!)
+        new_cnt = client.sync_single_folder(store, folder_name="INBOX", limit=2)
+        self.assertEqual(new_cnt, 1)
+        self.assertEqual(client.last_flags_updated, 2)
+
+        # Lightweight FLAGS query ran for cached UIDs; BODY.PEEK[] ran ONLY for brand-new UID 91
+        self.assertIn(("10,50,90", "(UID FLAGS)"), fetch_calls)
+        self.assertIn(("91", "(UID FLAGS BODY.PEEK[])"), fetch_calls)
+        body_fetches = [u for u, spec in fetch_calls if "BODY.PEEK" in spec]
+        self.assertEqual(body_fetches, ["91"])
+
+        m10 = store.get_message(f"{self.account.id}:INBOX:10")
+        m50 = store.get_message(f"{self.account.id}:INBOX:50")
+        m90 = store.get_message(f"{self.account.id}:INBOX:90")
+        m91 = store.get_message(f"{self.account.id}:INBOX:91")
+        assert m10 is not None and m50 is not None and m90 is not None and m91 is not None
+        self.assertTrue(m10.is_read)
+        self.assertTrue(m50.is_starred)
+        self.assertFalse(m90.is_read)
+        self.assertEqual(m91.subject, "New UID 91")
+        store.close()
+
     def test_manage_sieve_client_protocol_and_sync(self) -> None:
         """Verify ManageSieve client list_scripts, get_script, put_script, and LocalStore sync."""
         commands_sent: list[bytes] = []

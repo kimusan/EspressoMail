@@ -4447,6 +4447,167 @@ class TestUIAndApp(unittest.TestCase):
         utf8_footer = strip_ansi(app._render_status_bar())
         self.assertIn("Inkøb", utf8_footer)
 
+    def test_per_folder_sync_queue_prioritization_and_flag_sync(self) -> None:
+        """Verify entering a folder prioritizes it first in sync_queue and read flags sync bidirectionally."""
+        from espressomail.ui.app import FlagSyncedMsg, FolderSyncedMsg, SyncProgressMsg
+
+        populate_test_store(self.store)
+        acc = self.store.list_accounts()[0]
+        self.store.sync_remote_folders(
+            acc.id,
+            [
+                Folder(id=f"{acc.id}:INBOX", account_id=acc.id, name="INBOX", display_name="Inbox", folder_type=FolderType.INBOX),
+                Folder(id=f"{acc.id}:Archive", account_id=acc.id, name="Archive", display_name="Archive", folder_type=FolderType.ARCHIVE),
+                Folder(id=f"{acc.id}:Sent", account_id=acc.id, name="Sent", display_name="Sent", folder_type=FolderType.SENT),
+                Folder(id=f"{acc.id}:Work", account_id=acc.id, name="Work", display_name="Work", folder_type=FolderType.CUSTOM),
+            ],
+        )
+
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.desktop_notifications = False
+
+        # 1. Start full background sync: INBOX runs first, Archive/Sent/Work are queued
+        app, sync_cmd = app.update(KeyMsg("S"))
+        self.assertTrue(app.is_syncing)
+
+        step1_msg = SyncProgressMsg(
+            account_id=acc.id,
+            account_name=acc.name,
+            action="discovered_folders",
+            folder_name="",
+            step_index=1,
+            total_steps=5,
+            remaining_steps=(
+                (acc.id, "sync_folder", "INBOX"),
+                (acc.id, "sync_folder", "Archive"),
+                (acc.id, "sync_folder", "Sent"),
+                (acc.id, "sync_folder", "Work"),
+            ),
+        )
+        app, next_cmd = app.update(step1_msg)
+        self.assertEqual(app._sync_in_flight, (acc.id, "sync_folder", "INBOX"))
+        self.assertEqual(
+            app.sync_queue,
+            [
+                (acc.id, "sync_folder", "Archive"),
+                (acc.id, "sync_folder", "Sent"),
+                (acc.id, "sync_folder", "Work"),
+            ],
+        )
+
+        # 2. While INBOX is syncing in background, user enters "Work" in folder pane -> Work jumps to front of queue!
+        for idx, row in enumerate(app.folder_rows):
+            if row.account_id == acc.id and row.folder_name == "Work":
+                app.folder_cursor = idx
+                break
+        app._activate_selected_folder()
+        self.assertEqual(app.sync_queue[0], (acc.id, "sync_folder", "Work"))
+        self.assertEqual(len(app.sync_queue), 3)
+        self.assertIn("prioritized in sync queue", app.status_message)
+
+        # When INBOX step completes, Work MUST run immediately next before Archive and Sent
+        inbox_done = SyncProgressMsg(
+            account_id=acc.id,
+            account_name=acc.name,
+            action="synced_folder",
+            folder_name="INBOX",
+            new_messages=0,
+            step_index=2,
+            total_steps=5,
+            remaining_steps=(),
+        )
+        app, next_cmd = app.update(inbox_done)
+        self.assertEqual(app._sync_in_flight, (acc.id, "sync_folder", "Work"))
+        self.assertIn("Work", app.sync_progress_text)
+        self.assertEqual(
+            app.sync_queue,
+            [
+                (acc.id, "sync_folder", "Archive"),
+                (acc.id, "sync_folder", "Sent"),
+            ],
+        )
+
+        # 3. Also test entering a folder while 'discover' hasn't returned yet -> kept first without duplication
+        app._reset_sync_queue()
+        app._start_full_sync_state("Starting sync...", "Synchronizing...")
+        app._prioritize_folder_sync(acc.id, "Work")
+        app, _ = app.update(step1_msg)
+        self.assertEqual(app._sync_in_flight, (acc.id, "sync_folder", "Work"))
+        self.assertEqual(app.sync_queue.count((acc.id, "sync_folder", "Work")), 0)
+
+        # 4. Single-folder sync (Ctrl+R) followed by entering another folder chains via FolderSyncedMsg
+        app._reset_sync_queue()
+        app.is_syncing = False
+        app.focused_pane = "messages"
+        app.active_account_id = acc.id
+        app.active_folder = "INBOX"
+        app, cmd_inbox = app.update(KeyMsg("ctrl+r"))
+        self.assertIsNotNone(cmd_inbox)
+        self.assertEqual(app._sync_in_flight, (acc.id, "sync_folder", "INBOX"))
+
+        # Switch to Sent and trigger Ctrl+R while INBOX is still in-flight -> queued next
+        app.active_folder = "Sent"
+        app, cmd_queued = app.update(KeyMsg("ctrl+r"))
+        self.assertIsNone(cmd_queued)
+        self.assertIn("Prioritized", app.status_message)
+        self.assertEqual(app.sync_queue[0], (acc.id, "sync_folder", "Sent"))
+
+        app, chained_cmd = app.update(
+            FolderSyncedMsg(account_id=acc.id, folder="INBOX", synced_count=1, message="OK")
+        )
+        self.assertTrue(app.is_syncing)
+        self.assertIsNotNone(chained_cmd)
+        self.assertEqual(app._sync_in_flight, (acc.id, "sync_folder", "Sent"))
+
+        # 5. Opening an unread email via Enter in messages pane syncs \Seen back to server
+        app._reset_sync_queue()
+        app.is_syncing = False
+        app.active_account_id = acc.id
+        app.active_folder = "INBOX"
+        app.focused_pane = "messages"
+        app.refresh_data()
+        target_msg = app.selected_message
+        assert target_msg is not None
+        self.store.mark_read(target_msg.id, False)
+        self.store._conn.execute("UPDATE messages SET uid = 777 WHERE id = ?", (target_msg.id,))
+        self.store._conn.commit()
+        app.refresh_data()
+        app.message_cursor = next(
+            i for i, r in enumerate(app.message_rows) if r.message.id == target_msg.id
+        )
+        self.assertFalse(app.selected_message.is_read)  # type: ignore[union-attr]
+
+        with mock.patch("espressomail.ui.app.IMAPClient") as mock_imap_cls:
+            mock_client = mock_imap_cls.return_value.__enter__.return_value
+            mock_client.set_flag.return_value = True
+            app, flag_cmd = app.update(KeyMsg("enter"))
+            self.assertEqual(app.focused_pane, "reader")
+            self.assertIsNotNone(flag_cmd)
+            flag_res = flag_cmd()  # type: ignore[misc]
+            self.assertIsInstance(flag_res, FlagSyncedMsg)
+            self.assertTrue(flag_res.success)  # type: ignore[union-attr]
+            mock_client.set_flag.assert_called_once_with("INBOX", 777, r"\Seen", True)
+
+        # 6. Flag-only remote sync update (flags_updated > 0, new_messages == 0) refreshes visible message rows
+        self.store.mark_read(target_msg.id, False)
+        app.refresh_data()
+        old_rows_ref = app.message_rows
+        self.store.mark_read(target_msg.id, True)  # Simulate sync_uid_flags updating DB
+        app, _ = app.update(
+            SyncProgressMsg(
+                account_id=acc.id,
+                account_name=acc.name,
+                action="synced_folder",
+                folder_name="INBOX",
+                new_messages=0,
+                flags_updated=1,
+                remaining_steps=(),
+            )
+        )
+        self.assertIsNot(app.message_rows, old_rows_ref)
+        refreshed = next(r.message for r in app.message_rows if r.message.id == target_msg.id)
+        self.assertTrue(refreshed.is_read)
+
 
 if __name__ == "__main__":
     unittest.main()

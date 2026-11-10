@@ -439,6 +439,8 @@ class IMAPClient:
         self.account = account
         self.timeout = timeout
         self._conn: imaplib.IMAP4 | None = None
+        self.last_newly_arrived: list[EmailMessage] = []
+        self.last_flags_updated: int = 0
 
     def __enter__(self) -> IMAPClient:
         self.connect()
@@ -732,6 +734,7 @@ class IMAPClient:
         folder: str = "INBOX",
         limit: int = 50,
         before_uid: int | None = None,
+        skip_uids: set[int] | None = None,
     ) -> list[EmailMessage]:
         """Fetch and parse messages from an IMAP mailbox folder, optionally older than before_uid."""
         if self._conn is None:
@@ -769,6 +772,11 @@ class IMAPClient:
             return []
 
         recent_uids = list(reversed(candidate_uids[-limit:]))
+        if skip_uids:
+            recent_uids = [u for u in recent_uids if u not in skip_uids]
+        if not recent_uids:
+            return []
+
         messages: list[EmailMessage] = []
 
         # Fetch in batches of 10 UIDs to minimize round-trip latency while keeping memory bounded
@@ -800,6 +808,54 @@ class IMAPClient:
                 )
 
         return messages
+
+    def fetch_flags_for_uids(
+        self, folder: str, uids: Sequence[int]
+    ) -> list[tuple[int, bool, bool, bool]]:
+        """Fetch lightweight (UID, is_read, is_starred, is_answered) states without downloading bodies."""
+        if self._conn is None or not uids:
+            return []
+        if not self._select_mailbox(folder, readonly=True):
+            return []
+
+        clean_uids = sorted({int(u) for u in uids if int(u) > 0})
+        if not clean_uids:
+            return []
+
+        parsed_flags: list[tuple[int, bool, bool, bool]] = []
+        batch_size = 200
+        for i in range(0, len(clean_uids), batch_size):
+            batch = clean_uids[i : i + batch_size]
+            uid_set = ",".join(str(u) for u in batch)
+            try:
+                f_status, f_data = self._conn.uid("FETCH", uid_set, "(UID FLAGS)")
+            except Exception:
+                continue
+            if f_status != "OK" or not f_data:
+                continue
+            for item in f_data:
+                raw_meta = item[0] if isinstance(item, tuple) and item else item
+                if isinstance(raw_meta, (bytes, bytearray)):
+                    line = _decode_imap_wire_bytes(bytes(raw_meta))
+                elif isinstance(raw_meta, str):
+                    line = raw_meta
+                else:
+                    continue
+                uid_m = re.search(r"UID\s+(\d+)", line, re.IGNORECASE)
+                flag_m = re.search(r"FLAGS\s*\(([^)]*)\)", line, re.IGNORECASE)
+                if not uid_m or not flag_m:
+                    continue
+                uid_val = int(uid_m.group(1))
+                tokens = {tok.strip().upper() for tok in flag_m.group(1).split() if tok.strip()}
+                parsed_flags.append(
+                    (
+                        uid_val,
+                        r"\SEEN" in tokens,
+                        r"\FLAGGED" in tokens,
+                        r"\ANSWERED" in tokens,
+                    )
+                )
+        return parsed_flags
 
     def _extract_messages_from_fetch(
         self,
@@ -986,10 +1042,11 @@ class IMAPClient:
         count = 0
         for folder_name in target_folders:
             try:
-                fetched = self.fetch_recent_messages(folder=folder_name, limit=limit_per_folder)
-                for msg in fetched:
-                    store.save_message(msg)
-                    count += 1
+                count += self.sync_single_folder(
+                    store=store,
+                    folder_name=folder_name,
+                    limit=limit_per_folder,
+                )
             except Exception:
                 continue
 
@@ -1002,11 +1059,31 @@ class IMAPClient:
         folder_name: str,
         limit: int = 50,
     ) -> int:
-        """Fetch and persist recent messages for a single folder into LocalStore."""
+        """Fetch new messages and sync server flags for previously cached UIDs into LocalStore."""
         count = 0
-        self.last_newly_arrived: list[EmailMessage] = []
+        self.last_newly_arrived = []
+        self.last_flags_updated = 0
         try:
-            fetched = self.fetch_recent_messages(folder=folder_name, limit=limit)
+            local_uid_flags: dict[int, tuple[str, bool, bool, bool]] = {}
+            if self._conn is not None and hasattr(store, "get_folder_uid_flags"):
+                local_uid_flags = store.get_folder_uid_flags(self.account.id, folder_name)
+                if local_uid_flags:
+                    remote_flags = self.fetch_flags_for_uids(
+                        folder_name, list(local_uid_flags.keys())
+                    )
+                    if remote_flags and hasattr(store, "sync_uid_flags"):
+                        self.last_flags_updated = store.sync_uid_flags(
+                            self.account.id, folder_name, remote_flags
+                        )
+
+            if local_uid_flags and self._conn is not None:
+                fetched = self.fetch_recent_messages(
+                    folder=folder_name,
+                    limit=limit,
+                    skip_uids=set(local_uid_flags.keys()),
+                )
+            else:
+                fetched = self.fetch_recent_messages(folder=folder_name, limit=limit)
             if fetched:
                 if hasattr(store, "save_messages_with_new"):
                     _, new_msgs = store.save_messages_with_new(fetched)
@@ -1022,6 +1099,7 @@ class IMAPClient:
             store.refresh_folder_counts(self.account.id, folder_name)
         except Exception:
             self.last_newly_arrived = []
+            self.last_flags_updated = 0
         return count
 
     def search_uids_remote(
