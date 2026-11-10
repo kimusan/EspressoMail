@@ -4371,6 +4371,82 @@ class TestUIAndApp(unittest.TestCase):
             detected = normalize_language("auto")
             self.assertEqual(detected, "da")
 
+    def test_footer_sync_text_decodes_utf8_and_mutf7_folder_names(self) -> None:
+        """Verify footer sync progress and status texts decode non-ASCII IMAP folders (e.g. Inkøb)."""
+        from espresso.crema import strip_ansi
+        from espressomail.ui.app import SyncProgressMsg
+
+        populate_test_store(self.store)
+        acc = self.store.list_accounts()[0]
+        self.store.sync_remote_folders(
+            acc.id,
+            [
+                Folder(
+                    id=f"{acc.id}:Ink&APg-b",
+                    account_id=acc.id,
+                    name="Ink&APg-b",
+                    display_name="Inkøb",
+                    folder_type=FolderType.CUSTOM,
+                ),
+            ],
+        )
+
+        app = EspressoMailApp(store=self.store, show_splash=False)
+        app.width = 100
+        app.height = 24
+        app.desktop_notifications = False
+
+        # 1. Step-by-step SyncProgressMsg with Modified UTF-7 folder in remaining_steps
+        step_msg = SyncProgressMsg(
+            account_id=acc.id,
+            account_name="Work",
+            action="discovered_folders",
+            folder_name="",
+            new_messages=0,
+            total_synced=0,
+            total_folders=1,
+            step_index=1,
+            total_steps=2,
+            remaining_steps=((acc.id, "sync_folder", "Ink&APg-b"),),
+        )
+        app, _ = app.update(step_msg)
+        self.assertIn("Inkøb", app.sync_progress_text)
+        self.assertNotIn("Ink&APg-b", app.sync_progress_text)
+        self.assertIn("Inkøb", app.status_message)
+        self.assertNotIn("Ink&APg-b", app.status_message)
+
+        footer = strip_ansi(app._render_status_bar())
+        self.assertIn("Inkøb", footer)
+        self.assertNotIn("Ink&APg-b", footer)
+
+        # 2. Single-folder sync when focused in Messages pane with raw IMAP name active
+        app.is_syncing = False
+        app.sync_progress_text = ""
+        app.focused_pane = "messages"
+        app.active_account_id = acc.id
+        app.active_folder = "Ink&APg-b"
+
+        idle_footer = strip_ansi(app._render_status_bar())
+        self.assertIn("Inkøb", idle_footer)
+        self.assertNotIn("Ink&APg-b", idle_footer)
+
+        app, cmd = app._sync_current_folder()
+        self.assertIsNotNone(cmd)
+        self.assertIn("Inkøb", app.sync_progress_text)
+        self.assertNotIn("Ink&APg-b", app.sync_progress_text)
+        active_footer = strip_ansi(app._render_status_bar())
+        self.assertIn("Inkøb", active_footer)
+        self.assertNotIn("Ink&APg-b", active_footer)
+
+        # 3. Direct UTF-8 folder name in Unified view also renders cleanly in footer
+        app.active_account_id = "*"
+        app.active_folder = "Inkøb"
+        app.is_syncing = False
+        app.sync_progress_text = "Syncing Work / Inkøb"
+        app.is_syncing = True
+        utf8_footer = strip_ansi(app._render_status_bar())
+        self.assertIn("Inkøb", utf8_footer)
+
 
 if __name__ == "__main__":
     unittest.main()

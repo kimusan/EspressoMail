@@ -13,6 +13,7 @@ from espressomail.models.entities import (
     EmailMessage,
     FolderType,
     classify_folder_type,
+    format_folder_display,
     split_folder_hierarchy,
 )
 
@@ -254,7 +255,8 @@ def notify_new_messages(
         clean_snippet = " ".join(m.snippet.split()) if m.snippet else ""
         body = f"{m.subject}\n{clean_snippet}".strip() if clean_snippet else m.subject
     else:
-        title = f"{len(eligible)} New Emails in {folder_name}{acc_label}"
+        folder_display = format_folder_display(folder_name) or folder_name
+        title = f"{len(eligible)} New Emails in {folder_display}{acc_label}"
         senders = [m.sender_short for m in eligible[:3]]
         sample_senders = ", ".join(senders)
         if len(eligible) > 3:

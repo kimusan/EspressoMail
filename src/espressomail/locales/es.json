@@ -445,6 +445,8 @@
     "           since:<YYYY-MM-DD>  before:<YYYY-MM-DD>  att:<file>  has:attachment  is:unread": "           since:<AAAA-MM-DD>  before:<AAAA-MM-DD>  att:<archivo>  has:attachment  is:unread",
     "Showing {start}–{end} of {total} matches": "Mostrando {start}–{end} de {total} coincidencias",
     "[Ctrl+D] Date Filter   [Ctrl+R] Remote IMAP   [↑/↓/PgUp/PgDn] Navigate   [Enter] Open   [Esc] Close": "[Ctrl+D] Filtro de fecha   [Ctrl+R] IMAP remoto   [↑/↓/PgUp/PgDn] Navegar   [Enter] Abrir   [Esc] Cerrar",
-    "[Ctrl+D] Date   [Ctrl+R] Remote   [↑/↓/PgUp/PgDn] Scroll   [Enter] Open   [Esc] Close": "[Ctrl+D] Fecha   [Ctrl+R] Remoto   [↑/↓/PgUp/PgDn] Desplazar   [Enter] Abrir   [Esc] Cerrar"
+    "[Ctrl+D] Date   [Ctrl+R] Remote   [↑/↓/PgUp/PgDn] Scroll   [Enter] Open   [Esc] Close": "[Ctrl+D] Fecha   [Ctrl+R] Remoto   [↑/↓/PgUp/PgDn] Desplazar   [Enter] Abrir   [Esc] Cerrar",
+    "Syncing": "Sincronizando",
+    "folders": "carpetas"
   }
 }

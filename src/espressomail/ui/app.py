@@ -68,6 +68,7 @@ from espressomail.models.entities import (
     FolderType,
     PGPStatus,
     classify_folder_type,
+    format_folder_display,
     split_folder_hierarchy,
 )
 from espressomail.notifications import (
@@ -1500,11 +1501,13 @@ class EspressoMailApp(Model):
             self.is_syncing = True
             next_step = msg.remaining_steps[0]
             remaining = msg.remaining_steps[1:]
-            self.sync_progress_text = f"Syncing {msg.account_name} / {next_step[2] or 'folders'}"
+            folder_display = format_folder_display(next_step[2]) or tr("folders")
+            syncing_label = tr("Syncing")
+            self.sync_progress_text = f"{syncing_label} {msg.account_name} / {folder_display}"
             step_idx = msg.step_index + 1
             self.status_message = (
-                f"⟳ [{step_idx}/{msg.total_steps}] Syncing {msg.account_name} "
-                f"({next_step[2] or 'folders'})..."
+                f"⟳ [{step_idx}/{msg.total_steps}] {syncing_label} {msg.account_name} "
+                f"({folder_display})..."
             )
             cmd = self._make_sync_step_cmd(
                 next_step=next_step,
@@ -2038,6 +2041,8 @@ class EspressoMailApp(Model):
         return None
 
     def _make_single_folder_sync_cmd(self, acc: AccountConfig, folder_name: str) -> Cmd:
+        folder_display = format_folder_display(folder_name) or folder_name
+
         def _runner() -> Msg:
             try:
                 client = IMAPClient(acc, timeout=20.0)
@@ -2052,7 +2057,7 @@ class EspressoMailApp(Model):
                         account_id=acc.id,
                         folder=folder_name,
                         fetched_count=count,
-                        message=f"Synced folder {folder_name} ({count} new messages)",
+                        message=f"Synced folder {folder_display} ({count} new messages)",
                     )
                 finally:
                     client.disconnect()
@@ -2061,7 +2066,7 @@ class EspressoMailApp(Model):
                     account_id=acc.id,
                     folder=folder_name,
                     fetched_count=0,
-                    message=f"Could not sync {folder_name}: {exc}",
+                    message=f"Could not sync {folder_display}: {exc}",
                 )
 
         return _runner
@@ -2408,7 +2413,7 @@ class EspressoMailApp(Model):
             self.message_cursor = 0
             self.message_scroll = 0
             cmd = self._on_message_selection_changed(mark_read=False)
-            folder_label = self.active_folder or "current folder"
+            folder_label = format_folder_display(self.active_folder) or "current folder"
             if self.unread_only_filter:
                 self.status_message = f"Showing unread only in '{folder_label}' ({len(self.message_rows)} unread — Ctrl+U to clear)"
             else:
@@ -3093,11 +3098,12 @@ class EspressoMailApp(Model):
                 fetched_count=total_fetched,
                 message=f"✔ Fetched {total_fetched} older message(s) from server.{err_suffix}",
             )
+        folder_display = format_folder_display(target_folder) or target_folder
         return MoreMessagesFetchedMsg(
             account_id=self.active_account_id,
             folder=self.active_folder,
             fetched_count=0,
-            message=f"No older messages found on server for {target_folder}.{err_suffix}",
+            message=f"No older messages found on server for {folder_display}.{err_suffix}",
         )
 
     def _make_sync_step_cmd(
@@ -3208,7 +3214,7 @@ class EspressoMailApp(Model):
                         finally:
                             client.disconnect()
                     except Exception as exc:
-                        new_errors.append(f"{acc.email} [{folder_name}]: {exc}")
+                        new_errors.append(f"{acc.email} [{format_folder_display(folder_name) or folder_name}]: {exc}")
 
                     return SyncProgressMsg(
                         account_id=acc.id,
@@ -3364,19 +3370,23 @@ class EspressoMailApp(Model):
 
         target_acc_id = self.active_account_id
         target_folder = self.active_folder or "INBOX"
-        target_label = target_folder
+        target_label = format_folder_display(target_folder) or target_folder
 
         if self.focused_pane == "folders" and 0 <= self.folder_cursor < len(self.folder_rows):
             row = self.folder_rows[self.folder_cursor]
             if row.selectable_mailbox:
                 target_acc_id = row.account_id
                 target_folder = row.folder_name
-                target_label = row.label
+                target_label = row.label or format_folder_display(target_folder) or target_folder
 
         if target_acc_id == "*":
             accounts = [a for a in self.store.list_accounts(enabled_only=True) if a.imap_password]
             folder_to_sync = "INBOX" if target_folder in ("INBOX", "All Unread", "") else target_folder
-            folder_display = "Unified Inbox" if folder_to_sync == "INBOX" else folder_to_sync
+            folder_display = (
+                tr("Unified Inbox")
+                if folder_to_sync == "INBOX"
+                else (format_folder_display(folder_to_sync) or folder_to_sync)
+            )
         else:
             acc = self.store.get_account(target_acc_id)
             accounts = [acc] if acc and acc.imap_password else []
@@ -3388,7 +3398,7 @@ class EspressoMailApp(Model):
             return self, None
 
         self.is_syncing = True
-        self.sync_progress_text = f"Syncing {folder_display}..."
+        self.sync_progress_text = f"{tr('Syncing')} {folder_display}..."
         self.status_message = f"⟳ Synchronizing '{folder_display}' in background..."
 
         def _runner() -> Msg:
@@ -3840,11 +3850,7 @@ class EspressoMailApp(Model):
                 )
 
         folder_label = tr("Unified") if self.active_account_id == "*" else self.active_account_id
-        folder_path = (
-            self.active_folder
-            if self.active_account_id == "*"
-            else " / ".join(split_folder_hierarchy(self.active_folder))
-        )
+        folder_path = format_folder_display(self.active_folder) or self.active_folder
         filter_badge = tr(" [UNREAD ONLY]") if self.unread_only_filter else ""
         if self.icon_mode == "emoji":
             pane_title = f"✉️ {folder_path} ({folder_label}){filter_badge}"
@@ -3933,11 +3939,7 @@ class EspressoMailApp(Model):
             folder_ctx = (
                 tr("Unified Inbox")
                 if self.active_account_id == "*" and self.active_folder == "INBOX"
-                else (
-                    self.active_folder
-                    if self.active_account_id == "*"
-                    else " / ".join(split_folder_hierarchy(self.active_folder))
-                )
+                else (format_folder_display(self.active_folder) or self.active_folder)
             )
             clean_ctx = sanitize_terminal_text(folder_ctx, multiline=False)
             left_sections.append(

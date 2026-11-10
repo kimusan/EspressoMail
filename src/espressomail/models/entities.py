@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import codecs
+import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -62,8 +62,14 @@ def decode_imap_utf7(name: str) -> str:
                 b64_part = name[i + 1 : end].replace(",", "/")
                 pad = (4 - len(b64_part) % 4) % 4
                 try:
-                    raw = codecs.decode((b64_part + ("=" * pad)).encode("ascii"), "base64")
-                    out.append(raw.decode("utf-16-be", errors="replace"))
+                    raw = base64.b64decode(
+                        (b64_part + ("=" * pad)).encode("ascii"),
+                        validate=True,
+                    )
+                    if len(raw) >= 2 and len(raw) % 2 == 0:
+                        out.append(raw.decode("utf-16-be"))
+                    else:
+                        out.append(name[i : end + 1])
                 except Exception:
                     out.append(name[i : end + 1])
             i = end + 1
@@ -104,6 +110,17 @@ def split_folder_hierarchy(raw_name: str, delimiter: str = "") -> list[str]:
         return ["INBOX"]
 
     return parts
+
+
+def format_folder_display(raw_name: str, delimiter: str = "") -> str:
+    """Format an IMAP mailbox name (mUTF-7 or UTF-8) into readable hierarchical Unicode text."""
+    raw = (raw_name or "").strip()
+    if not raw:
+        return ""
+    parts = split_folder_hierarchy(raw, delimiter=delimiter)
+    if parts:
+        return " / ".join(parts)
+    return decode_imap_utf7(raw)
 
 
 def classify_folder_type(parts: Sequence[str], flags: str = "") -> FolderType:

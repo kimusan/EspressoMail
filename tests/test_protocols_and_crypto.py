@@ -206,11 +206,16 @@ class TestProtocolsAndCrypto(unittest.TestCase):
         )
         from espressomail.storage import LocalStore
 
-        # 1. Modified UTF-7 decoding
-        self.assertEqual(decode_imap_utf7("Entw&APw-rfe"), "Entwürfe")
-        self.assertEqual(decode_imap_utf7("Coffee & Tea"), "Coffee & Tea")
+        # 1. Modified UTF-7 decoding & folder hierarchy formatting
+        from espressomail.models.entities import format_folder_display
 
-        # 2. Various IMAP LIST response formats (NIL delimiter, INBOX. prefix, spaces)
+        self.assertEqual(decode_imap_utf7("Entw&APw-rfe"), "Entwürfe")
+        self.assertEqual(decode_imap_utf7("Ink&APg-b"), "Inkøb")
+        self.assertEqual(decode_imap_utf7("Coffee & Tea"), "Coffee & Tea")
+        self.assertEqual(format_folder_display("INBOX.Ink&APg-b"), "Inkøb")
+        self.assertEqual(format_folder_display("Arkiv/2026/Ink&APg-b"), "Arkiv / 2026 / Inkøb")
+
+        # 2. Various IMAP LIST response formats (NIL delimiter, INBOX. prefix, spaces, UTF-8/CP1252)
         self.assertEqual(
             parse_imap_list_response(b'(\\HasNoChildren) NIL INBOX'),
             ("\\HasNoChildren", "/", "INBOX"),
@@ -222,6 +227,18 @@ class TestProtocolsAndCrypto(unittest.TestCase):
         self.assertEqual(
             parse_imap_list_response(b'(\\HasNoChildren \\Trash) "/" "[Gmail]/Trash"'),
             ("\\HasNoChildren \\Trash", "/", "[Gmail]/Trash"),
+        )
+        self.assertEqual(
+            parse_imap_list_response(b'(\\HasNoChildren) "/" "Ink\xc3\xb8b"'),
+            ("\\HasNoChildren", "/", "Inkøb"),
+        )
+        self.assertEqual(
+            parse_imap_list_response(b'(\\HasNoChildren) "/" "Ink\xf8b"'),
+            ("\\HasNoChildren", "/", "Inkøb"),
+        )
+        self.assertEqual(
+            parse_imap_list_response((b'(\\HasNoChildren) "/" {6}', b"Ink\xc3\xb8b")),
+            ("\\HasNoChildren", "/", "Inkøb"),
         )
 
         # 3. Full IMAPClient.sync_to_store against a simulated IMAP4 connection

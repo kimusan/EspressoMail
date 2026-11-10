@@ -445,6 +445,8 @@
     "           since:<YYYY-MM-DD>  before:<YYYY-MM-DD>  att:<file>  has:attachment  is:unread": "           since:<ÅÅÅÅ-MM-DD>  before:<ÅÅÅÅ-MM-DD>  att:<fil>  has:attachment  is:unread",
     "Showing {start}–{end} of {total} matches": "Viser {start}–{end} af {total} fundne",
     "[Ctrl+D] Date Filter   [Ctrl+R] Remote IMAP   [↑/↓/PgUp/PgDn] Navigate   [Enter] Open   [Esc] Close": "[Ctrl+D] Datofilter   [Ctrl+R] Fjern-IMAP   [↑/↓/PgUp/PgDn] Naviger   [Enter] Åbn   [Esc] Luk",
-    "[Ctrl+D] Date   [Ctrl+R] Remote   [↑/↓/PgUp/PgDn] Scroll   [Enter] Open   [Esc] Close": "[Ctrl+D] Dato   [Ctrl+R] Fjern   [↑/↓/PgUp/PgDn] Rul   [Enter] Åbn   [Esc] Luk"
+    "[Ctrl+D] Date   [Ctrl+R] Remote   [↑/↓/PgUp/PgDn] Scroll   [Enter] Open   [Esc] Close": "[Ctrl+D] Dato   [Ctrl+R] Fjern   [↑/↓/PgUp/PgDn] Rul   [Enter] Åbn   [Esc] Luk",
+    "Syncing": "Synkroniserer",
+    "folders": "mapper"
   }
 }

@@ -380,13 +380,25 @@ def parse_rfc5322_bytes(
     )
 
 
+def _decode_imap_wire_bytes(raw: bytes) -> str:
+    """Decode raw IMAP wire bytes preferring UTF-8 with CP1252/Latin-1 fallback."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
+
+
 def parse_imap_list_response(item: bytes | tuple[Any, ...]) -> tuple[str, str, str] | None:
     """Parse a single IMAP LIST response line into (flags, delimiter, mailbox_name)."""
     if isinstance(item, tuple):
         if len(item) >= 2 and isinstance(item[0], bytes) and isinstance(item[1], bytes):
-            header_line = item[0].decode("utf-8", errors="replace")
-            literal_name = item[1].decode("utf-8", errors="replace")
-            m_lit = re.match(r'^\s*\((?P<flags>[^)]*)\)\s+(?P<delim>"[^"]*"|NIL)', header_line, re.IGNORECASE)
+            header_line = _decode_imap_wire_bytes(item[0])
+            literal_name = _decode_imap_wire_bytes(item[1])
+            m_lit = re.match(
+                r'^\s*(?:\*\s+(?:LIST|LSUB)\s+)?\((?P<flags>[^)]*)\)\s+(?P<delim>"[^"]*"|NIL)',
+                header_line,
+                re.IGNORECASE,
+            )
             if m_lit:
                 delim = m_lit.group("delim").strip('"')
                 if delim.upper() == "NIL":
@@ -397,7 +409,7 @@ def parse_imap_list_response(item: bytes | tuple[Any, ...]) -> tuple[str, str, s
     if not isinstance(item, bytes):
         return None
 
-    line = item.decode("utf-8", errors="replace").strip()
+    line = _decode_imap_wire_bytes(item).strip()
     if not line:
         return None
 
@@ -608,6 +620,13 @@ class IMAPClient:
                 status, _ = self._conn.select(candidate, readonly=readonly)
                 if status == "OK":
                     return True
+            except UnicodeEncodeError:
+                try:
+                    status, _ = self._conn.select(candidate.encode("utf-8"), readonly=readonly)  # type: ignore[arg-type]
+                    if status == "OK":
+                        return True
+                except Exception:
+                    continue
             except Exception:
                 continue
         return False
